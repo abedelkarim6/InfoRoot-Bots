@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Manager V2</title>
+    <link rel="stylesheet" href="/static/css/modern_v2.css">
+    <link rel="stylesheet" href="/static/css/auto-save.css">
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1>🤖 Bot Manager</h1>
+            <p class="version">v2.1</p>
+        </div>
+        
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-page="system">
+                <span class="icon">🔌</span>
+                <span>System</span>
+            </a>
+            <a href="#" class="nav-item" data-page="collections">
+                <span class="icon">📦</span>
+                <span>Collections</span>
+                <span class="badge" id="collections-count">0</span>
+            </a>
+            <a href="#" class="nav-item" data-page="bots">
+                <span class="icon">🤖</span>
+                <span>Bots</span>
+                <span class="badge" id="bots-count">0</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="system-status">
+                <div class="status-indicator" id="system-status"></div>
+                <span id="status-text">System Online</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- System Page (Replaces Dashboard) -->
+        <div id="system-page" class="page active">
+            <header class="page-header">
+                <div>
+                    <h2>System Overview</h2>
+                    <p class="subtitle">Master control and bot monitoring</p>
+                </div>
+                <button class="btn btn-primary" onclick="showPage('bots')">
+                    <span>➕</span> Add New Bot
+                </button>
+            </header>
+
+            <div class="system-control-card">
+                <div class="system-control-header">
+                    <h3>🔌 Master System Control</h3>
+                    <label class="toggle-switch toggle-large">
+                        <input type="checkbox" id="system-toggle" onchange="toggleSystem(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="text-muted mt-2" id="system-status-text">
+                    Loading...
+                </p>
+            </div>
+
+            <div class="stats-grid mt-4">
+                <div class="stat-card">
+                    <div class="stat-icon">🤖</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-bots">0</div>
+                        <div class="stat-label">Total Bots</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">✅</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="active-bots">0</div>
+                        <div class="stat-label">Active Bots</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📦</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-collections">0</div>
+                        <div class="stat-label">Collections</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📝</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-topics">0</div>
+                        <div class="stat-label">Total Topics</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 class="section-title mt-4">📊 All Bots</h3>
+            <div id="system-bots-list">
+                <!-- Bot detail cards rendered here -->
+            </div>
+        </div>
+
+        <!-- Collections Page -->
+        <div id="collections-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Collections</h2>
+                    <p class="subtitle">Manage channel collections</p>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn btn-secondary" onclick="refreshAdminChannels()">
+                        <span>🔄</span> Refresh Channels
+                    </button>
+                    <button class="btn btn-secondary" onclick="verifyAndAddChannel()">
+                        <span>➕</span> Add Channel
+                    </button>
+                    <button class="btn btn-primary" onclick="showAddCollectionModal()">
+                        <span>➕</span> Add Collection
+                    </button>
+                </div>
+            </header>
+
+            <div id="collections-container">
+                <!-- Collections rendered here -->
+            </div>
+        </div>
+
+        <!-- Bots Page -->
+        <div id="bots-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Bot Management</h2>
+                    <p class="subtitle">Configure and manage your bots</p>
+                </div>
+            </header>
+
+            <!-- CREATE BOT SECTION AT TOP -->
+            <div class="create-bot-card">
+                <h3>➕ Create New Bot</h3>
+                <div class="create-bot-form">
+                    <input type="text" id="new-bot-name" placeholder="Bot name (e.g., News Bot, Tech Alerts)" class="input">
+                    <button class="btn btn-primary" onclick="createNewBot()">Create Bot</button>
+                </div>
+            </div>
+
+            <!-- EXISTING BOTS SECTION -->
+            <h3 class="section-title mt-4">Your Bots</h3>
+            <div id="bots-container">
+                <!-- Bot configuration cards rendered here -->
+            </div>
+        </div>
+    </main>
+
+    <!-- Scripts -->
+    <script src="/static/js/auto-save-manager.js"></script>
+    <script src="/static/js/modern_v2.js"></script>
+</body>
+</html>
