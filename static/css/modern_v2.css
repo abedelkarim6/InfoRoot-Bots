@@ -449,7 +449,8 @@ body {
     font-size: 14px;
 }
 
-.collapsible-section.open .collapsible-toggle {
+.collapsible-section.open > * .collapsible-toggle,
+.collapsible-section.open > .collapsible-toggle {
     transform: rotate(180deg);
     color: var(--accent-primary);
 }
@@ -460,7 +461,7 @@ body {
     transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.collapsible-section.open .collapsible-content {
+.collapsible-section.open > .collapsible-content {
     max-height: 8000px;
 }
 
@@ -545,16 +546,15 @@ body {
     border-radius: var(--radius-lg);
     padding: 0;
     margin-bottom: 24px;  /* More spacing */
-    overflow: hidden;
 }
 
-.category-box.collapsible-section .collapsible-content {
+.category-box.collapsible-section > .collapsible-content {
     max-height: 0;
     overflow: hidden;
     transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.category-box.collapsible-section.open .collapsible-content {
+.category-box.collapsible-section.open > .collapsible-content {
     max-height: 5000px;
 }
 
@@ -621,7 +621,6 @@ body {
     border-radius: var(--radius-md);
     padding: 0;
     margin-bottom: 16px;
-    overflow: hidden;
     transition: var(--transition);
 }
 
