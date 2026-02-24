@@ -149,14 +149,13 @@ def stop_bot_subprocess(app_state, bot_lock):
         return True
 
 # ==================== Categorizer ====================
-def categorizer(text, bot_name):
+def categorizer(text, bot_name, db=None):
     """
     Match message text against topics' keywords for a specific bot.
-    Returns: (matched_topics, matched_categories, matched_keywords)
+    Keywords are read from the database when db is provided; falls back
+    to config.yaml otherwise.
 
-    matched_topics: list of topic names that matched
-    matched_categories: list of category names that matched
-    matched_keywords: list of keywords found in text
+    Returns: (matched_topics, matched_categories, matched_keywords)
     """
     config = load_config()
 
@@ -164,7 +163,7 @@ def categorizer(text, bot_name):
     found_categories = []
     found_keywords = []
 
-    # Get bot config
+    # Get bot config (still needed for category/topic structure and enabled flags)
     bots = config.get('bots', {})
     if bot_name not in bots:
         return None, None, None
@@ -182,14 +181,18 @@ def categorizer(text, bot_name):
             if not topic_data.get('enabled', True):
                 continue
 
-            keywords = topic_data.get('keywords', [])
+            # Keywords source: DB when available, config as fallback
+            if db is not None:
+                keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
+            else:
+                keywords = topic_data.get('keywords', [])
+
             topic_matched = False
 
             for kw in keywords:
-                if not kw:  # Skip empty keywords
+                if not kw:
                     continue
                 try:
-                    # Try regex word boundary match
                     if re.search(rf'\b{re.escape(kw)}\b', text, re.IGNORECASE):
                         if topic_name not in found_topics:
                             found_topics.append(topic_name)
@@ -197,7 +200,6 @@ def categorizer(text, bot_name):
                         if kw not in found_keywords:
                             found_keywords.append(kw)
                 except re.error:
-                    # Fallback to simple contains
                     if kw.lower() in text.lower():
                         if topic_name not in found_topics:
                             found_topics.append(topic_name)
@@ -205,11 +207,9 @@ def categorizer(text, bot_name):
                         if kw not in found_keywords:
                             found_keywords.append(kw)
 
-            # If topic matched, add its category
             if topic_matched and category_name not in found_categories:
                 found_categories.append(category_name)
 
-    # Return None if nothing found
     if not found_topics:
         return None, None, None
 

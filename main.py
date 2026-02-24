@@ -1,31 +1,36 @@
 """
-Telegram bot that generates hourly summaries using OpenAI.
+Telegram userbot that generates scheduled summaries using OpenAI/Gemini.
+Runs as a user account (MTProto via Telethon) instead of a bot.
 """
 import os
 import re
 import sys
-
 import asyncio
-from collections import defaultdict
 
-from utils.database import Database
+# Force UTF-8 on Windows so log messages with Unicode (→, emojis, Arabic, etc.) don't crash.
+# errors='replace' means any still-unencodable char becomes ? instead of raising.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+from utils.database import Database, set_db_instance
 from utils.openai_client import OpenAIClient
 from utils.gemini_client import GeminiClient
 from utils.prompts import get_summary_prompt
-from utils.helpers import load_config, setup_logging, categorizer
+from utils.helpers import load_config, load_prompts, setup_logging, categorizer
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from telegram import Update
-from telegram.ext import CallbackContext, ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 
 # ==================== UTF-8 Config ====================
 # Force UTF-8 encoding on Windows to handle Arabic/emoji text
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    # Reconfigure stdout/stderr to use UTF-8
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     if hasattr(sys.stderr, 'reconfigure'):
@@ -37,6 +42,8 @@ logger = setup_logging(config)
 
 # Initialize components
 db = Database(config["database"]["dsn"])
+set_db_instance(db)
+db.seed_keywords_from_config(config)
 if not config.get("gemini"):
     llm_client = OpenAIClient(
         api_key=config["openai"]["api_key"],
@@ -49,140 +56,188 @@ else:
         api_key=config["gemini"]["api_key"],
         model=config["gemini"].get("model"))
 
-# Telegram settings
-BOT_TOKEN = config["telegram"]["bot_token"]
+# Telegram userbot settings
+API_ID = config["telegram"]["api_id"]
+API_HASH = config["telegram"]["api_hash"]
+STRING_SESSION = config["telegram"].get("string_session")
+if not STRING_SESSION:
+    raise ValueError("telegram.string_session is required in config.yaml but was not found or is empty.")
+
 SCHEDULER = None
+client: TelegramClient = None  # Set in main()
+
+# Pre-resolved map: numeric_channel_id → [collection_names]
+# Built at startup and rebuilt on every config change.
+# Avoids username-based matching which breaks for private channels (no username).
+_source_channel_map: dict = {}
+
+
+async def build_source_channel_map(cfg):
+    """
+    Resolve every source_channel in the config to its numeric Telegram ID.
+    Handles @username, @+invitelink, and plain numeric IDs.
+    Updates the module-level _source_channel_map dict in-place.
+    """
+    global _source_channel_map
+    new_map: dict = {}
+    for coll_name, coll_data in cfg.get('collections', {}).items():
+        for ch_identifier in coll_data.get('source_channels', []):
+            if not ch_identifier:
+                continue
+            try:
+                entity = await client.get_entity(ch_identifier)
+                num_id = entity.id
+                if num_id not in new_map:
+                    new_map[num_id] = []
+                if coll_name not in new_map[num_id]:
+                    new_map[num_id].append(coll_name)
+                logger.info(f"[MAP] {ch_identifier} → id={num_id} → collections={new_map[num_id]}")
+            except Exception as e:
+                logger.warning(f"[MAP] Could not resolve '{ch_identifier}': {e}")
+    _source_channel_map = new_map
+    logger.info(f"[MAP] Source channel map ready: {len(new_map)} channel(s) resolved")
 
 
 # ==================== Message Handler ====================
-async def read_channel_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def read_channel_messages(event):
     """
-    Handle incoming channel posts: forward and save to database.
+    Handle incoming channel posts: save to database.
+    Only processes broadcast channels (not groups/supergroups).
     """
     try:
-        # Check if this is a channel post
-        if not update.channel_post:
-            logger.debug("Update is not a channel post, skipping")
+        # Log every incoming event so we can confirm the handler fires
+        logger.info(f"[EVENT] New event | chat_id={event.chat_id} | is_channel={event.is_channel} | is_group={getattr(event, 'is_group', '?')}")
+
+        # Filter: only handle broadcast channel messages, not groups or DMs
+        if not event.is_channel or event.is_group:
+            logger.info(f"[SKIP] Not a broadcast channel (is_channel={event.is_channel}, is_group={getattr(event, 'is_group', '?')}) — skipping")
             return
-        
-        channel_id_numeric = update.effective_chat.id
-        channel_title = update.effective_chat.title
-        channel_username = update.effective_chat.username
+
+        chat = await event.get_chat()
+
+        channel_id_numeric = chat.id
+        channel_title = getattr(chat, 'title', '')
+        channel_username = getattr(chat, 'username', None)
         channel_id = channel_username  # Used for collection matching
 
-        logger.info(f"[MSG] MESSAGE RECEIVED | Channel: {channel_id} ({channel_title})")
-        
-        # Load latest config and respect runtime toggle and channel settings
+        text_intro = (event.message.message or event.message.text or '')[:80].replace('\n', ' ')
+        logger.info(f"[MSG] RECEIVED | @{channel_id} ({channel_title}) | \"{text_intro}\"")
+
+        # Load latest config
         current_cfg = load_config()
 
-        # Determine matching bot profiles via collections
-        # Step 1: Find which collections include this channel as a source
-        collections_cfg = current_cfg.get('collections', {})
-        matching_collections = []
+        # Step 1: Find which collections include this channel as a source.
+        # Use the pre-resolved numeric-ID map (handles private channels, invite links, etc.).
+        # Fall back to username matching for any channels not yet in the map.
+        matching_collections = list(_source_channel_map.get(channel_id_numeric, []))
 
-        logger.info(f"[DEBUG] DEBUG | Looking for channel_id: '{channel_id}' in collections")
-        logger.info(f"[DEBUG] DEBUG | Available collections: {list(collections_cfg.keys())}")
-
-        for coll_name, coll_data in collections_cfg.items():
-            source_channels = coll_data.get('source_channels', [])
-            logger.info(f"[DEBUG] DEBUG | Collection '{coll_name}' has source_channels: {source_channels}")
-
-            # Try both with and without @ symbol
-            if channel_id in source_channels or f'@{channel_id}' in source_channels:
-                matching_collections.append(coll_name)
-                logger.info(f"[OK] MATCH | Collection '{coll_name}' matched!")
-
-        logger.info(f"[DEBUG] DEBUG | Matching collections: {matching_collections}")
+        if not matching_collections and channel_username:
+            collections_cfg = current_cfg.get('collections', {})
+            for coll_name, coll_data in collections_cfg.items():
+                source_channels = coll_data.get('source_channels', [])
+                if channel_username in source_channels or f'@{channel_username}' in source_channels:
+                    matching_collections.append(coll_name)
 
         # Step 2: Find which bots reference those collections
         bots_cfg = current_cfg.get('bots', {})
         matching_bots = []
 
-        logger.info(f"[DEBUG] DEBUG | Available bots: {list(bots_cfg.keys())}")
-
         for bname, bcfg in bots_cfg.items():
             if not bcfg.get('enabled', True):
-                logger.info(f"[SKIP] SKIP | Bot '{bname}' is disabled")
                 continue
-            bot_collections = bcfg.get('collections', [])
-            logger.info(f"[DEBUG] DEBUG | Bot '{bname}' has collections: {bot_collections}")
-
-            # Check if any of bot's collections match
-            if any(coll in matching_collections for coll in bot_collections):
+            if any(coll in matching_collections for coll in bcfg.get('collections', [])):
                 matching_bots.append(bname)
-                logger.info(f"[OK] MATCH | Bot '{bname}' matched!")
-
-        logger.info(f"[DEBUG] DEBUG | Matching bots: {matching_bots}")
 
         if not matching_bots:
-            logger.warning(f"[SKIP] SKIP | Channel '{channel_id}' not in any bot's collections")
+            logger.warning(f"[SKIP] @{channel_id} not in any enabled collection/bot — collections tried: {list(collections_cfg.keys())}")
             return
-        
-        # Extract text
-        text = update.channel_post.text if update.channel_post.text else update.channel_post.caption
-        
+
+        logger.info(f"[MATCH] @{channel_id} → Collections: {matching_collections} | Bots: {matching_bots}")
+
+        # Extract text (text or caption for media messages)
+        text = event.message.message or event.message.text
+
         if not text:
-            logger.warning("No text found in channel post - skipping")
+            logger.warning(f"[SKIP] No text in message from @{channel_id}")
             return
 
-        # Apply Message Rules (remove/replace) before categorization
         original_text = text
-        rules = current_cfg.get('rules', {}) or {}
+        collection_name_str = ",".join(matching_collections) if matching_collections else None
 
-        # Remove rules: discard message if any remove keyword matches
-        for kw in rules.get('remove', []):
-            try:
-                if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
-                    logger.info(f"Message discarded by remove rule: {kw}")
-                    return
-            except re.error:
-                # fallback simple contains
-                if kw in text:
-                    logger.info(f"Message discarded by remove rule (contains): {kw}")
-                    return
-
-        # Replace rules: apply replacements to text
-        replaced_text = text
-        for rule in rules.get('replace', []):
-            match = rule.get('match')
-            repl = rule.get('replace_with', '')
-            if not match:
-                continue
-            try:
-                replaced_text = re.sub(rf"\b{re.escape(match)}\b", repl, replaced_text, flags=re.IGNORECASE)
-            except re.error:
-                replaced_text = replaced_text.replace(match, repl)
-
-        # Save to database once per matching bot (so each bot has its own message rows)
         for bot_name in matching_bots:
-            # Categorization is bot-specific (each bot has its own topics/keywords)
-            topics, categories, keywords = categorizer(replaced_text, bot_name)
+            # ── Per-bot rules ────────────────────────────────────────────
+            bot_cfg_rules = current_cfg.get('bots', {}).get(bot_name, {}).get('rules', {}) or {}
 
-            # Save message with matched topics and categories
+            # Remove rules: skip this bot if any keyword matches
+            skipped = False
+            for kw in bot_cfg_rules.get('remove', []):
+                if not kw:
+                    continue
+                try:
+                    if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
+                        logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
+                        skipped = True
+                        break
+                except re.error:
+                    if kw in text:
+                        logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
+                        skipped = True
+                        break
+            if skipped:
+                continue
+
+            # Replace rules: build per-bot replaced text
+            replaced_text = text
+            for rule in bot_cfg_rules.get('replace', []):
+                match_word = rule.get('match')
+                repl = rule.get('replace_with', '')
+                if not match_word:
+                    continue
+                try:
+                    replaced_text = re.sub(rf"\b{re.escape(match_word)}\b", repl, replaced_text, flags=re.IGNORECASE)
+                except re.error:
+                    replaced_text = replaced_text.replace(match_word, repl)
+            # ─────────────────────────────────────────────────────────────
+
+            topics, categories, keywords = categorizer(replaced_text, bot_name, db)
+
+            if not topics:
+                logger.info(f"[CATEG] No topics matched | Bot: {bot_name} | @{channel_id} → {matching_collections}")
+            else:
+                kw_display = keywords[:5] if keywords else []
+                kw_extra = f" (+{len(keywords)-5} more)" if keywords and len(keywords) > 5 else ""
+                logger.info(
+                    f"[CATEG] Bot: {bot_name} | @{channel_id} → {matching_collections} | "
+                    f"Topics: {topics} | Categories: {categories} | "
+                    f"Keywords [{len(keywords or [])}]: {kw_display}{kw_extra}"
+                )
+
             message_id = db.add_message(
                 channel_id=channel_id_numeric,
                 text=replaced_text,
-                countries=None,  # Legacy field, kept for backwards compatibility
-                regions=None,    # Legacy field, kept for backwards compatibility
+                countries=None,
+                regions=None,
                 topics=topics,
                 categories=categories,
                 keywords=keywords,
                 bot_name=bot_name,
                 original_text=original_text,
-                replaced_text=replaced_text
+                replaced_text=replaced_text,
+                channel_username=channel_username,
+                collection_name=collection_name_str
             )
-            text_preview = replaced_text[:100] + '...' if len(replaced_text) > 100 else replaced_text
-            logger.info(f"[SAVE] DB SAVE | Bot: '{bot_name}' | ID: {message_id} | Channel: {channel_id} | Text: {text_preview} | Topics: {topics} | Categories: {categories} | Keywords: {keywords}")
+            logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
+
     except Exception as e:
         logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
 
+
 # ==================== Summary Handler ====================
-async def generate_and_send_summary(context: ContextTypes.DEFAULT_TYPE):
+async def generate_and_send_summary(job_data):
     """
     Generate and send summaries for topics based on their schedules.
-    context.job.data: { 'schedule_type': str, 'bot_name': str, 'topic_name': str, 'category_name': str, 'prompt_key': str }
+    job_data: { 'schedule_type': str, 'bot_name': str, 'topic_name': str, 'category_name': str, 'prompt_key': str }
     """
-    job_data = context.job.data if hasattr(context.job, 'data') else {}
     schedule_type = job_data.get('schedule_type')
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
@@ -249,21 +304,30 @@ async def generate_and_send_summary(context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"No target channels found for bot {bot_name}")
             return
 
-        # Send summary to all target channels
-        header_text = f"*** **{topic_name.upper()}** ({prompt_key})"
-        if category_name:
-            header_text = f"*** **{category_name.upper()} - {topic_name.upper()}** ({prompt_key})"
+        # Build message text — use custom header from prompt if defined, else auto-generate
+        prompts_cfg = load_prompts()
+        prompt_val = prompts_cfg.get('bots', {}).get(bot_name, {}).get(prompt_key, {})
+        custom_header = prompt_val.get('header', '').strip() if isinstance(prompt_val, dict) else ''
 
-        message_text = f"{header_text}\n{'—'*20}\n\n{summary_text}"
+        if custom_header:
+            message_text = f"{custom_header}\n{'—'*20}\n\n{summary_text}"
+        else:
+            header_text = f"{category_name.upper()} - {topic_name.upper()}" if category_name else topic_name.upper()
+            message_text = f"{header_text}\n{'—'*20}\n\n{summary_text}"
 
+        # Send summary to all target channels using the userbot client
         for target_chat in target_channels:
             try:
-                await context.bot.send_message(
-                    chat_id=target_chat,
-                    text=message_text,
-                    parse_mode="Markdown"
-                )
+                await client.send_message(target_chat, message_text, parse_mode='md')
                 logger.info(f"[SENT] SUMMARY SENT | Bot: {bot_name} | Topic: {topic_name} | Target: {target_chat}")
+                db.save_summary(
+                    summary_text=summary_text,
+                    message_count=len(topic_messages),
+                    summary_type=schedule_type,
+                    target_entity=str(target_chat),
+                    bot_name=bot_name,
+                    topic_name=topic_name
+                )
             except Exception as e:
                 logger.error(f"Failed to send summary to {target_chat}: {e}")
 
@@ -275,21 +339,19 @@ async def generate_and_send_summary(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Critical error in summary generation: {e}", exc_info=True)
 
-async def trigger_summary(application, job_data):
-    """Trigger summary generation with complete job data"""
+async def trigger_summary(job_data):
+    """Trigger summary generation with complete job data."""
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
     schedule_type = job_data.get('schedule_type')
     logger.info(f"[TRIGGER] SCHEDULE TRIGGER | Bot: {bot_name} | Topic: {topic_name} | Type: {schedule_type}")
 
     try:
-        context = CallbackContext(application)
-        context.job = type('obj', (object,), {'data': job_data})()
-        await generate_and_send_summary(context)
+        await generate_and_send_summary(job_data)
     except Exception as e:
         logger.error(f"[ERROR] trigger_summary failed | Bot: {bot_name} | Topic: {topic_name} | Error: {e}", exc_info=True)
 
-async def schedule_summaries(application):
+async def schedule_summaries():
     """
     Set up APScheduler jobs for all enabled topic schedules.
     Iterates through: bots → categories → topics → schedules
@@ -310,7 +372,6 @@ async def schedule_summaries(application):
 
     job_count = 0
 
-    # Iterate through all bots
     for bot_name, bot in bots_cfg.items():
         if not bot.get('enabled', True):
             logger.debug(f"Bot '{bot_name}' is disabled, skipping")
@@ -318,7 +379,6 @@ async def schedule_summaries(application):
 
         categories = bot.get('categories', {})
 
-        # Iterate through categories → topics → schedules
         for category_name, category_data in categories.items():
             if not category_data.get('enabled', True):
                 logger.debug(f"Category '{category_name}' in bot '{bot_name}' is disabled, skipping")
@@ -345,7 +405,6 @@ async def schedule_summaries(application):
                         logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
                         continue
 
-                    # Build job data
                     job_data = {
                         'schedule_type': schedule_type,
                         'bot_name': bot_name,
@@ -355,7 +414,6 @@ async def schedule_summaries(application):
                     }
 
                     try:
-                        # Build cron trigger based on schedule type
                         if schedule_type == "minute":
                             minute_interval = schedule.get('minute', 1)
                             trigger = CronTrigger(minute=f'*/{minute_interval}')
@@ -370,12 +428,11 @@ async def schedule_summaries(application):
                             logger.error(f"Unknown schedule type: {schedule_type}")
                             continue
 
-                        # Add job to scheduler
                         job_id = f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                         SCHEDULER.add_job(
                             trigger_summary,
                             trigger,
-                            args=[application, job_data],
+                            args=[job_data],
                             id=job_id,
                             name=job_id,
                             replace_existing=True
@@ -386,41 +443,34 @@ async def schedule_summaries(application):
                     except Exception as e:
                         logger.error(f"Failed to schedule {topic_name}/{schedule_name}: {e}", exc_info=True)
 
-    logger.info(f"[SCHEDULER] Initialized with {job_count} jobs")   
+    logger.info(f"[SCHEDULER] Initialized with {job_count} jobs")
 
-async def scheduler_watcher(application):
+async def scheduler_watcher():
     last_config = None
     while True:
         try:
             cfg = load_config()
 
-            # Only rebuild the scheduler if config actually changed
             if cfg != last_config:
-                await schedule_summaries(application)
+                await schedule_summaries()
+                await build_source_channel_map(cfg)
                 last_config = cfg
-                logger.info("Scheduler rebuilt — config change detected")
-            
+                logger.info("Scheduler rebuilt + channel map refreshed — config change detected")
+
         except Exception:
             logger.exception("Failed to reload config during watcher")
 
         await asyncio.sleep(2)
 
-async def start_summarization(application):
-    """
-    Called after the application is initialized.
-    Start the summary scheduler.
-    """
-    # asyncio.create_task(schedule_summaries(application))
-    asyncio.create_task(scheduler_watcher(application))
-
 
 # ==============================================
 # ================= Main =======================
 # ==============================================
-def start_summarizer_bot():
-    """Main entry point for the bot."""
+async def main():
+    global client
+
     logger.info("="*60)
-    logger.info("Starting Telegram Summarizer Bot")
+    logger.info("Starting Telegram Summarizer Userbot")
     logger.info("="*60)
 
     # Log configuration
@@ -441,27 +491,39 @@ def start_summarizer_bot():
         logger.info(f"   - {bot_name}: Enabled={enabled}, Collections={bot_colls}")
 
     logger.info("="*60)
-    
+
+    # Create Telethon userbot client using the string session from config
+    client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+
+    # Register message handler for all new messages
+    @client.on(events.NewMessage)
+    async def message_handler(event):
+        await read_channel_messages(event)
+
     try:
-        # Build application: post_init is what to do after initiliazation
-        app = ApplicationBuilder().token(BOT_TOKEN).post_init(start_summarization).build()
-        
-        # Add message handler: tells bot what to do when a message arrives (in case we want from group not channel we change here)
-        app.add_handler(MessageHandler(filters.ChatType.CHANNEL, read_channel_messages))
-        
-        logger.info("Bot is running... Press Ctrl+C to stop")
-        
-        # Run bot: starts the bot, listening for updates
-        app.run_polling()
-        
+        # String sessions are already authenticated — no phone/OTP needed.
+        await client.start()
+        logger.info("Userbot connected successfully")
+
+        # Pre-resolve all source channels to numeric IDs so private channels work
+        await build_source_channel_map(cfg)
+
+        # Start scheduler watcher (also rebuilds the channel map on config changes)
+        asyncio.create_task(scheduler_watcher())
+
+        logger.info("Userbot is running... Press Ctrl+C to stop")
+        await client.run_until_disconnected()
+
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Userbot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
         db.close()
-        logger.info("Bot shutdown complete")
+        if SCHEDULER and SCHEDULER.running:
+            SCHEDULER.shutdown()
+        logger.info("Userbot shutdown complete")
 
 
 if __name__ == "__main__":
-    start_summarizer_bot()
+    asyncio.run(main())

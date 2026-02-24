@@ -33,7 +33,13 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str) -> str:
         if prompt_key not in bot_prompts:
             raise ValueError(f"No prompts found for bot '{bot_name}'")
 
-    template = bot_prompts[prompt_key]
+    prompt_val = bot_prompts[prompt_key]
+
+    # Support both legacy string format and new {header, text} dict format
+    if isinstance(prompt_val, dict):
+        template = prompt_val.get('text', '')
+    else:
+        template = prompt_val
 
     # 3. Use the .format() method to inject the messages into your {messages} placeholder
     final_prompt = template.format(messages=combined_news)

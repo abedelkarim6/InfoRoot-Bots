@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Manager V2</title>
+    <link rel="stylesheet" href="/static/css/modern.css?v=3">
+    <link rel="stylesheet" href="/static/css/auto-save.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1>🤖 Bot Manager</h1>
+            <p class="version">v3.0</p>
+        </div>
+        
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item" data-page="dashboard">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
+            </a>
+            <a href="#" class="nav-item active" data-page="system">
+                <span class="icon">🔌</span>
+                <span>System</span>
+            </a>
+            <a href="#" class="nav-item" data-page="collections">
+                <span class="icon">📦</span>
+                <span>Collections</span>
+                <span class="badge" id="collections-count">0</span>
+            </a>
+            <a href="#" class="nav-item" data-page="bots">
+                <span class="icon">🤖</span>
+                <span>Bots</span>
+                <span class="badge" id="bots-count">0</span>
+            </a>
+            <a href="#" class="nav-item" data-page="monitor">
+                <span class="icon">📡</span>
+                <span>Monitor</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="footer-status-row">
+                <div class="system-status">
+                    <div class="status-indicator" id="system-status"></div>
+                    <span id="status-text">System Online</span>
+                </div>
+                <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch theme"></button>
+            </div>
+            <button class="logout-btn" onclick="logout()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <polyline points="16 17 21 12 16 7"></polyline>
+                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+                Sign Out
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+
+        <!-- ══ Dashboard Page ══════════════════════════════════════════ -->
+        <div id="dashboard-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Dashboard</h2>
+                    <p class="subtitle">Analytics &amp; performance insights</p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <select class="select" id="dash-range" onchange="loadDashboardData()">
+                        <option value="7">Last 7 days</option>
+                        <option value="14" selected>Last 14 days</option>
+                        <option value="30">Last 30 days</option>
+                    </select>
+                    <button class="btn btn-secondary btn-sm" onclick="loadDashboardData()">↻ Refresh</button>
+                </div>
+            </header>
+
+            <!-- Stat cards -->
+            <div class="dash-stat-grid">
+                <div class="dash-stat-card">
+                    <div class="dash-stat-icon">📨</div>
+                    <div class="dash-stat-value" id="ds-total-msgs">—</div>
+                    <div class="dash-stat-label">Total Messages</div>
+                </div>
+                <div class="dash-stat-card">
+                    <div class="dash-stat-icon">📅</div>
+                    <div class="dash-stat-value" id="ds-period-msgs">—</div>
+                    <div class="dash-stat-label" id="ds-period-label">Messages (period)</div>
+                </div>
+                <div class="dash-stat-card">
+                    <div class="dash-stat-icon">📝</div>
+                    <div class="dash-stat-value" id="ds-summaries">—</div>
+                    <div class="dash-stat-label">Total Summaries</div>
+                </div>
+                <div class="dash-stat-card">
+                    <div class="dash-stat-icon">📡</div>
+                    <div class="dash-stat-value" id="ds-sources">—</div>
+                    <div class="dash-stat-label">Active Sources</div>
+                </div>
+            </div>
+
+            <!-- Row 1: Daily line + Topic donut -->
+            <div class="dash-chart-row">
+                <div class="dash-chart-card dash-wide">
+                    <div class="dash-chart-header">
+                        <span class="dash-chart-title">Messages per Day</span>
+                    </div>
+                    <div class="dash-canvas-wrap"><canvas id="chart-daily"></canvas></div>
+                </div>
+                <div class="dash-chart-card">
+                    <div class="dash-chart-header">
+                        <span class="dash-chart-title">Topic Distribution</span>
+                    </div>
+                    <div class="dash-canvas-wrap"><canvas id="chart-topics"></canvas></div>
+                </div>
+            </div>
+
+            <!-- Row 2: Top sources + Topic trend -->
+            <div class="dash-chart-row">
+                <div class="dash-chart-card">
+                    <div class="dash-chart-header">
+                        <span class="dash-chart-title">Top Sources</span>
+                    </div>
+                    <div class="dash-canvas-wrap"><canvas id="chart-sources"></canvas></div>
+                </div>
+                <div class="dash-chart-card dash-wide">
+                    <div class="dash-chart-header">
+                        <span class="dash-chart-title">Topic Trend</span>
+                        <span class="dash-chart-sub">Top 6 topics over time</span>
+                    </div>
+                    <div class="dash-canvas-wrap"><canvas id="chart-trend"></canvas></div>
+                </div>
+            </div>
+
+            <!-- Source × Topic matrix -->
+            <div class="dash-matrix-card">
+                <div class="dash-chart-header">
+                    <span class="dash-chart-title">Source × Topic Breakdown</span>
+                    <input type="text" class="input dash-filter-input" id="dash-src-filter"
+                           placeholder="Filter sources…" oninput="filterSourceMatrix()">
+                </div>
+                <div class="dash-matrix-wrap" id="dash-matrix">
+                    <p class="mon-empty">Select the Dashboard page to load data.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Page (Replaces Dashboard) -->
+        <div id="system-page" class="page active">
+            <header class="page-header">
+                <div>
+                    <h2>System Overview</h2>
+                    <p class="subtitle">Master control and bot monitoring</p>
+                </div>
+                <button class="btn btn-primary" onclick="showPage('bots')">
+                    <span>➕</span> Add New Bot
+                </button>
+            </header>
+
+            <div class="system-control-card">
+                <div class="system-control-header">
+                    <h3>🔌 Master System Control</h3>
+                    <label class="toggle-switch toggle-large">
+                        <input type="checkbox" id="system-toggle" onchange="toggleSystem(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="text-muted mt-2" id="system-status-text">
+                    Loading...
+                </p>
+            </div>
+
+            <div class="stats-grid mt-4">
+                <div class="stat-card">
+                    <div class="stat-icon">🤖</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-bots">0</div>
+                        <div class="stat-label">Bots</div>
+                        <div class="stat-sub" id="stat-sub-bots"></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📦</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-collections">0</div>
+                        <div class="stat-label">Collections</div>
+                        <div class="stat-sub" id="stat-sub-collections"></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🗂️</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-categories">0</div>
+                        <div class="stat-label">Categories</div>
+                        <div class="stat-sub" id="stat-sub-categories"></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📝</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-topics">0</div>
+                        <div class="stat-label">Topics</div>
+                        <div class="stat-sub" id="stat-sub-topics"></div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 class="section-title mt-4">📊 All Bots</h3>
+            <div id="system-bots-list">
+                <!-- Bot detail cards rendered here -->
+            </div>
+        </div>
+
+        <!-- Collections Page -->
+        <div id="collections-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Collections</h2>
+                    <p class="subtitle">Manage channel collections</p>
+                </div>
+                <button class="btn btn-primary" onclick="showAddCollectionModal()">
+                    <span>➕</span> Add Collection
+                </button>
+            </header>
+
+            <div id="collections-container">
+                <!-- Collections rendered here -->
+            </div>
+        </div>
+
+        <!-- Bots Page -->
+        <div id="bots-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Bot Management</h2>
+                    <p class="subtitle">Configure and manage your bots</p>
+                </div>
+            </header>
+
+            <!-- CREATE BOT SECTION AT TOP -->
+            <div class="create-bot-card">
+                <h3>➕ Create New Bot</h3>
+                <div class="create-bot-form">
+                    <input type="text" id="new-bot-name" placeholder="Bot name (e.g., News Bot, Tech Alerts)" class="input">
+                    <button class="btn btn-primary" onclick="createNewBot()">Create Bot</button>
+                </div>
+            </div>
+
+            <!-- EXISTING BOTS SECTION -->
+            <h3 class="section-title mt-4">Your Bots</h3>
+            <div id="bots-container">
+                <!-- Bot configuration cards rendered here -->
+            </div>
+        </div>
+
+        <!-- Monitor Page -->
+        <div id="monitor-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>📡 Monitor</h2>
+                    <p class="subtitle">Live pending messages &amp; schedule countdowns</p>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
+                        <input type="checkbox" id="monitor-autorefresh" checked onchange="toggleMonitorAutoRefresh(this.checked)">
+                        Auto-refresh (15s)
+                    </label>
+                    <button class="btn btn-primary" onclick="loadMonitorData()">🔄 Refresh</button>
+                </div>
+            </header>
+
+            <!-- All monitor content in one tabbed card -->
+            <div class="mon-section">
+                <div class="mon-tab-bar">
+                    <button class="mon-tab active" data-tab="schedules"  onclick="switchMonTab('schedules')">📡 Schedules</button>
+                    <button class="mon-tab"         data-tab="summaries" onclick="switchMonTab('summaries')">📬 Summaries</button>
+                    <button class="mon-tab"         data-tab="messages"  onclick="switchMonTab('messages')">📥 Messages</button>
+                </div>
+
+                <!-- Schedules tab -->
+                <div id="mon-tab-schedules" class="mon-tab-panel">
+                    <div id="monitor-bots-container"></div>
+                </div>
+
+                <!-- Summaries tab -->
+                <div id="mon-tab-summaries" class="mon-tab-panel" style="display:none;">
+                    <div class="mon-filter-bar">
+                        <select class="select mon-filter-sel" id="sum-filter-bot"   onchange="applyMonSummaryFilters()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="sum-filter-topic" onchange="applyMonSummaryFilters()"><option value="">All Topics</option></select>
+                        <select class="select mon-filter-sel" id="sum-filter-type"  onchange="applyMonSummaryFilters()">
+                            <option value="">All Types</option>
+                            <option value="hourly">Hourly</option>
+                            <option value="daily">Daily</option>
+                            <option value="minute">Minute</option>
+                        </select>
+                        <input type="text" class="input mon-filter-search" id="sum-search" placeholder="🔍 Search preview…" oninput="applyMonSummaryFilters()">
+                    </div>
+                    <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>
+                </div>
+
+                <!-- Messages tab -->
+                <div id="mon-tab-messages" class="mon-tab-panel" style="display:none;">
+                    <div class="mon-filter-bar">
+                        <select class="select mon-filter-sel" id="msg-filter-coll"    onchange="applyMonMessageFilters()"><option value="">All Collections</option></select>
+                        <select class="select mon-filter-sel" id="msg-filter-channel" onchange="applyMonMessageFilters()"><option value="">All Channels</option></select>
+                        <select class="select mon-filter-sel" id="msg-filter-topic"   onchange="applyMonMessageFilters()"><option value="">All Topics</option></select>
+                        <input type="text" class="input mon-filter-search" id="msg-search" placeholder="🔍 Search preview…" oninput="applyMonMessageFilters()">
+                    </div>
+                    <div id="mon-messages-content"><p class="mon-empty">Loading…</p></div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Scripts -->
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/auto-save-manager.js"></script>
+    <script src="/static/js/modern.js?v=3"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

@@ -71,7 +71,8 @@ def save_bot(data: dict = Body(...)):
         'enabled': data.get('enabled', existing_bot.get('enabled', True)),
         'categories': data.get('categories', existing_bot.get('categories', {})),
         'collections': data.get('collections', existing_bot.get('collections', [])),
-        'minimum_messages': data.get('minimum_messages', existing_bot.get('minimum_messages', 5))
+        'minimum_messages': data.get('minimum_messages', existing_bot.get('minimum_messages', 5)),
+        'rules': data.get('rules', existing_bot.get('rules', {'remove': [], 'replace': []})),
     }
 
     if 'bot_token' in data:

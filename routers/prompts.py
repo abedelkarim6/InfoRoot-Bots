@@ -21,12 +21,16 @@ def update_prompt(data: dict = Body(...)):
     bot_name = data.get("bot_name")
     key = data["key"]
     text = data["text"]
+    header = data.get("header", "")
 
     if not bot_name:
         return {"status": "error", "message": "bot_name is required"}
 
     prompts = load_prompts()
-    prompts.setdefault("bots", {}).setdefault(bot_name, {})[key] = text
+    prompts.setdefault("bots", {}).setdefault(bot_name, {})[key] = {
+        "header": header,
+        "text": text,
+    }
     save_prompts(prompts)
     return {"status": "ok", "key": key, "bot_name": bot_name}
 

@@ -138,19 +138,13 @@ def verify_and_add_channel(data: dict = Body(...)):
 
         can_post = loop.run_until_complete(check_bot_can_post(bot_token, channel_identifier))
 
-        if can_post:
-            return {
-                "status": "ok",
-                "channel": {
-                    **channel_info,
-                    "can_post": True
-                }
+        return {
+            "status": "ok",
+            "channel": {
+                **channel_info,
+                "can_post": can_post
             }
-        else:
-            return {
-                "status": "error",
-                "message": f"Bot is not admin in {channel_info.get('title', channel_identifier)}"
-            }
+        }
 
     except Exception as e:
         return {

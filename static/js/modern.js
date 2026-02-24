@@ -1,16 +1,91 @@
-// ==================== Bot Manager V2.1 - Complete Implementation ====================
+// ==================== Bot Manager V3.0 - Complete Implementation ====================
 // All 11 improvements included
+
+// ==================== Theme ====================
+(function () {
+    const saved = localStorage.getItem('theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+})();
+
+function _applyThemeButton(theme) {
+    const btn = document.getElementById('theme-toggle-btn');
+    if (!btn) return;
+    if (theme === 'light') {
+        btn.textContent = '🌙 Dark';
+    } else {
+        btn.textContent = '☀️ Light';
+    }
+}
+
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+    _applyThemeButton(next);
+}
+
+// ==================== Custom Dialogs ====================
+function showAlert(message, { title = 'Notice', icon = 'ℹ️' } = {}) {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+        <div class="dialog-box" role="dialog" aria-modal="true">
+            <span class="dialog-icon">${icon}</span>
+            <div class="dialog-title">${title}</div>
+            <div class="dialog-message">${message}</div>
+            <div class="dialog-actions" style="justify-content:center;">
+                <button class="btn btn-primary dialog-ok">OK</button>
+            </div>
+        </div>
+    `;
+    const close = () => overlay.remove();
+    overlay.querySelector('.dialog-ok').addEventListener('click', close);
+    overlay.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') close(); });
+    document.body.appendChild(overlay);
+    overlay.querySelector('.dialog-ok').focus();
+}
+
+function showConfirm(message, onConfirm, { title = 'Confirm', icon = '⚠️', confirmLabel = 'Delete', confirmClass = 'btn-danger' } = {}) {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+        <div class="dialog-box" role="dialog" aria-modal="true">
+            <span class="dialog-icon">${icon}</span>
+            <div class="dialog-title">${title}</div>
+            <div class="dialog-message">${message}</div>
+            <div class="dialog-actions">
+                <button class="btn btn-secondary dialog-cancel">Cancel</button>
+                <button class="btn ${confirmClass} dialog-confirm">${confirmLabel}</button>
+            </div>
+        </div>
+    `;
+    const close = () => overlay.remove();
+    overlay.querySelector('.dialog-cancel').addEventListener('click', close);
+    overlay.querySelector('.dialog-confirm').addEventListener('click', () => { close(); onConfirm(); });
+    overlay.addEventListener('keydown', e => {
+        if (e.key === 'Escape') close();
+        if (e.key === 'Enter') { close(); onConfirm(); }
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('.dialog-cancel').focus();
+}
 
 // ==================== Global State ====================
 let globalConfig = null;
 let globalPrompts = null;
-let globalAdminChannels = [];
+
+// Collection modal state
+let modalSources = [];
+let modalTargets = [];
 
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', async () => {
+    _applyThemeButton(document.documentElement.getAttribute('data-theme') || 'dark');
     initNavigation();
     await loadAllData();
-    renderSystemPage();
+    const savedPage = localStorage.getItem('activePage') || 'system';
+    showPage(savedPage);
 });
 
 // ==================== API Helper ====================
@@ -47,19 +122,23 @@ function showPage(pageName) {
             item.classList.add('active');
         }
     });
-    
+
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
     });
     const pageEl = document.getElementById(`${pageName}-page`);
     if (pageEl) pageEl.classList.add('active');
-    
+
+    localStorage.setItem('activePage', pageName);
+
     if (pageName === 'system') renderSystemPage();
     else if (pageName === 'collections') renderCollectionsPage();
     else if (pageName === 'bots') {
         renderBotsPage();
         restoreBotsPageScrollPosition();
     }
+    else if (pageName === 'monitor') loadMonitorData();
+    else if (pageName === 'dashboard') loadDashboardData();
 }
 
 // ==================== Data Loading ====================
@@ -67,7 +146,6 @@ async function loadAllData() {
     try {
         globalConfig = await api('/api/config');
         globalPrompts = await api('/api/prompts');
-        await loadAdminChannels();
         updateStats();
         updateSystemStatus();
     } catch (error) {
@@ -76,27 +154,6 @@ async function loadAllData() {
     }
 }
 
-async function loadAdminChannels() {
-    try {
-        const result = await api('/api/telegram/admin_channels');
-        if (result.status === 'ok') {
-            globalAdminChannels = result.channels || [];
-            console.log(`Loaded ${globalAdminChannels.length} accessible channels:`, globalAdminChannels);
-            if (globalAdminChannels.length === 0) {
-                console.warn('No channels found. Make sure:');
-                console.warn('1. Bot is added to your channels (as member for source, admin for target)');
-                console.warn('2. Bot has posted or received messages in those channels');
-                console.warn('3. Use "Add Channel" button to manually verify channels');
-            }
-        } else {
-            console.error('Failed to load channels:', result.message);
-            globalAdminChannels = [];
-        }
-    } catch (error) {
-        console.error('Error loading channels:', error);
-        globalAdminChannels = [];
-    }
-}
 
 // ==================== System Control ====================
 async function toggleSystem(enabled) {
@@ -165,20 +222,50 @@ function renderSystemPage() {
 }
 
 function createBotDetailCard(name, bot) {
-    const categoriesCount = Object.keys(bot.categories || {}).length;
-    const topicsCount = getTotalTopicsInBot(bot);
+    const catEntries = Object.entries(bot.categories || {});
     const collectionsCount = (bot.collections || []).length;
+
+    let totalCats = catEntries.length;
+    let enabledCats = catEntries.filter(([, c]) => c.enabled !== false).length;
+    let totalTopics = 0, enabledTopics = 0;
+    catEntries.forEach(([, cat]) => {
+        const topicEntries = Object.entries(cat.topics || {});
+        totalTopics += topicEntries.length;
+        enabledTopics += topicEntries.filter(([, t]) => t.enabled !== false).length;
+    });
+    const disabledCats   = totalCats   - enabledCats;
+    const disabledTopics = totalTopics - enabledTopics;
+
+    const countHtml = (on, off) =>
+        `<span style="color:var(--success);font-weight:600;">${on} on</span>`
+        + (off > 0 ? ` / <span style="color:var(--danger);font-weight:600;">${off} off</span>` : '');
+
+    // Per-category breakdown rows
+    const catRows = catEntries.map(([catName, cat]) => {
+        const topicEntries = Object.entries(cat.topics || {});
+        const catOn  = cat.enabled !== false;
+        const tOn    = topicEntries.filter(([, t]) => t.enabled !== false).length;
+        const tOff   = topicEntries.length - tOn;
+        const dotColor = catOn ? 'var(--success)' : 'var(--danger)';
+        const topicStr = topicEntries.length === 0 ? '—'
+            : `${tOn} on` + (tOff > 0 ? ` / <span style="color:var(--danger);">${tOff} off</span>` : '');
+        return `<div class="sys-cat-row">
+            <span style="color:${dotColor};font-size:10px;flex-shrink:0;">●</span>
+            <span class="sys-cat-name">${escapeHtmlSys(catName)}</span>
+            <span class="sys-cat-topics">${topicStr} topics</span>
+        </div>`;
+    }).join('');
 
     return `
         <div class="bot-detail-card">
             <div class="bot-detail-header">
                 <div class="flex-center">
-                    <h4>🤖 ${name}</h4>
-                    <span class="bot-status-badge ${bot.enabled ? 'active' : 'inactive'}">
-                        ${bot.enabled ? '✓ Active' : '○ Inactive'}
+                    <h4>🤖 ${escapeHtmlSys(name)}</h4>
+                    <span class="bot-status-badge ${bot.enabled !== false ? 'active' : 'inactive'}">
+                        ${bot.enabled !== false ? '✓ Active' : '○ Inactive'}
                     </span>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="navigateToBotConfig('${name}')">
+                <button class="btn btn-primary btn-sm" onclick="navigateToBotConfig('${escapeHtmlSys(name)}')">
                     Configure →
                 </button>
             </div>
@@ -189,15 +276,22 @@ function createBotDetailCard(name, bot) {
                 </div>
                 <div class="stat-item">
                     <span class="stat-label">Categories:</span>
-                    <span class="stat-value">${categoriesCount}</span>
+                    <span>${totalCats} total — ${countHtml(enabledCats, disabledCats)}</span>
                 </div>
                 <div class="stat-item">
                     <span class="stat-label">Topics:</span>
-                    <span class="stat-value">${topicsCount}</span>
+                    <span>${totalTopics} total — ${countHtml(enabledTopics, disabledTopics)}</span>
                 </div>
             </div>
+            ${catRows ? `<div class="sys-cat-breakdown">${catRows}</div>` : ''}
         </div>
     `;
+}
+
+// lightweight escaper for system page (escapeHtml defined later in monitor block)
+function escapeHtmlSys(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function navigateToBotConfig(botName) {
@@ -245,20 +339,46 @@ function getTotalTopics() {
 function updateStats() {
     const bots = globalConfig.bots || {};
     const collections = globalConfig.collections || {};
+
     const totalBots = Object.keys(bots).length;
-    const activeBots = Object.values(bots).filter(b => b.enabled).length;
-    
-    const el = (id, val) => {
-        const elem = document.getElementById(id);
-        if (elem) elem.textContent = val;
+    const activeBots = Object.values(bots).filter(b => b.enabled !== false).length;
+
+    const totalColls = Object.keys(collections).length;
+    const enabledColls = Object.values(collections).filter(c => c.enabled !== false).length;
+
+    let totalCats = 0, enabledCats = 0, totalTopics = 0, enabledTopics = 0;
+    for (const bot of Object.values(bots)) {
+        for (const [, cat] of Object.entries(bot.categories || {})) {
+            totalCats++;
+            if (cat.enabled !== false) enabledCats++;
+            for (const [, topic] of Object.entries(cat.topics || {})) {
+                totalTopics++;
+                if (topic.enabled !== false) enabledTopics++;
+            }
+        }
+    }
+
+    const set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+    const setSub = (id, on, total) => {
+        const e = document.getElementById(id);
+        if (!e) return;
+        const off = total - on;
+        e.innerHTML = off > 0
+            ? `<span style="color:var(--success)">${on} on</span> / <span style="color:var(--danger)">${off} off</span>`
+            : `<span style="color:var(--success)">all enabled</span>`;
     };
-    
-    el('total-bots', totalBots);
-    el('active-bots', activeBots);
-    el('total-collections', Object.keys(collections).length);
-    el('total-topics', getTotalTopics());
-    el('bots-count', totalBots);
-    el('collections-count', Object.keys(collections).length);
+
+    set('total-bots', totalBots);
+    setSub('stat-sub-bots', activeBots, totalBots);
+    set('total-collections', totalColls);
+    setSub('stat-sub-collections', enabledColls, totalColls);
+    set('total-categories', totalCats);
+    setSub('stat-sub-categories', enabledCats, totalCats);
+    set('total-topics', totalTopics);
+    setSub('stat-sub-topics', enabledTopics, totalTopics);
+
+    set('bots-count', totalBots);
+    set('collections-count', totalColls);
 }
 
 // ==================== Collections Page ====================
@@ -336,187 +456,130 @@ async function toggleCollection(collectionName, enabled) {
     }
 }
 
-function showAddCollectionModal() {
+// ==================== Channel Tag Input Helpers ====================
+function renderChannelTags(type) {
+    const arr = type === 'source' ? modalSources : modalTargets;
+    const containerId = type === 'source' ? 'source-tags' : 'target-tags';
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const placeholder = type === 'source' ? '+ @channel to read from' : '+ @channel to post into';
+    container.innerHTML = arr.map(ch => `
+        <span class="tag">
+            ${ch}
+            <span class="tag-remove" onclick="removeChannelTag('${ch.replace(/'/g, "\\'")}', '${type}')">×</span>
+        </span>
+    `).join('') + `<input type="text" class="tag-input" placeholder="${placeholder}"
+        onkeydown="handleChannelTagInput(event, '${type}')"
+        onblur="commitChannelTagInput(this, '${type}')">`;
+}
+
+function handleChannelTagInput(event, type) {
+    if (event.key === 'Enter' || event.key === ',') {
+        event.preventDefault();
+        const value = event.target.value.trim().replace(/,/g, '');
+        if (value) {
+            const arr = type === 'source' ? modalSources : modalTargets;
+            if (!arr.includes(value)) arr.push(value);
+            renderChannelTags(type);
+        }
+    }
+}
+
+function commitChannelTagInput(input, type) {
+    const value = input.value.trim().replace(/,/g, '');
+    if (value) {
+        const arr = type === 'source' ? modalSources : modalTargets;
+        if (!arr.includes(value)) arr.push(value);
+        renderChannelTags(type);
+    }
+}
+
+function removeChannelTag(channel, type) {
+    if (type === 'source') {
+        modalSources = modalSources.filter(c => c !== channel);
+    } else {
+        modalTargets = modalTargets.filter(c => c !== channel);
+    }
+    renderChannelTags(type);
+}
+
+// ==================== Collection Modal ====================
+function showAddCollectionModal(existingName = null) {
+    const existing = existingName ? globalConfig.collections[existingName] : null;
+
+    modalSources = existing ? [...(existing.source_channels || [])] : [];
+    modalTargets = existing
+        ? [...(existing.target_channels || (existing.target_channel ? [existing.target_channel] : []))]
+        : [];
+
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'collection-modal';
 
-    // Build source channel options (all accessible channels - bot can read)
-    const sourceChannelOptions = globalAdminChannels.map(ch => {
-        const displayName = ch.username || ch.title || ch.id;
-        const value = ch.username || ch.id;
-        const badge = ch.can_post ? ' ✓ Can Post' : ' 📖 Read Only';
-        return `<option value="${value}">${displayName} (${ch.id})${badge}</option>`;
-    }).join('');
-
-    // Build target channel options (only channels where bot can post)
-    const targetChannels = globalAdminChannels.filter(ch => ch.can_post);
-    const targetChannelOptions = targetChannels.map(ch => {
-        const displayName = ch.username || ch.title || ch.id;
-        const value = ch.username || ch.id;
-        return `<option value="${value}">${displayName} (${ch.id})</option>`;
-    }).join('');
-
-    const channelInfo = globalAdminChannels.length === 0
-        ? `<div class="alert alert-warning">
-                <strong>⚠️ No accessible channels found</strong>
-                <p>Make sure the bot is added to your channels.</p>
-                <div style="display: flex; gap: 10px; margin-top: 10px;">
-                    <button class="btn btn-sm btn-secondary" onclick="refreshAdminChannels()">🔄 Refresh</button>
-                    <button class="btn btn-sm btn-secondary" onclick="closeModal('collection-modal'); verifyAndAddChannel();">➕ Add Channel</button>
-                </div>
-            </div>`
-        : `<div class="alert alert-info">
-                <p>📋 ${globalAdminChannels.length} accessible channel(s) | ${targetChannels.length} can post.
-                <a href="#" onclick="verifyAndAddChannel(); return false;">Add more</a></p>
-            </div>`;
-
-    const noTargetWarning = targetChannels.length === 0
-        ? `<div class="alert alert-warning" style="margin-top: 8px;">
-                <strong>⚠️ No target channels available</strong>
-                <p>Bot must be admin with "Post Messages" permission in target channels.</p>
-            </div>`
-        : '';
-
     modal.innerHTML = `
         <div class="modal-dialog">
             <div class="modal-header">
-                <h3>Add Collection</h3>
+                <h3>${existing ? 'Edit Collection' : 'Add Collection'}</h3>
                 <button class="btn-icon" onclick="closeModal('collection-modal')">×</button>
             </div>
             <div class="modal-body">
-                ${channelInfo}
                 <div class="form-group">
                     <label class="form-label">Collection Name</label>
-                    <input type="text" class="input" id="collection-name" placeholder="e.g., news_sources">
+                    <input type="text" class="input" id="collection-name"
+                           placeholder="e.g., news_sources"
+                           value="${existingName || ''}"
+                           ${existingName ? 'disabled' : ''}>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Display Name</label>
-                    <input type="text" class="input" id="collection-display-name" placeholder="e.g., News Sources">
+                    <input type="text" class="input" id="collection-display-name"
+                           placeholder="e.g., News Sources"
+                           value="${existing ? (existing.name || '') : ''}">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Source Channels (Read Messages)</label>
-                    ${globalAdminChannels.length > 0
-                        ? `<select multiple class="input multi-select" id="collection-sources" size="5">
-                            ${sourceChannelOptions}
-                           </select>
-                           <small class="form-hint">Hold Ctrl/Cmd to select multiple. Bot needs to be a member.</small>`
-                        : `<input type="text" class="input" id="collection-sources-text" placeholder="@channel1, @channel2, or channel_username">
-                           <small class="form-hint">Enter channel usernames separated by commas. Use "Add Channel" button to verify them first.</small>`
-                    }
+                    <label class="form-label">Source Channels</label>
+                    <div class="tags-container" id="source-tags"></div>
+                    <small class="form-hint">Type @channel and press Enter. Bot does not need to be admin in source channels.</small>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Target Channels (Post Summaries)</label>
-                    ${targetChannels.length > 0
-                        ? `<select multiple class="input multi-select" id="collection-targets" size="5">
-                            ${targetChannelOptions}
-                           </select>
-                           <small class="form-hint">Hold Ctrl/Cmd to select multiple. Bot must be admin with "Post Messages".</small>`
-                        : `<input type="text" class="input" id="collection-targets-text" placeholder="@channel1, @channel2, or channel_username">
-                           <small class="form-hint">Enter channel usernames separated by commas. Bot must be admin with post permission.</small>
-                           <div class="alert alert-warning" style="margin-top: 8px;">
-                               <p>⚠️ Use "Add Channel" button above to verify channels first!</p>
-                           </div>`
-                    }
-                    ${noTargetWarning}
+                    <label class="form-label">Target Channels</label>
+                    <div class="tags-container" id="target-tags"></div>
+                    <small class="form-hint">Type @channel and press Enter. Bot must be admin with "Post Messages" permission in target channels.</small>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('collection-modal')">Cancel</button>
-                <button class="btn btn-primary" onclick="saveCollection()">Save</button>
+                <button class="btn btn-primary" onclick="saveCollection(${existingName ? `'${existingName}'` : ''})">Save</button>
             </div>
         </div>
     `;
 
     document.body.appendChild(modal);
-}
-
-async function refreshAdminChannels() {
-    showNotification('Refreshing channels...', 'info');
-    await loadAdminChannels();
-    const postableCount = globalAdminChannels.filter(ch => ch.can_post).length;
-    showNotification(`Loaded ${globalAdminChannels.length} accessible channels (${postableCount} can post)`, 'success');
-
-    // Re-render the current page to update channel dropdowns
-    const activePage = document.querySelector('.page.active');
-    if (activePage && activePage.id === 'collections-page') {
-        renderCollectionsPage();
-    } else if (activePage && activePage.id === 'bots-page') {
-        renderBotsPage();
-    }
-}
-
-async function verifyAndAddChannel() {
-    const channelIdentifier = prompt('Enter channel username (e.g., @mychannel) or channel ID:');
-    if (!channelIdentifier) return;
-
-    showNotification('Verifying channel...', 'info');
-
-    try {
-        const result = await api('/api/telegram/verify_channel', {
-            channel_identifier: channelIdentifier.trim()
-        });
-
-        if (result.status === 'ok') {
-            // Add to global admin channels if not already there
-            const existingChannel = globalAdminChannels.find(ch => ch.id === result.channel.id);
-            if (!existingChannel) {
-                globalAdminChannels.push(result.channel);
-            }
-            showNotification(`✓ Channel verified: ${result.channel.title}`, 'success');
-
-            // Refresh the current view
-            await refreshAdminChannels();
-        } else {
-            showNotification(`✗ ${result.message}`, 'error');
-        }
-    } catch (error) {
-        console.error('Error verifying channel:', error);
-        showNotification('Failed to verify channel', 'error');
-    }
+    renderChannelTags('source');
+    renderChannelTags('target');
 }
 
 async function saveCollection(existingName = null) {
     const collectionName = existingName || document.getElementById('collection-name').value.trim();
     const displayName = document.getElementById('collection-display-name').value.trim();
 
-    let sources = [];
-    let targets = [];
-
-    // Check if using select elements or text inputs
-    const sourcesSelect = document.getElementById('collection-sources');
-    const targetsSelect = document.getElementById('collection-targets');
-    const sourcesText = document.getElementById('collection-sources-text');
-    const targetsText = document.getElementById('collection-targets-text');
-
-    // Get sources (from select or text input)
-    if (sourcesSelect) {
-        sources = Array.from(sourcesSelect.selectedOptions).map(opt => opt.value);
-    } else if (sourcesText) {
-        const textValue = sourcesText.value.trim();
-        if (textValue) {
-            sources = textValue.split(',').map(s => s.trim()).filter(s => s);
+    // Commit any partially-typed channel in the input fields
+    ['source', 'target'].forEach(type => {
+        const container = document.getElementById(`${type}-tags`);
+        if (container) {
+            const input = container.querySelector('.tag-input');
+            if (input && input.value.trim()) commitChannelTagInput(input, type);
         }
-    }
+    });
 
-    // Get targets (from select or text input)
-    if (targetsSelect) {
-        targets = Array.from(targetsSelect.selectedOptions).map(opt => opt.value);
-    } else if (targetsText) {
-        const textValue = targetsText.value.trim();
-        if (textValue) {
-            targets = textValue.split(',').map(s => s.trim()).filter(s => s);
-        }
-    }
+    const sources = [...new Set(modalSources)];
+    const targets = [...new Set(modalTargets)];
 
     if (!collectionName || !targets.length) {
-        alert('Collection name and at least one target channel are required');
+        showAlert('Collection name and at least one target channel are required', { icon: '⚠️' });
         return;
     }
-
-    // Remove duplicates
-    sources = [...new Set(sources)];
-    targets = [...new Set(targets)];
 
     const result = await api('/api/collection/save', {
         collection_name: collectionName,
@@ -525,7 +588,7 @@ async function saveCollection(existingName = null) {
         target_channels: targets,
         enabled: true
     });
-    
+
     if (result.status === 'ok') {
         await loadAllData();
         renderCollectionsPage();
@@ -537,46 +600,20 @@ async function saveCollection(existingName = null) {
 }
 
 function editCollection(collectionName) {
-    const collection = globalConfig.collections[collectionName];
-    if (!collection) return;
-
-    showAddCollectionModal();
-
-    setTimeout(() => {
-        document.getElementById('collection-name').value = collectionName;
-        document.getElementById('collection-name').disabled = true;
-        document.getElementById('collection-display-name').value = collection.name || '';
-
-        // Set selected sources
-        const sourcesSelect = document.getElementById('collection-sources');
-        const sourceChannels = collection.source_channels || [];
-        for (let option of sourcesSelect.options) {
-            option.selected = sourceChannels.includes(option.value);
-        }
-
-        // Set selected targets (support both old and new format)
-        const targetsSelect = document.getElementById('collection-targets');
-        const targets = collection.target_channels || (collection.target_channel ? [collection.target_channel] : []);
-        for (let option of targetsSelect.options) {
-            option.selected = targets.includes(option.value);
-        }
-
-        const saveBtn = document.querySelector('#collection-modal .btn-primary');
-        saveBtn.onclick = () => saveCollection(collectionName);
-    }, 100);
+    showAddCollectionModal(collectionName);
 }
 
 async function deleteCollection(collectionName) {
-    if (!confirm(`Delete collection "${collectionName}"?`)) return;
-    
-    const result = await api('/api/collection/delete', { collection_name: collectionName });
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderCollectionsPage();
-        showNotification('Collection deleted', 'success');
-    } else {
-        showNotification('Failed to delete collection', 'error');
-    }
+    showConfirm(`Delete collection "${collectionName}"?`, async () => {
+        const result = await api('/api/collection/delete', { collection_name: collectionName });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderCollectionsPage();
+            showNotification('Collection deleted', 'success');
+        } else {
+            showNotification('Failed to delete collection', 'error');
+        }
+    }, { title: 'Delete Collection' });
 }
 
 // ==================== Bots Page ====================
@@ -640,6 +677,7 @@ function createBotConfigCard(name, bot) {
         </div>
         <div class="bot-config-body">
             ${createBasicSettingsSection(name, bot)}
+            ${createRulesSection(name, bot)}
             ${createPromptsSection(name)}
             ${createCategoriesSection(name, bot)}
         </div>
@@ -723,7 +761,10 @@ function createPromptsSection(botName) {
             <div class="collapsible-content">
                 <div class="collapsible-body">
                     <p class="text-muted mb-2">Manage prompts for this bot</p>
-                    ${Object.entries(prompts).map(([key, value]) => `
+                    ${Object.entries(prompts).map(([key, value]) => {
+                        const promptText   = (value && typeof value === 'object') ? (value.text   || '') : (value || '');
+                        const promptHeader = (value && typeof value === 'object') ? (value.header || '') : '';
+                        return `
                         <div class="form-group">
                             <div class="flex-between mb-1">
                                 <input type="text" class="input" value="${key}"
@@ -731,13 +772,20 @@ function createPromptsSection(botName) {
                                        style="max-width: 200px;">
                                 <button class="btn-icon btn-danger" onclick="deletePrompt('${botName}', '${key}')">🗑️</button>
                             </div>
+                            <label class="form-label" style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Header <span style="font-weight:400;">(text shown above the summary in Telegram)</span></label>
+                            <input type="text" class="input mb-1"
+                                   id="prompt-header-${botName}-${key}"
+                                   value="${escapeHtml(promptHeader)}"
+                                   onchange="updateBotPrompt('${botName}', '${key}')"
+                                   placeholder="e.g. 📰 ملخص الأخبار  (leave empty to auto-generate)">
+                            <label class="form-label" style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Prompt</label>
                             <textarea class="textarea"
                                       id="prompt-${botName}-${key}"
                                       rows="3"
-                                      onchange="updateBotPrompt('${botName}', '${key}', this.value)"
-                                      placeholder="Enter prompt text...">${value || ''}</textarea>
-                        </div>
-                    `).join('')}
+                                      onchange="updateBotPrompt('${botName}', '${key}')"
+                                      placeholder="Enter prompt text...">${escapeHtml(promptText)}</textarea>
+                        </div>`;
+                    }).join('')}
 
                     <button class="btn btn-secondary btn-sm mt-2" onclick="showAddPromptModal('${botName}')">
                         + Add Prompt
@@ -746,6 +794,132 @@ function createPromptsSection(botName) {
             </div>
         </div>
     `;
+}
+
+// ==================== Bot Rules Section ====================
+function createRulesSection(botName, bot) {
+    const rules       = bot.rules || {};
+    const removeRules = rules.remove  || [];
+    const replaceRules = rules.replace || [];
+    const total = removeRules.length + replaceRules.length;
+    const sectionId = `rules-${botName}`;
+    const savedState = loadCollapsibleState(sectionId);
+    const defaultOpen = savedState !== null ? savedState : false;
+
+    const removeRows = removeRules.map(kw => `
+        <div class="rules-row">
+            <input type="text" class="input rules-input" value="${escapeHtml(kw)}"
+                   placeholder="word or phrase…" onchange="saveBotRules('${botName}')">
+            <button class="btn-icon btn-danger" onclick="deleteRuleRow(this,'${botName}')">🗑️</button>
+        </div>`).join('');
+
+    const replaceRows = replaceRules.map(r => `
+        <div class="rules-row">
+            <input type="text" class="input rules-input" value="${escapeHtml(r.match || '')}"
+                   placeholder="Find…" onchange="saveBotRules('${botName}')">
+            <span class="rules-arrow">→</span>
+            <input type="text" class="input rules-input" value="${escapeHtml(r.replace_with || '')}"
+                   placeholder="Replace with…" onchange="saveBotRules('${botName}')">
+            <button class="btn-icon btn-danger" onclick="deleteRuleRow(this,'${botName}')">🗑️</button>
+        </div>`).join('');
+
+    return `
+        <div class="collapsible-section ${defaultOpen ? 'open' : ''}" id="${sectionId}">
+            <div class="collapsible-header" onclick="toggleCollapsible('${sectionId}')">
+                <div class="collapsible-title">
+                    <span class="icon">🔧</span>
+                    <span>Rules (${total})</span>
+                </div>
+                <span class="collapsible-toggle">▼</span>
+            </div>
+            <div class="collapsible-content">
+                <div class="collapsible-body">
+
+                    <div class="form-group">
+                        <label class="form-label">🚫 Remove Message</label>
+                        <small class="text-muted d-block mb-1">Message is discarded for this bot if it contains any of these words</small>
+                        <div id="rules-remove-${botName}">${removeRows}</div>
+                        <button class="btn btn-secondary btn-sm mt-1" onclick="addRemoveRule('${botName}')">+ Add Word</button>
+                    </div>
+
+                    <div class="form-group" style="margin-top:16px;">
+                        <label class="form-label">🔄 Replace in Message</label>
+                        <small class="text-muted d-block mb-1">Replaces matching words before categorisation &amp; summary</small>
+                        <div id="rules-replace-${botName}">${replaceRows}</div>
+                        <button class="btn btn-secondary btn-sm mt-1" onclick="addReplaceRule('${botName}')">+ Add Rule</button>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function addRemoveRule(botName) {
+    const container = document.getElementById(`rules-remove-${botName}`);
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'rules-row';
+    row.innerHTML = `
+        <input type="text" class="input rules-input" placeholder="word or phrase…" onchange="saveBotRules('${botName}')">
+        <button class="btn-icon btn-danger" onclick="deleteRuleRow(this,'${botName}')">🗑️</button>`;
+    container.appendChild(row);
+    row.querySelector('input').focus();
+}
+
+function addReplaceRule(botName) {
+    const container = document.getElementById(`rules-replace-${botName}`);
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'rules-row';
+    row.innerHTML = `
+        <input type="text" class="input rules-input" placeholder="Find…" onchange="saveBotRules('${botName}')">
+        <span class="rules-arrow">→</span>
+        <input type="text" class="input rules-input" placeholder="Replace with…" onchange="saveBotRules('${botName}')">
+        <button class="btn-icon btn-danger" onclick="deleteRuleRow(this,'${botName}')">🗑️</button>`;
+    container.appendChild(row);
+    row.querySelector('input').focus();
+}
+
+function deleteRuleRow(btn, botName) {
+    btn.closest('.rules-row').remove();
+    saveBotRules(botName);
+}
+
+async function saveBotRules(botName) {
+    const bot = globalConfig.bots?.[botName];
+    if (!bot) return;
+
+    // Collect remove rules
+    const remove = [...document.querySelectorAll(`#rules-remove-${botName} .rules-row input`)]
+        .map(el => el.value.trim()).filter(Boolean);
+
+    // Collect replace rules (each row has 2 inputs: match + replace_with)
+    const replace = [...document.querySelectorAll(`#rules-replace-${botName} .rules-row`)]
+        .map(row => {
+            const inputs = row.querySelectorAll('input');
+            const match = inputs[0]?.value.trim();
+            const replace_with = inputs[1]?.value.trim() ?? '';
+            return match ? { match, replace_with } : null;
+        }).filter(Boolean);
+
+    bot.rules = { remove, replace };
+
+    const result = await api('/api/bot/save', {
+        name: botName,
+        enabled: bot.enabled ?? true,
+        collections: bot.collections || [],
+        minimum_messages: bot.minimum_messages ?? 5,
+        rules: { remove, replace },
+        categories: bot.categories || {}
+    });
+
+    if (result.status === 'updated') {
+        // Update the Rules count in the collapsible header without full re-render
+        const header = document.querySelector(`#rules-${botName} .collapsible-title span:last-child`);
+        if (header) header.textContent = `Rules (${remove.length + replace.length})`;
+        showNotification('Rules saved', 'success');
+    }
 }
 
 function createCategoriesSection(botName, bot) {
@@ -946,7 +1120,7 @@ function formatSchedule(schedule) {
 async function createNewBot() {
     const name = document.getElementById('new-bot-name').value.trim();
     if (!name) {
-        alert('Please enter a bot name');
+        showAlert('Please enter a bot name', { icon: '✏️' });
         return;
     }
     
@@ -1005,15 +1179,15 @@ async function renameBot(oldName) {
 }
 
 async function deleteBot(botName) {
-    if (!confirm(`Delete bot "${botName}"? This cannot be undone.`)) return;
-    
-    const result = await api('/api/bot/delete', { name: botName });
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
-        renderSystemPage();
-        showNotification('Bot deleted', 'success');
-    }
+    showConfirm(`Delete bot "${botName}"? This cannot be undone.`, async () => {
+        const result = await api('/api/bot/delete', { name: botName });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage();
+            renderSystemPage();
+            showNotification('Bot deleted', 'success');
+        }
+    }, { title: 'Delete Bot' });
 }
 
 async function updateBotSetting(botName, key, value) {
@@ -1029,6 +1203,7 @@ async function updateBotSetting(botName, key, value) {
         enabled: bot.enabled ?? true,
         collections: bot.collections || [],
         minimum_messages: bot.minimum_messages ?? 5,
+        rules: bot.rules || { remove: [], replace: [] },
         categories: bot.categories || {}
     };
 
@@ -1043,8 +1218,10 @@ async function updateBotSetting(botName, key, value) {
     }
 }
 
-async function updateBotPrompt(botName, promptKey, value) {
-    const result = await api('/api/prompts/update', { bot_name: botName, key: promptKey, text: value });
+async function updateBotPrompt(botName, promptKey) {
+    const text   = document.getElementById(`prompt-${botName}-${promptKey}`)?.value || '';
+    const header = document.getElementById(`prompt-header-${botName}-${promptKey}`)?.value || '';
+    const result = await api('/api/prompts/update', { bot_name: botName, key: promptKey, text, header });
     if (result.status === 'ok') {
         await loadAllData();
         renderBotsPage();
@@ -1069,6 +1246,10 @@ function showAddPromptModal(botName) {
                     <input type="text" class="input" id="new-prompt-name" placeholder="e.g., brief_update, detailed_summary">
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Header <span style="font-weight:400;color:var(--text-muted)">(text shown above the summary in Telegram)</span></label>
+                    <input type="text" class="input" id="new-prompt-header" placeholder="e.g. 📰 ملخص الأخبار  (leave empty to auto-generate)">
+                </div>
+                <div class="form-group">
                     <label class="form-label">Prompt Text</label>
                     <textarea class="textarea" id="new-prompt-text" rows="5" placeholder="Enter the prompt text..."></textarea>
                 </div>
@@ -1084,40 +1265,45 @@ function showAddPromptModal(botName) {
 }
 
 async function saveNewPrompt(botName) {
-    const promptName = document.getElementById('new-prompt-name').value.trim();
-    const promptText = document.getElementById('new-prompt-text').value.trim();
+    const promptName   = document.getElementById('new-prompt-name').value.trim();
+    const promptHeader = document.getElementById('new-prompt-header').value.trim();
+    const promptText   = document.getElementById('new-prompt-text').value.trim();
 
     if (!promptName) {
-        alert('Please enter a prompt name');
+        showAlert('Please enter a prompt name', { icon: '✏️' });
         return;
     }
+
+    const doSave = async () => {
+        const result = await api('/api/prompts/update', { bot_name: botName, key: promptName, text: promptText, header: promptHeader });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage();
+            closeModal('add-prompt-modal');
+            showNotification('Prompt added', 'success');
+        }
+    };
 
     // Check if prompt already exists for this bot
     const botPrompts = (globalPrompts && globalPrompts[botName]) || {};
     if (botPrompts[promptName]) {
-        if (!confirm(`Prompt "${promptName}" already exists. Overwrite?`)) {
-            return;
-        }
-    }
-
-    const result = await api('/api/prompts/update', { bot_name: botName, key: promptName, text: promptText });
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
-        closeModal('add-prompt-modal');
-        showNotification('Prompt added', 'success');
+        showConfirm(`Prompt "${promptName}" already exists. Overwrite?`, doSave, {
+            title: 'Overwrite Prompt', confirmLabel: 'Overwrite', confirmClass: 'btn-primary'
+        });
+    } else {
+        await doSave();
     }
 }
 
 async function deletePrompt(botName, promptKey) {
-    if (!confirm(`Delete prompt "${promptKey}"?`)) return;
-
-    const result = await api('/api/prompts/delete', { bot_name: botName, key: promptKey });
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
-        showNotification('Prompt deleted', 'success');
-    }
+    showConfirm(`Delete prompt "${promptKey}"?`, async () => {
+        const result = await api('/api/prompts/delete', { bot_name: botName, key: promptKey });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage();
+            showNotification('Prompt deleted', 'success');
+        }
+    }, { title: 'Delete Prompt' });
 }
 
 async function renamePrompt(botName, oldKey, newKey) {
@@ -1129,17 +1315,19 @@ async function renamePrompt(botName, oldKey, newKey) {
 
     // Check if new key already exists for this bot
     if (botPrompts[newKey]) {
-        alert(`Prompt "${newKey}" already exists`);
+        showAlert(`Prompt "${newKey}" already exists`, { icon: '⚠️' });
         renderBotsPage(); // Reset the input
         return;
     }
 
-    // Get the old prompt text
-    const oldText = botPrompts[oldKey];
-    if (!oldText) return;
+    // Get the old prompt value (may be string or {header, text} dict)
+    const oldVal    = botPrompts[oldKey];
+    if (!oldVal) return;
+    const oldText   = (oldVal && typeof oldVal === 'object') ? (oldVal.text   || '') : (oldVal || '');
+    const oldHeader = (oldVal && typeof oldVal === 'object') ? (oldVal.header || '') : '';
 
     // Create new prompt with new key
-    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newKey, text: oldText });
+    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newKey, text: oldText, header: oldHeader });
     if (addResult.status === 'ok') {
         // Delete old prompt
         await api('/api/prompts/delete', { bot_name: botName, key: oldKey });
@@ -1217,7 +1405,7 @@ async function addCategory(botName) {
     const name = input.value.trim();
     
     if (!name) {
-        alert('Please enter a category name');
+        showAlert('Please enter a category name', { icon: '✏️' });
         return;
     }
     
@@ -1237,18 +1425,17 @@ async function addCategory(botName) {
 }
 
 async function deleteCategory(botName, categoryName) {
-    if (!confirm(`Delete category "${categoryName}" and all its topics?`)) return;
-    
-    const result = await api('/api/category/delete', {
-        bot_name: botName,
-        category_name: categoryName
-    });
-    
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
-        showNotification('Category deleted', 'success');
-    }
+    showConfirm(`Delete category "${categoryName}" and all its topics?`, async () => {
+        const result = await api('/api/category/delete', {
+            bot_name: botName,
+            category_name: categoryName
+        });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage();
+            showNotification('Category deleted', 'success');
+        }
+    }, { title: 'Delete Category' });
 }
 
 async function toggleCategory(botName, categoryName, enabled) {
@@ -1271,7 +1458,7 @@ async function addTopic(botName, categoryName) {
     const name = input.value.trim();
     
     if (!name) {
-        alert('Please enter a topic name');
+        showAlert('Please enter a topic name', { icon: '✏️' });
         return;
     }
     
@@ -1292,19 +1479,18 @@ async function addTopic(botName, categoryName) {
 }
 
 async function deleteTopic(botName, categoryName, topicName) {
-    if (!confirm(`Delete topic "${topicName}"?`)) return;
-    
-    const result = await api('/api/topic/delete', {
-        bot_name: botName,
-        category_name: categoryName,
-        topic_name: topicName
-    });
-    
-    if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
-        showNotification('Topic deleted', 'success');
-    }
+    showConfirm(`Delete topic "${topicName}"?`, async () => {
+        const result = await api('/api/topic/delete', {
+            bot_name: botName,
+            category_name: categoryName,
+            topic_name: topicName
+        });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage();
+            showNotification('Topic deleted', 'success');
+        }
+    }, { title: 'Delete Topic' });
 }
 
 async function toggleTopic(botName, categoryName, topicName, enabled) {
@@ -1372,7 +1558,7 @@ async function saveLinkTopic(botName, categoryName, topicName) {
     const linkedTopicPath = document.getElementById('link-topic-select').value;
 
     if (!linkedTopicPath) {
-        alert('Please select a topic to link');
+        showAlert('Please select a topic to link', { icon: '⚠️' });
         return;
     }
 
@@ -1385,7 +1571,7 @@ async function saveLinkTopic(botName, categoryName, topicName) {
     const linkedTopicName = linkedTopicPath.split('/')[1];
 
     if (topic.linked_topics.includes(linkedTopicName)) {
-        alert('This topic is already linked');
+        showAlert('This topic is already linked', { icon: '⚠️' });
         return;
     }
 
@@ -1575,7 +1761,7 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     const prompt_key = document.getElementById('topic-schedule-prompt').value;
     
     if (!name) {
-        alert('Please enter a schedule name');
+        showAlert('Please enter a schedule name', { icon: '✏️' });
         return;
     }
     
@@ -1640,22 +1826,22 @@ async function toggleTopicSchedule(botName, categoryName, topicName, scheduleInd
 }
 
 async function deleteTopicSchedule(botName, categoryName, topicName, scheduleIndex) {
-    if (!confirm('Delete this schedule?')) return;
+    showConfirm('Delete this schedule?', async () => {
+        const result = await api('/api/topic/schedule/delete', {
+            bot_name: botName,
+            category_name: categoryName,
+            topic_name: topicName,
+            schedule_index: scheduleIndex
+        });
 
-    const result = await api('/api/topic/schedule/delete', {
-        bot_name: botName,
-        category_name: categoryName,
-        topic_name: topicName,
-        schedule_index: scheduleIndex
-    });
-
-    if (result.status === 'ok') {
-        await loadAllData();
-        const topicId = `topic-${botName}-${categoryName}-${topicName}`;
-        const categoryId = `categories-${botName}`;
-        renderBotsPage([topicId, categoryId]);
-        showNotification('Schedule deleted', 'success');
-    }
+        if (result.status === 'ok') {
+            await loadAllData();
+            const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+            const categoryId = `categories-${botName}`;
+            renderBotsPage([topicId, categoryId]);
+            showNotification('Schedule deleted', 'success');
+        }
+    }, { title: 'Delete Schedule' });
 }
 
 // ==================== Utility Functions ====================
@@ -1799,5 +1985,409 @@ style.textContent = `
         from { transform: translateX(0); opacity: 1; }
         to { transform: translateX(100%); opacity: 0; }
     }
+
+    /* ==================== Monitor Page ==================== */
+    /* collapsible section */
+    .mon-section { background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); margin-bottom:14px; overflow:hidden; }
+    .mon-section-hdr { display:flex; justify-content:space-between; align-items:center; padding:13px 18px; font-weight:600; font-size:13px; cursor:pointer; user-select:none; background:var(--bg-tertiary); transition:var(--transition); }
+    .mon-section-hdr:hover { background:var(--border-color); }
+    .mon-section-body { padding:0; }
+    .mon-chevron { font-size:11px; color:var(--text-muted); }
+    .mon-empty { padding:20px; text-align:center; color:var(--text-muted); font-size:13px; }
+
+    /* bot card */
+    .mon-bot-card { background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); margin-bottom:14px; overflow:hidden; }
+    .mon-bot-hdr { display:flex; align-items:center; gap:10px; padding:13px 18px; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); font-weight:700; font-size:14px; }
+    .mon-bot-dot-on  { font-size:10px; color:var(--success); }
+    .mon-bot-dot-off { font-size:10px; color:var(--danger); }
+
+    /* category */
+    .mon-cat-hdr { padding:6px 18px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-muted); background:var(--bg-primary); border-bottom:1px solid var(--border-color); }
+
+    /* topic block */
+    .mon-topic-block { border-bottom:1px solid var(--border-color); }
+    .mon-topic-block:last-child { border-bottom:none; }
+    .mon-topic-title { display:flex; align-items:center; gap:8px; padding:9px 18px 4px; font-weight:600; font-size:13px; color:var(--text-primary); text-transform:capitalize; }
+    .mon-topic-off { opacity:0.45; }
+
+    /* schedule row */
+    .mon-sch-row { display:flex; align-items:center; justify-content:space-between; padding:6px 18px 6px 32px; gap:12px; flex-wrap:wrap; }
+    .mon-sch-row:last-child { padding-bottom:10px; }
+    .mon-sch-left { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .mon-sch-icon { font-size:14px; }
+    .mon-sch-name { font-size:12px; font-weight:600; color:var(--text-primary); }
+    .mon-sch-prompt { font-size:10px; padding:1px 7px; border-radius:20px; background:rgba(59,130,246,0.12); color:#93c5fd; font-weight:600; }
+    .mon-sch-spec { font-size:11px; color:var(--text-muted); }
+    .mon-sch-disabled { opacity:0.4; }
+
+    .mon-sch-right { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+    .mon-pending { font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; white-space:nowrap; }
+    .mon-pending.has  { background:rgba(16,185,129,0.15); color:#34d399; }
+    .mon-pending.none { background:rgba(100,116,139,0.12); color:var(--text-muted); }
+    .mon-next-label { font-size:10px; color:var(--text-muted); }
+    .mon-countdown { font-size:12px; font-weight:700; color:var(--success); min-width:60px; text-align:right; }
+    .mon-countdown.urgent { color:var(--warning); }
+
+    /* shared table style */
+    .mon-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .mon-table th { padding:8px 12px; text-align:left; color:var(--text-muted); font-weight:600; border-bottom:1px solid var(--border-color); white-space:nowrap; }
+    .mon-table td { padding:7px 12px; border-bottom:1px solid rgba(45,55,72,0.4); vertical-align:top; color:var(--text-secondary); }
+    .mon-table tr:last-child td { border-bottom:none; }
+    .mon-table tr:hover td { background:var(--bg-tertiary); }
+    .mon-ellipsis { max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mon-type-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; white-space:nowrap; }
+    .mon-type-badge.hourly { background:rgba(59,130,246,0.18); color:#60a5fa; }
+    .mon-type-badge.daily  { background:rgba(139,92,246,0.18); color:#a78bfa; }
+    .mon-type-badge.minute { background:rgba(245,158,11,0.18); color:#fbbf24; }
+
+    /* messages section */
+    .mon-coll-hdr { padding:9px 14px; font-weight:700; font-size:12px; color:var(--accent-primary); background:var(--bg-tertiary); border-bottom:1px solid var(--border-color); }
+    .mon-ch-hdr   { padding:6px 14px; font-size:11px; color:var(--text-muted); background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
+    .mon-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:10px; background:rgba(59,130,246,0.13); color:#93c5fd; margin:1px; }
+    .mon-tag.cat { background:rgba(139,92,246,0.13); color:#c4b5fd; }
+
+    /* tab bar */
+    .mon-tab-bar { display:flex; gap:2px; padding:12px 16px 0; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
+    .mon-tab { padding:7px 20px; border:none; border-radius:6px 6px 0 0; background:transparent; color:var(--text-muted); cursor:pointer; font-size:13px; font-weight:500; transition:all 0.15s; border-bottom:2px solid transparent; margin-bottom:-1px; }
+    .mon-tab:hover { color:var(--text-primary); background:var(--bg-tertiary); }
+    .mon-tab.active { color:var(--accent-primary); background:var(--bg-card); border-bottom:2px solid var(--accent-primary); font-weight:600; }
+    .mon-tab-panel { padding:16px; }
+    .mon-filter-bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 0 14px; border-bottom:1px solid var(--border-color); margin-bottom:14px; }
+    .mon-filter-sel { min-width:130px; max-width:180px; height:32px; font-size:12px; padding:0 8px; }
+    .mon-filter-search { flex:1; min-width:160px; max-width:320px; height:32px; font-size:12px; padding:0 10px; }
+    .rules-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+    .rules-row:last-child { margin-bottom:0; }
+    .rules-input { flex:1; min-width:0; height:32px; font-size:13px; }
+    .rules-arrow { color:var(--text-muted); font-size:14px; flex-shrink:0; }
 `;
+
+// ==================== Monitor Page ====================
+let _monitorData = null;
+let _monitorTimerInterval = null;
+let _monitorRefreshInterval = null;
+let _monActiveTab = 'schedules';
+let _allSummaries = [];
+let _allMessages  = [];
+
+async function loadMonitorData() {
+    const container = document.getElementById('monitor-bots-container');
+    container.innerHTML = '<p class="mon-empty">Loading…</p>';
+    const data = await api('/api/monitor/data');
+    if (data.status !== 'ok') {
+        container.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
+        return;
+    }
+    _monitorData = data;
+    renderMonitorBots(data.bots || {});
+    renderMonSummaries(data.recent_summaries || []);
+    if (_monActiveTab === 'messages') loadMonitorMessages();
+    else if (_monActiveTab === 'summaries') applyMonSummaryFilters();
+    startMonitorCountdowns();
+}
+
+function switchMonTab(tab) {
+    _monActiveTab = tab;
+    document.querySelectorAll('.mon-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.tab === tab)
+    );
+    document.getElementById('mon-tab-schedules').style.display = tab === 'schedules' ? '' : 'none';
+    document.getElementById('mon-tab-summaries').style.display = tab === 'summaries' ? '' : 'none';
+    document.getElementById('mon-tab-messages').style.display  = tab === 'messages'  ? '' : 'none';
+    if (tab === 'messages') loadMonitorMessages();
+}
+
+// ---------- Topics & Schedules ----------
+function renderMonitorBots(bots) {
+    const container = document.getElementById('monitor-bots-container');
+    if (!Object.keys(bots).length) {
+        container.innerHTML = '<p class="mon-empty">No bots configured.</p>';
+        return;
+    }
+
+    container.innerHTML = Object.entries(bots).map(([botName, botData]) => {
+        const dotCls = botData.enabled ? 'mon-bot-dot-on' : 'mon-bot-dot-off';
+        const dotTxt = botData.enabled ? '● ACTIVE' : '● OFF';
+
+        const categoriesHtml = Object.entries(botData.categories || {}).map(([catName, catData]) => {
+            const topicsHtml = Object.entries(catData.topics || {}).map(([topicName, topicData]) => {
+                const p = topicData.pending || {};
+                const offCls = topicData.enabled === false ? ' mon-topic-off' : '';
+
+                const schRows = (topicData.schedules || []).map(sch => {
+                    const pending = p[sch.type] || 0;
+                    const pendingCls = pending > 0 ? 'has' : 'none';
+                    const pendingTxt = pending > 0 ? `${pending} pending` : 'none';
+                    const disabledCls = sch.enabled === false ? ' mon-sch-disabled' : '';
+                    const icon = scheduleIcon(sch);
+                    const spec = scheduleSpec(sch);
+                    const schJson = escapeHtml(JSON.stringify(sch));
+                    return `<div class="mon-sch-row${disabledCls}" data-schedule="${schJson}">
+                        <div class="mon-sch-left">
+                            <span class="mon-sch-icon">${icon}</span>
+                            <span class="mon-sch-name">${escapeHtml(sch.name || sch.type)}</span>
+                            <span class="mon-sch-prompt">${escapeHtml(sch.prompt_key || '')}</span>
+                            <span class="mon-sch-spec">${spec}</span>
+                        </div>
+                        <div class="mon-sch-right">
+                            <span class="mon-pending ${pendingCls}">${pendingTxt}</span>
+                            <span class="mon-next-label">next in</span>
+                            <span class="mon-countdown">${sch.enabled === false ? '—' : '…'}</span>
+                        </div>
+                    </div>`;
+                }).join('');
+
+                return `<div class="mon-topic-block">
+                    <div class="mon-topic-title${offCls}">
+                        ${escapeHtml(topicName)}
+                        ${topicData.enabled === false ? '<span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}
+                    </div>
+                    ${schRows}
+                </div>`;
+            }).join('');
+
+            return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
+        }).join('');
+
+        return `<div class="mon-bot-card">
+            <div class="mon-bot-hdr">🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></div>
+            ${categoriesHtml}
+        </div>`;
+    }).join('');
+}
+
+function scheduleIcon(sch) {
+    if (sch.type === 'hourly') return '🕐';
+    if (sch.type === 'daily')  return '📅';
+    if (sch.type === 'minute') return '⚡';
+    return '🔔';
+}
+
+function scheduleSpec(sch) {
+    if (sch.type === 'hourly') return `every hour at :${String(sch.minute ?? 0).padStart(2,'0')}`;
+    if (sch.type === 'daily')  return `daily at ${String(sch.hour ?? 0).padStart(2,'0')}:${String(sch.minute ?? 0).padStart(2,'0')}`;
+    if (sch.type === 'minute') return `every ${sch.minute ?? 1} min`;
+    return sch.type;
+}
+
+// ---------- Countdown timer ----------
+function startMonitorCountdowns() {
+    if (_monitorTimerInterval) clearInterval(_monitorTimerInterval);
+    _monitorTimerInterval = setInterval(tickCountdowns, 1000);
+    tickCountdowns();
+}
+
+function tickCountdowns() {
+    document.querySelectorAll('[data-schedule]').forEach(row => {
+        const cdEl = row.querySelector('.mon-countdown');
+        if (!cdEl) return;
+        let sch;
+        try { sch = JSON.parse(row.dataset.schedule); } catch { return; }
+        if (sch.enabled === false) { cdEl.textContent = '—'; return; }
+        const next = computeNextRun(sch);
+        if (!next) { cdEl.textContent = '—'; return; }
+        const diff = Math.max(0, next - Date.now());
+        cdEl.textContent = formatDuration(diff);
+        cdEl.classList.toggle('urgent', diff < 60000);
+    });
+}
+
+function computeNextRun(sch) {
+    const now = new Date();
+    if (sch.type === 'hourly') {
+        const next = new Date(now);
+        next.setMinutes(sch.minute ?? 0, 0, 0);
+        if (next <= now) next.setHours(next.getHours() + 1);
+        return next;
+    }
+    if (sch.type === 'daily') {
+        const next = new Date(now);
+        next.setHours(sch.hour ?? 0, sch.minute ?? 0, 0, 0);
+        if (next <= now) next.setDate(next.getDate() + 1);
+        return next;
+    }
+    if (sch.type === 'minute') {
+        const interval = sch.minute ?? 1;
+        const totalMin = now.getHours() * 60 + now.getMinutes();
+        const nextTotalMin = Math.ceil((totalMin + 1) / interval) * interval;
+        const next = new Date(now);
+        next.setHours(Math.floor(nextTotalMin / 60), nextTotalMin % 60, 0, 0);
+        return next;
+    }
+    return null;
+}
+
+function formatDuration(ms) {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m`;
+    if (m > 0) return `${m}m ${String(sec).padStart(2,'0')}s`;
+    return `${sec}s`;
+}
+
+// ---------- Recent Summaries ----------
+function renderMonSummaries(summaries) {
+    _allSummaries = summaries;
+    // Populate dynamic dropdowns
+    const bots   = [...new Set(summaries.map(s => s.bot_name).filter(Boolean))].sort();
+    const topics = [...new Set(summaries.map(s => s.topic_name).filter(Boolean))].sort();
+    _populateMonSelect('sum-filter-bot',   bots,   'All Bots');
+    _populateMonSelect('sum-filter-topic', topics, 'All Topics');
+    applyMonSummaryFilters();
+}
+
+function applyMonSummaryFilters() {
+    const bot    = document.getElementById('sum-filter-bot')?.value   || '';
+    const topic  = document.getElementById('sum-filter-topic')?.value || '';
+    const type   = document.getElementById('sum-filter-type')?.value  || '';
+    const search = (document.getElementById('sum-search')?.value || '').trim().toLowerCase();
+
+    let filtered = _allSummaries;
+    if (bot)    filtered = filtered.filter(s => s.bot_name    === bot);
+    if (topic)  filtered = filtered.filter(s => s.topic_name  === topic);
+    if (type)   filtered = filtered.filter(s => s.summary_type === type);
+    if (search) filtered = filtered.filter(s => (s.preview || '').toLowerCase().includes(search));
+
+    const el = document.getElementById('mon-summaries-content');
+    if (!filtered.length) {
+        el.innerHTML = `<p class="mon-empty">${_allSummaries.length ? 'No summaries match the filters.' : 'No summaries sent yet.'}</p>`;
+        return;
+    }
+    const rows = filtered.map(s => {
+        const ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '—';
+        const typeCls = s.summary_type || 'hourly';
+        return `<tr>
+            <td style="white-space:nowrap;">${ts}</td>
+            <td>${escapeHtml(s.bot_name || '—')}</td>
+            <td>${escapeHtml(s.topic_name || '—')}</td>
+            <td><span class="mon-type-badge ${typeCls}">${escapeHtml(s.summary_type || '—')}</span></td>
+            <td style="text-align:center;">${s.message_count ?? '—'}</td>
+            <td>${escapeHtml(s.target_entity || '—')}</td>
+            <td class="mon-ellipsis" title="${escapeHtml(s.preview || '')}">${escapeHtml(s.preview || '')}</td>
+        </tr>`;
+    }).join('');
+    el.innerHTML = `<div style="overflow-x:auto;">
+        <table class="mon-table">
+            <thead><tr><th>Time</th><th>Bot</th><th>Topic</th><th>Type</th><th>Msgs</th><th>Target</th><th>Preview</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>`;
+}
+
+// ---------- Received Messages ----------
+async function loadMonitorMessages() {
+    const el = document.getElementById('mon-messages-content');
+    el.innerHTML = '<p class="mon-empty">Loading…</p>';
+    const data = await api('/api/monitor/messages');
+    if (data.status !== 'ok') {
+        el.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
+        return;
+    }
+    renderMonMessages(data.messages || []);
+}
+
+function renderMonMessages(messages) {
+    _allMessages = messages;
+    // Populate dynamic dropdowns
+    const colls    = [...new Set(messages.map(m => m.collection).filter(Boolean))].sort();
+    const channels = [...new Set(messages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
+    const topics   = [...new Set(messages.flatMap(m => (m.topics || '').split(',').map(t => t.trim())).filter(Boolean))].sort();
+    _populateMonSelect('msg-filter-coll',    colls,    'All Collections');
+    _populateMonSelect('msg-filter-channel', channels, 'All Channels');
+    _populateMonSelect('msg-filter-topic',   topics,   'All Topics');
+    applyMonMessageFilters();
+}
+
+function applyMonMessageFilters() {
+    const coll    = document.getElementById('msg-filter-coll')?.value    || '';
+    const channel = document.getElementById('msg-filter-channel')?.value || '';
+    const topic   = document.getElementById('msg-filter-topic')?.value   || '';
+    const search  = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
+
+    let filtered = _allMessages;
+    if (coll)    filtered = filtered.filter(m => m.collection === coll);
+    if (channel) filtered = filtered.filter(m => `@${m.channel_username}` === channel);
+    if (topic)   filtered = filtered.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
+    if (search)  filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+
+    const el = document.getElementById('mon-messages-content');
+    if (!filtered.length) {
+        el.innerHTML = `<p class="mon-empty">${_allMessages.length ? 'No messages match the filters.' : 'No messages in DB yet.'}</p>`;
+        return;
+    }
+
+    // Group: collection → channel → [messages]
+    const grouped = {};
+    for (const msg of filtered) {
+        const c  = msg.collection || '—';
+        const ch = msg.channel_username ? `@${msg.channel_username}` : `id:${msg.channel_id}`;
+        if (!grouped[c])     grouped[c]     = {};
+        if (!grouped[c][ch]) grouped[c][ch] = [];
+        grouped[c][ch].push(msg);
+    }
+
+    el.innerHTML = Object.entries(grouped).map(([collName, channels]) => {
+        const chHtml = Object.entries(channels).map(([chName, msgs]) => {
+            const rowsHtml = msgs.map(m => {
+                const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+                const topicTags = (m.topics || '').split(',').filter(Boolean)
+                    .map(t => `<span class="mon-tag">${escapeHtml(t.trim())}</span>`).join('');
+                const catTags = (m.categories || '').split(',').filter(Boolean)
+                    .map(c => `<span class="mon-tag cat">${escapeHtml(c.trim())}</span>`).join('');
+                const kwTags = (m.keywords_found || '').split(',').filter(Boolean).slice(0,5)
+                    .map(k => `<span class="mon-tag">${escapeHtml(k.trim())}</span>`).join('');
+                return `<tr>
+                    <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                    <td>${topicTags || '<span style="color:var(--text-muted)">—</span>'}</td>
+                    <td>${catTags  || '<span style="color:var(--text-muted)">—</span>'}</td>
+                    <td>${kwTags   || '<span style="color:var(--text-muted)">—</span>'}</td>
+                    <td class="mon-ellipsis" title="${escapeHtml(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+                </tr>`;
+            }).join('');
+            return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)}</div>
+                <div style="overflow-x:auto;">
+                <table class="mon-table">
+                    <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table></div>`;
+        }).join('');
+        return `<div class="mon-coll-hdr">📦 ${escapeHtml(collName)}</div>${chHtml}`;
+    }).join('');
+}
+
+// Populate a <select> keeping its first "All …" option and preserving current selection.
+function _populateMonSelect(id, values, allLabel) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const current = el.value;
+    el.innerHTML = `<option value="">${allLabel}</option>` +
+        values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+    if (values.includes(current)) el.value = current;
+}
+
+// ---------- Collapsible sections ----------
+function toggleMonSec(bodyId, iconId) {
+    const body = document.getElementById(bodyId);
+    const icon = document.getElementById(iconId);
+    if (!body) return;
+    const isHidden = body.style.display === 'none';
+    body.style.display = isHidden ? '' : 'none';
+    if (icon) icon.textContent = isHidden ? '▼' : '▶';
+}
+
+// ---------- Auto-refresh ----------
+function toggleMonitorAutoRefresh(enabled) {
+    if (_monitorRefreshInterval) { clearInterval(_monitorRefreshInterval); _monitorRefreshInterval = null; }
+    if (enabled) _monitorRefreshInterval = setInterval(loadMonitorData, 15000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    toggleMonitorAutoRefresh(true);
+});
+
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 document.head.appendChild(style);

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Body
 from utils.helpers import load_config, save_config
+from utils.database import get_db
 
 router = APIRouter()
 
@@ -131,10 +132,9 @@ def add_topic(data: dict = Body(...)):
     if topic_name in topics:
         return {"status": "error", "message": "Topic already exists"}
     
-    # Create new topic with default schedule
+    # Create new topic with default schedule (no keywords in config — stored in DB)
     topics[topic_name] = {
         'enabled': True,
-        'keywords': [],
         'linked_topics': [],
         'schedules': [
             {
@@ -146,7 +146,7 @@ def add_topic(data: dict = Body(...)):
             }
         ]
     }
-    
+
     save_config(cfg)
     return {"status": "ok", "topic_name": topic_name}
 
@@ -247,17 +247,14 @@ def update_topic(data: dict = Body(...)):
     if topic_name not in topics:
         return {"status": "error", "message": "Topic not found"}
 
-    # Update keywords if provided
+    # Update keywords if provided — stored in DB, not config
     if keywords is not None:
-        # Handle comma-separated or space-separated string input
         if isinstance(keywords, str):
-            # Try comma-separated first, fallback to space-separated
             if ',' in keywords:
                 keywords = [kw.strip() for kw in keywords.split(',') if kw.strip()]
             else:
                 keywords = [kw.strip() for kw in keywords.split() if kw.strip()]
 
-        # Ensure it's a list and remove duplicates while preserving order
         if isinstance(keywords, list):
             seen = set()
             unique_keywords = []
@@ -266,9 +263,13 @@ def update_topic(data: dict = Body(...)):
                 if kw and kw not in seen:
                     seen.add(kw)
                     unique_keywords.append(kw)
-            topics[topic_name]['keywords'] = unique_keywords
 
-    # Update linked topics if provided
+            db = get_db()
+            if db is None:
+                return {"status": "error", "message": "Database not available"}
+            db.set_topic_keywords(bot_name, category_name, topic_name, unique_keywords)
+
+    # Update linked topics if provided (still in config)
     if linked_topics is not None:
         topics[topic_name]['linked_topics'] = linked_topics
 
@@ -370,6 +371,54 @@ def delete_topic_schedule(data: dict = Body(...)):
     save_config(cfg)
     
     return {"status": "ok"}
+
+@router.get("/topic/keywords")
+def get_topic_keywords(bot_name: str, category_name: str, topic_name: str):
+    """Fetch keywords for a topic from the database."""
+    db = get_db()
+    if db is None:
+        return {"status": "error", "message": "Database not available"}
+    keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
+    return {"status": "ok", "keywords": keywords, "count": len(keywords)}
+
+
+@router.post("/topic/keyword/add")
+def add_topic_keyword(data: dict = Body(...)):
+    """Add a single keyword to a topic in the database."""
+    bot_name = data.get('bot_name')
+    category_name = data.get('category_name')
+    topic_name = data.get('topic_name')
+    keyword = (data.get('keyword') or '').strip()
+
+    if not bot_name or not category_name or not topic_name or not keyword:
+        return {"status": "error", "message": "Missing required fields"}
+
+    db = get_db()
+    if db is None:
+        return {"status": "error", "message": "Database not available"}
+
+    inserted = db.add_keyword(bot_name, category_name, topic_name, keyword)
+    return {"status": "ok", "inserted": inserted, "keyword": keyword}
+
+
+@router.post("/topic/keyword/delete")
+def delete_topic_keyword(data: dict = Body(...)):
+    """Delete a single keyword from a topic in the database."""
+    bot_name = data.get('bot_name')
+    category_name = data.get('category_name')
+    topic_name = data.get('topic_name')
+    keyword = (data.get('keyword') or '').strip()
+
+    if not bot_name or not category_name or not topic_name or not keyword:
+        return {"status": "error", "message": "Missing required fields"}
+
+    db = get_db()
+    if db is None:
+        return {"status": "error", "message": "Database not available"}
+
+    deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword)
+    return {"status": "ok", "deleted": deleted, "keyword": keyword}
+
 
 @router.post("/topic/schedule/update")
 def update_topic_schedule(data: dict = Body(...)):
