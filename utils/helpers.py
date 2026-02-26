@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import sys
@@ -39,8 +40,13 @@ def setup_logging(config):
     logger = logging.getLogger()
     logger.setLevel(getattr(logging, log_config["level"]))
     
-    # Console handler
-    console_handler = logging.StreamHandler()
+    # Console handler — explicitly use UTF-8 so Unicode chars (→, Arabic, etc.)
+    # don't crash on Windows where sys.stderr defaults to CP1252.
+    if hasattr(sys.stderr, 'buffer'):
+        _stream = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    else:
+        _stream = sys.stderr
+    console_handler = logging.StreamHandler(_stream)
     console_handler.setLevel(logging.INFO)
     console_format = logging.Formatter(
         '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
@@ -52,7 +58,8 @@ def setup_logging(config):
     file_handler = RotatingFileHandler(
         log_config["file"],
         maxBytes=log_config["max_file_size_mb"] * 1024 * 1024,
-        backupCount=log_config["backup_count"]
+        backupCount=log_config["backup_count"],
+        encoding='utf-8',
     )
     file_handler.setLevel(getattr(logging, log_config["level"]))
     file_format = logging.Formatter(
@@ -100,7 +107,8 @@ def start_bot_subprocess(app_state):
         bufsize=1,
         encoding='utf-8',
         errors='replace',
-        cwd=bot_dir
+        cwd=bot_dir,
+        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
     )
 
     # Wait briefly and check if process crashed immediately
