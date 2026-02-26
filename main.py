@@ -25,6 +25,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.errors import UserAlreadyParticipantError, InviteHashInvalidError, ChannelPrivateError
 
 
 # ==================== UTF-8 Config ====================
@@ -72,10 +75,50 @@ client: TelegramClient = None  # Set in main()
 _source_channel_map: dict = {}
 
 
+async def _try_join_channel(ch_identifier: str):
+    """
+    Attempt to join a channel by @username or invite link.
+    Silently ignores if already a member or if it's a numeric ID (already joined).
+    """
+    stripped = ch_identifier.strip()
+
+    # Numeric ID — we're already a member, nothing to do
+    if stripped.lstrip('-').isdigit():
+        return
+
+    # Invite link: t.me/+HASH or t.me/joinchat/HASH
+    if '+' in stripped or 'joinchat' in stripped:
+        try:
+            # Extract just the hash portion
+            hash_part = stripped.split('+')[-1] if '+' in stripped else stripped.split('joinchat/')[-1]
+            hash_part = hash_part.split('?')[0].strip('/')
+            await client(ImportChatInviteRequest(hash_part))
+            logger.info(f"[JOIN] Joined via invite link: {stripped}")
+        except UserAlreadyParticipantError:
+            pass
+        except InviteHashInvalidError:
+            logger.warning(f"[JOIN] Invalid invite hash: {stripped}")
+        except Exception as e:
+            logger.warning(f"[JOIN] Could not join via invite '{stripped}': {e}")
+        return
+
+    # @username channel
+    try:
+        await client(JoinChannelRequest(stripped))
+        logger.info(f"[JOIN] Joined channel: {stripped}")
+    except UserAlreadyParticipantError:
+        pass
+    except ChannelPrivateError:
+        logger.warning(f"[JOIN] Channel is private (invite needed): {stripped}")
+    except Exception as e:
+        logger.warning(f"[JOIN] Could not join '{stripped}': {e}")
+
+
 async def build_source_channel_map(cfg):
     """
     Resolve every source_channel in the config to its numeric Telegram ID.
     Handles @username, @+invitelink, and plain numeric IDs.
+    Auto-joins any channel the userbot is not already a member of.
     Updates the module-level _source_channel_map dict in-place.
     """
     global _source_channel_map
@@ -85,6 +128,7 @@ async def build_source_channel_map(cfg):
             if not ch_identifier:
                 continue
             try:
+                await _try_join_channel(ch_identifier)
                 entity = await client.get_entity(ch_identifier)
                 num_id = entity.id
                 if num_id not in new_map:
