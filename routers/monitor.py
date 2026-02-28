@@ -105,11 +105,15 @@ def get_monitor_messages():
 
 
 @router.get("/dashboard/stats")
-def get_dashboard_stats(days: int = Query(default=14, ge=1, le=365)):
+def get_dashboard_stats(
+    days: int = Query(default=14, ge=1, le=365),
+    filter_source: str = Query(default=None),
+    filter_topic: str = Query(default=None),
+):
     """Return all analytics data needed by the Dashboard page."""
     db = _get_db()
     try:
-        data = db.get_dashboard_stats(days)
+        data = db.get_dashboard_stats(days, filter_source=filter_source, filter_topic=filter_topic)
         return {'status': 'ok', **data}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}

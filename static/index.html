@@ -17,10 +17,6 @@
         </div>
         
         <nav class="sidebar-nav">
-            <a href="#" class="nav-item" data-page="dashboard">
-                <span class="icon">📊</span>
-                <span>Dashboard</span>
-            </a>
             <a href="#" class="nav-item active" data-page="system">
                 <span class="icon">🔌</span>
                 <span>System</span>
@@ -38,6 +34,10 @@
             <a href="#" class="nav-item" data-page="monitor">
                 <span class="icon">📡</span>
                 <span>Monitor</span>
+            </a>
+            <a href="#" class="nav-item" data-page="dashboard">
+                <span class="icon">📊</span>
+                <span>Dashboard</span>
             </a>
         </nav>
 
@@ -70,15 +70,33 @@
                     <h2>Dashboard</h2>
                     <p class="subtitle">Analytics &amp; performance insights</p>
                 </div>
-                <div style="display:flex;gap:8px;align-items:center">
-                    <select class="select" id="dash-range" onchange="loadDashboardData()">
+                <button class="btn btn-secondary btn-sm" onclick="loadDashboardData()">↻ Refresh</button>
+            </header>
+
+            <!-- Filter bar -->
+            <div class="dash-filter-bar">
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📡 Source</span>
+                    <select class="select dash-filter-select" id="dash-filter-source" onchange="loadDashboardData()">
+                        <option value="">All Sources</option>
+                    </select>
+                </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">🏷️ Topic</span>
+                    <select class="select dash-filter-select" id="dash-filter-topic" onchange="loadDashboardData()">
+                        <option value="">All Topics</option>
+                    </select>
+                </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📅 Period</span>
+                    <select class="select dash-filter-select" id="dash-range" onchange="loadDashboardData()">
                         <option value="7">Last 7 days</option>
                         <option value="14" selected>Last 14 days</option>
                         <option value="30">Last 30 days</option>
                     </select>
-                    <button class="btn btn-secondary btn-sm" onclick="loadDashboardData()">↻ Refresh</button>
                 </div>
-            </header>
+                <button class="dash-filter-clear" id="dash-filter-clear-btn" onclick="clearDashboardFilters()" style="display:none">✕ Clear filters</button>
+            </div>
 
             <!-- Stat cards -->
             <div class="dash-stat-grid">
@@ -227,6 +245,24 @@
                     <span>➕</span> Add Collection
                 </button>
             </header>
+
+            <!-- Channel Membership Validator -->
+            <div class="ch-val-card" id="ch-val-card">
+                <div class="ch-val-header" onclick="toggleChValCard()">
+                    <div class="ch-val-title">
+                        <span class="ch-val-toggle-icon" id="ch-val-toggle-icon">▶</span>
+                        <h3>📋 Channel Membership Validator</h3>
+                        <span class="text-muted" style="font-size:0.8rem;margin-left:8px;">Verify which channels the userbot has joined</span>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" id="ch-val-btn"
+                            onclick="validateChannels(event)" style="white-space:nowrap">
+                        🔍 Validate
+                    </button>
+                </div>
+                <div class="ch-val-body" id="ch-val-body">
+                    <!-- populated by validateChannels() -->
+                </div>
+            </div>
 
             <div id="collections-container">
                 <!-- Collections rendered here -->

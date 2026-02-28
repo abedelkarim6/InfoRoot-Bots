@@ -75,9 +75,6 @@ def save_bot(data: dict = Body(...)):
         'rules': data.get('rules', existing_bot.get('rules', {'remove': [], 'replace': []})),
     }
 
-    if 'bot_token' in data:
-        bots[name]['bot_token'] = data.get('bot_token')
-
     save_config(cfg)
     return {"status": "updated", "name": name}
 

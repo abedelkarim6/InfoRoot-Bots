@@ -59,7 +59,9 @@ function fillDays(perDay, days) {
 
 /* ══ Main loader ══════════════════════════════════ */
 window.loadDashboardData = async function () {
-  const days = document.getElementById('dash-range')?.value || 14;
+  const days         = document.getElementById('dash-range')?.value || 14;
+  const filterSource = document.getElementById('dash-filter-source')?.value || '';
+  const filterTopic  = document.getElementById('dash-filter-topic')?.value  || '';
 
   // Show loading state in stat cards
   ['ds-total-msgs', 'ds-period-msgs', 'ds-summaries', 'ds-sources'].forEach(id => {
@@ -67,7 +69,11 @@ window.loadDashboardData = async function () {
     if (el) el.textContent = '…';
   });
 
-  const data = await api(`/api/dashboard/stats?days=${days}`);
+  let url = `/api/dashboard/stats?days=${days}`;
+  if (filterSource) url += `&filter_source=${encodeURIComponent(filterSource)}`;
+  if (filterTopic)  url += `&filter_topic=${encodeURIComponent(filterTopic)}`;
+
+  const data = await api(url);
   if (!data || data.status === 'error') {
     const msg = data?.message || 'Failed to load dashboard data.';
     console.error('Dashboard load error:', msg);
@@ -79,6 +85,13 @@ window.loadDashboardData = async function () {
     if (matrix) matrix.innerHTML = `<p class="mon-empty" style="color:#ef4444">Error: ${msg}</p>`;
     return;
   }
+
+  /* ── Populate filter dropdowns (preserve selection) ─ */
+  populateDashboardFilters(data, filterSource, filterTopic);
+
+  /* ── Show/hide the clear-filters button ─────────── */
+  const clearBtn = document.getElementById('dash-filter-clear-btn');
+  if (clearBtn) clearBtn.style.display = (filterSource || filterTopic) ? '' : 'none';
 
   /* ── Stat cards ─────────────────────────────────── */
   document.getElementById('ds-total-msgs').textContent  = fmt(data.total_messages);
@@ -95,6 +108,65 @@ window.loadDashboardData = async function () {
 
   /* ── Matrix ─────────────────────────────────────── */
   renderSourceMatrix(data.source_topic_breakdown, data.messages_per_topic);
+};
+
+/* ── Populate source & topic filter dropdowns ──── */
+function populateDashboardFilters(data, currentSource, currentTopic) {
+  const srcEl   = document.getElementById('dash-filter-source');
+  const topicEl = document.getElementById('dash-filter-topic');
+  if (!srcEl || !topicEl) return;
+
+  // --- Sources: merge DB list + config-defined source channels ---
+  const dbSources = data.all_sources || [];
+  const cfgSources = [];
+  if (window.globalConfig) {
+    for (const coll of Object.values(window.globalConfig.collections || {})) {
+      for (const ch of (coll.source_channels || [])) {
+        const clean = ch.replace(/^@/, '');
+        if (!dbSources.includes(ch) && !dbSources.includes(clean)) {
+          cfgSources.push(ch);
+        }
+      }
+    }
+  }
+  const allSources = [...dbSources, ...cfgSources];
+
+  // --- Topics: merge DB list + config-defined topics ---
+  const dbTopics = data.all_topics || [];
+  const cfgTopics = [];
+  if (window.globalConfig) {
+    for (const bot of Object.values(window.globalConfig.bots || {})) {
+      for (const cat of Object.values(bot.categories || {})) {
+        for (const topicName of Object.keys(cat.topics || {})) {
+          if (!dbTopics.includes(topicName)) cfgTopics.push(topicName);
+        }
+      }
+    }
+  }
+  const allTopics = [...dbTopics, ...cfgTopics];
+
+  const rebuild = (el, items, current, label) => {
+    el.innerHTML = `<option value="">${label}</option>`;
+    items.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      if (v === current) opt.selected = true;
+      el.appendChild(opt);
+    });
+  };
+
+  rebuild(srcEl,   allSources, currentSource, 'All Sources');
+  rebuild(topicEl, allTopics,  currentTopic,  'All Topics');
+}
+
+/* ── Clear all dashboard filters ─────────────────── */
+window.clearDashboardFilters = function () {
+  const s = document.getElementById('dash-filter-source');
+  const t = document.getElementById('dash-filter-topic');
+  if (s) s.value = '';
+  if (t) t.value = '';
+  loadDashboardData();
 };
 
 /* ── Chart 1: Messages per day (area line) ─────── */

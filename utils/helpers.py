@@ -104,6 +104,7 @@ def start_bot_subprocess(app_state):
         [sys.executable, "-u", main_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,   # prevent Telethon auth prompts from hanging forever
         bufsize=1,
         encoding='utf-8',
         errors='replace',

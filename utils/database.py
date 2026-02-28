@@ -79,6 +79,18 @@ class Database:
             )
         """)
 
+        # Userbot dialog cache — populated by main.py at startup for the channel validator UI
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS userbot_dialogs (
+                id BIGINT PRIMARY KEY,
+                title TEXT,
+                username TEXT,
+                is_broadcast BOOLEAN DEFAULT FALSE,
+                is_megagroup BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Tracking generated summaries
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS summaries (
@@ -261,6 +273,7 @@ class Database:
         cursor.execute(
             "DELETE FROM messages WHERE collection_name IS NULL OR collection_name = ''"
         )
+        self.connection.commit()
 
     def get_recent_messages(self, limit: int = 200):
         """Returns the most recent messages with categorization info (collection_name required)."""
@@ -283,18 +296,57 @@ class Database:
             result.append(d)
         return result
 
-    def get_dashboard_stats(self, days: int = 14) -> dict:
+    def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None) -> dict:
         """Return comprehensive analytics for the dashboard page."""
         days = max(1, min(365, int(days)))
         cursor = self._get_cursor()
 
         iv = "(%s * INTERVAL '1 day')"
 
+        # Build optional filter clauses
+        src_clause   = " AND channel_username = %s" if filter_source else ""
+        topic_clause = " AND TRIM(t.topic) = %s"    if filter_topic  else ""
+
+        def p(*base):
+            """Append filter params to a base param tuple."""
+            extra = []
+            if filter_source: extra.append(filter_source)
+            if filter_topic:  extra.append(filter_topic)
+            return tuple(base) + tuple(extra)
+
+        # Helper for queries that join on the topics lateral (need topic filter inline)
+        def p_topic(*base):
+            extra = []
+            if filter_source: extra.append(filter_source)
+            if filter_topic:  extra.append(filter_topic)
+            return tuple(base) + tuple(extra)
+
+        # --- Dropdown population: always return full unfiltered lists ---
+        cursor.execute(f"""
+            SELECT DISTINCT channel_username AS source FROM messages
+            WHERE channel_username IS NOT NULL AND channel_username != ''
+              AND timestamp >= NOW() - {iv}
+            ORDER BY source LIMIT 200
+        """, (days,))
+        all_sources = [r['source'] for r in cursor.fetchall()]
+
+        cursor.execute(f"""
+            SELECT DISTINCT TRIM(t.topic) AS topic
+            FROM messages,
+                 LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
+            WHERE topics IS NOT NULL AND topics != ''
+              AND TRIM(t.topic) != ''
+              AND timestamp >= NOW() - {iv}
+            ORDER BY topic LIMIT 200
+        """, (days,))
+        all_topics = [r['topic'] for r in cursor.fetchall()]
+
         # 1. Totals
         cursor.execute("SELECT COUNT(*) AS cnt FROM messages")
         total_messages = cursor.fetchone()['cnt']
 
-        cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}", (days,))
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}",
+                       p(days))
         period_messages = cursor.fetchone()['cnt']
 
         cursor.execute("SELECT COUNT(*) AS cnt FROM summaries")
@@ -303,16 +355,26 @@ class Database:
         cursor.execute(f"""
             SELECT COUNT(DISTINCT channel_username) AS cnt FROM messages
             WHERE channel_username IS NOT NULL AND channel_username != ''
-              AND timestamp >= NOW() - {iv}
-        """, (days,))
+              AND timestamp >= NOW() - {iv}{src_clause}
+        """, p(days))
         active_sources = cursor.fetchone()['cnt']
 
         # 2. Messages per day
-        cursor.execute(f"""
-            SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
-            FROM messages WHERE timestamp >= NOW() - {iv}
-            GROUP BY day ORDER BY day
-        """, (days,))
+        if filter_topic:
+            cursor.execute(f"""
+                SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
+                FROM messages,
+                     LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
+                WHERE topics IS NOT NULL AND topics != ''
+                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
+                GROUP BY day ORDER BY day
+            """, p_topic(days))
+        else:
+            cursor.execute(f"""
+                SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
+                FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}
+                GROUP BY day ORDER BY day
+            """, p(days))
         messages_per_day = [{'day': str(r['day']), 'count': r['cnt']} for r in cursor.fetchall()]
 
         # 3. Messages per topic — top 20
@@ -321,9 +383,9 @@ class Database:
             FROM messages,
                  LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
             WHERE topics IS NOT NULL AND topics != ''
-              AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}
+              AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
             GROUP BY topic ORDER BY cnt DESC LIMIT 20
-        """, (days,))
+        """, p_topic(days))
         messages_per_topic = [{'topic': r['topic'], 'count': r['cnt']} for r in cursor.fetchall()]
 
         # 4. Topic trend — top 6 only
@@ -334,22 +396,33 @@ class Database:
                 FROM messages,
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE topics IS NOT NULL AND topics != ''
-                  AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}
+                  AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}{src_clause}
                 GROUP BY day, topic ORDER BY day, topic
-            """, (top6, days))
+            """, (top6, days) + ((filter_source,) if filter_source else ()))
             topic_trend = [{'day': str(r['day']), 'topic': r['topic'], 'count': r['cnt']}
                            for r in cursor.fetchall()]
         else:
             topic_trend = []
 
         # 5. Top 20 sources by message count
-        cursor.execute(f"""
-            SELECT channel_username AS source, COUNT(*) AS cnt
-            FROM messages
-            WHERE channel_username IS NOT NULL AND channel_username != ''
-              AND timestamp >= NOW() - {iv}
-            GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
-        """, (days,))
+        if filter_topic:
+            cursor.execute(f"""
+                SELECT channel_username AS source, COUNT(*) AS cnt
+                FROM messages,
+                     LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
+                WHERE channel_username IS NOT NULL AND channel_username != ''
+                  AND topics IS NOT NULL AND topics != ''
+                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
+                GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
+            """, p_topic(days))
+        else:
+            cursor.execute(f"""
+                SELECT channel_username AS source, COUNT(*) AS cnt
+                FROM messages
+                WHERE channel_username IS NOT NULL AND channel_username != ''
+                  AND timestamp >= NOW() - {iv}{src_clause}
+                GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
+            """, p(days))
         messages_per_source = [{'source': r['source'], 'count': r['cnt']} for r in cursor.fetchall()]
 
         # 6. Source × topic matrix
@@ -391,7 +464,33 @@ class Database:
             'source_topic_breakdown': source_topic,
             'summaries_per_type':     summaries_per_type,
             'days':                   days,
+            'all_sources':            all_sources,
+            'all_topics':             all_topics,
+            'filter_source':          filter_source,
+            'filter_topic':           filter_topic,
         }
+
+    def save_userbot_dialogs(self, channels: list):
+        """Cache the list of channels/groups the userbot is subscribed to."""
+        cursor = self._get_cursor()
+        cursor.execute("DELETE FROM userbot_dialogs")
+        for ch in channels:
+            cursor.execute("""
+                INSERT INTO userbot_dialogs (id, title, username, is_broadcast, is_megagroup, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+            """, (ch['id'], ch['title'], ch.get('username'),
+                  ch.get('is_broadcast', False), ch.get('is_megagroup', False)))
+        self.connection.commit()
+
+    def get_userbot_dialogs(self) -> dict:
+        """Return cached dialogs + when they were last saved."""
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM userbot_dialogs ORDER BY title")
+        channels = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT MAX(updated_at) AS ts FROM userbot_dialogs")
+        row = cursor.fetchone()
+        updated_at = row['ts'].isoformat() if row and row['ts'] else None
+        return {'channels': channels, 'updated_at': updated_at}
 
     def close(self):
         if self.connection:

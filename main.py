@@ -20,11 +20,14 @@ from utils.gemini_client import GeminiClient
 from utils.prompts import get_summary_prompt
 from utils.helpers import load_config, load_prompts, setup_logging, categorizer
 
+import datetime
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import Channel as TelegramChannel
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.errors import UserAlreadyParticipantError, InviteHashInvalidError, ChannelPrivateError
@@ -142,6 +145,32 @@ async def build_source_channel_map(cfg):
     logger.info(f"[MAP] Source channel map ready: {len(new_map)} channel(s) resolved")
 
 
+async def save_dialogs_to_db():
+    """
+    Iterate all userbot dialogs and cache them in the DB.
+    Called at startup so the channel validator UI can show membership
+    without needing to open a second Telegram connection.
+    """
+    logger.info("[DIALOGS] Fetching dialog list from Telegram…")
+    try:
+        channels = []
+        async for dialog in client.iter_dialogs(limit=500):
+            entity = dialog.entity
+            if not isinstance(entity, TelegramChannel):
+                continue
+            channels.append({
+                'id':           entity.id,
+                'title':        entity.title,
+                'username':     getattr(entity, 'username', None),
+                'is_broadcast': bool(getattr(entity, 'broadcast', False)),
+                'is_megagroup': bool(getattr(entity, 'megagroup', False)),
+            })
+        db.save_userbot_dialogs(channels)
+        logger.info(f"[DIALOGS] Cached {len(channels)} dialogs to DB")
+    except Exception as e:
+        logger.warning(f"[DIALOGS] Failed to cache dialogs: {e}", exc_info=True)
+
+
 # ==================== Message Handler ====================
 async def read_channel_messages(event):
     """
@@ -150,11 +179,14 @@ async def read_channel_messages(event):
     """
     try:
         # Log every incoming event so we can confirm the handler fires
-        logger.info(f"[EVENT] New event | chat_id={event.chat_id} | is_channel={event.is_channel} | is_group={getattr(event, 'is_group', '?')}")
+        is_channel = event.is_channel
+        is_group   = getattr(event, 'is_group', False)
+        is_private = getattr(event, 'is_private', False)
+        logger.info(f"[EVENT] chat_id={event.chat_id} | is_channel={is_channel} | is_group={is_group} | is_private={is_private}")
 
-        # Filter: only handle broadcast channel messages, not groups or DMs
-        if not event.is_channel or event.is_group:
-            logger.info(f"[SKIP] Not a broadcast channel (is_channel={event.is_channel}, is_group={getattr(event, 'is_group', '?')}) — skipping")
+        # Skip private/DM messages — they are never source channels
+        if is_private:
+            logger.info(f"[SKIP] Private/DM message — skipping")
             return
 
         chat = await event.get_chat()
@@ -165,10 +197,11 @@ async def read_channel_messages(event):
         channel_id = channel_username  # Used for collection matching
 
         text_intro = (event.message.message or event.message.text or '')[:80].replace('\n', ' ')
-        logger.info(f"[MSG] RECEIVED | @{channel_id} ({channel_title}) | \"{text_intro}\"")
+        logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
 
         # Load latest config
         current_cfg = load_config()
+        collections_cfg = current_cfg.get('collections', {})
 
         # Step 1: Find which collections include this channel as a source.
         # Use the pre-resolved numeric-ID map (handles private channels, invite links, etc.).
@@ -176,24 +209,32 @@ async def read_channel_messages(event):
         matching_collections = list(_source_channel_map.get(channel_id_numeric, []))
 
         if not matching_collections and channel_username:
-            collections_cfg = current_cfg.get('collections', {})
             for coll_name, coll_data in collections_cfg.items():
                 source_channels = coll_data.get('source_channels', [])
                 if channel_username in source_channels or f'@{channel_username}' in source_channels:
                     matching_collections.append(coll_name)
 
+        if not matching_collections:
+            logger.warning(
+                f"[SKIP] id={channel_id_numeric} (@{channel_id}) not in any collection — "
+                f"map has {len(_source_channel_map)} entries {list(_source_channel_map.keys())}, "
+                f"configured collections: {list(collections_cfg.keys())}"
+            )
+            return
+
         # Step 2: Find which bots reference those collections
         bots_cfg = current_cfg.get('bots', {})
-        matching_bots = []
-
-        for bname, bcfg in bots_cfg.items():
-            if not bcfg.get('enabled', True):
-                continue
-            if any(coll in matching_collections for coll in bcfg.get('collections', [])):
-                matching_bots.append(bname)
+        matching_bots = [
+            bname for bname, bcfg in bots_cfg.items()
+            if bcfg.get('enabled', True)
+            and any(coll in matching_collections for coll in bcfg.get('collections', []))
+        ]
 
         if not matching_bots:
-            logger.warning(f"[SKIP] @{channel_id} not in any enabled collection/bot — collections tried: {list(collections_cfg.keys())}")
+            logger.warning(
+                f"[SKIP] @{channel_id} → collections {matching_collections} not referenced "
+                f"by any enabled bot — configured bots: {list(bots_cfg.keys())}"
+            )
             return
 
         logger.info(f"[MATCH] @{channel_id} → Collections: {matching_collections} | Bots: {matching_bots}")
@@ -464,6 +505,20 @@ async def schedule_summaries():
                         elif schedule_type == "hourly":
                             minute = schedule.get('minute', 0)
                             trigger = CronTrigger(minute=minute)
+                        elif schedule_type == "interval":
+                            interval_hours = schedule.get('hours', 1)
+                            start_hour   = schedule.get('start_hour', 0)
+                            start_minute = schedule.get('start_minute', 0)
+                            # Build a start_date anchored to today's start time
+                            now = datetime.datetime.now()
+                            start_dt = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                            # If that time already passed today, bump to next occurrence
+                            if start_dt <= now:
+                                start_dt += datetime.timedelta(hours=interval_hours)
+                                # Keep bumping until it's in the future
+                                while start_dt <= now:
+                                    start_dt += datetime.timedelta(hours=interval_hours)
+                            trigger = IntervalTrigger(hours=interval_hours, start_date=start_dt)
                         elif schedule_type == "daily":
                             hour = schedule.get('hour', 0)
                             minute = schedule.get('minute', 0)
@@ -499,6 +554,7 @@ async def scheduler_watcher():
                 await schedule_summaries()
                 await build_source_channel_map(cfg)
                 last_config = cfg
+                asyncio.create_task(save_dialogs_to_db())
                 logger.info("Scheduler rebuilt + channel map refreshed — config change detected")
 
         except Exception:
@@ -545,12 +601,35 @@ async def main():
         await read_channel_messages(event)
 
     try:
-        # String sessions are already authenticated — no phone/OTP needed.
-        await client.start()
+        # Connect and verify the session — don't call start() which blocks on auth prompts.
+        logger.info("[AUTH] Connecting to Telegram…")
+        await client.connect()
+        logger.info("[AUTH] TCP connected — checking session authorization (30s timeout)…")
+        try:
+            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.error(
+                "[FATAL] is_user_authorized() timed out after 30s. "
+                "The session is likely expired or the auth key is invalid. "
+                "Run get_ss.py to generate a new string_session."
+            )
+            return
+        if not authorized:
+            logger.error(
+                "[FATAL] Userbot session is NOT authorized. "
+                "The string_session in config.yaml is invalid or expired. "
+                "Run get_ss.py to generate a new session string."
+            )
+            return
         logger.info("Userbot connected successfully")
 
         # Pre-resolve all source channels to numeric IDs so private channels work
         await build_source_channel_map(cfg)
+
+        # Cache dialog list in DB so the channel validator UI can read it without
+        # opening a second Telegram connection. Awaited directly so the cache is
+        # guaranteed to be populated before the bot starts accepting events.
+        await save_dialogs_to_db()
 
         # Start scheduler watcher (also rebuilds the channel map on config changes)
         asyncio.create_task(scheduler_watcher())

@@ -78,6 +78,7 @@ let globalPrompts = null;
 // Collection modal state
 let modalSources = [];
 let modalTargets = [];
+let _channelValidation = {}; // { '@channel': 'ok'|'warn'|'pending' }
 
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', async () => {
@@ -456,6 +457,166 @@ async function toggleCollection(collectionName, enabled) {
     }
 }
 
+// ==================== Channel Membership Validator ====================
+let _chValOpen = false;
+
+function toggleChValCard() {
+    _chValOpen = !_chValOpen;
+    const body = document.getElementById('ch-val-body');
+    const icon = document.getElementById('ch-val-toggle-icon');
+    if (body) body.style.display = _chValOpen ? 'block' : 'none';
+    if (icon) icon.textContent = _chValOpen ? '▼' : '▶';
+}
+
+async function validateChannels(e) {
+    if (e) e.stopPropagation();
+
+    // Open the card if closed
+    if (!_chValOpen) {
+        _chValOpen = true;
+        const body = document.getElementById('ch-val-body');
+        const icon = document.getElementById('ch-val-toggle-icon');
+        if (body) body.style.display = 'block';
+        if (icon) icon.textContent = '▼';
+    }
+
+    const btn  = document.getElementById('ch-val-btn');
+    const body = document.getElementById('ch-val-body');
+    if (!body) return;
+
+    if (btn) { btn.textContent = '⏳ Loading…'; btn.disabled = true; }
+    body.innerHTML = '<p class="mon-empty">Loading cached channel data…</p>';
+
+    const data = await api('/api/telegram/admin_channels');
+
+    if (btn) { btn.textContent = '🔍 Validate'; btn.disabled = false; }
+
+    if (!data || data.status === 'error') {
+        body.innerHTML = `<p class="mon-empty" style="color:#ef4444">Error: ${data?.message || 'Failed to load'}</p>`;
+        return;
+    }
+
+    // Build lookup by username AND by raw entity id (Telethon returns id without -100 prefix)
+    const joined = {};
+    (data.channels || []).forEach(ch => {
+        if (ch.username) joined[ch.username.toLowerCase()] = ch;
+        joined['id:' + ch.id] = ch;
+    });
+
+    // Resolve a config channel string (@username or numeric ID) to its entry in `joined`
+    function resolveJoined(raw) {
+        const stripped = raw.replace(/^@/, '').trim();
+        if (/^-?\d+$/.test(stripped)) {
+            const num = parseInt(stripped, 10);
+            // Bot API format: -100XXXXXXXXX → Telethon entity.id = XXXXXXXXX (strip -100 prefix)
+            if (num < 0) {
+                const s = String(-num);
+                const entityId = s.startsWith('100') ? parseInt(s.slice(3)) : -num;
+                return joined['id:' + entityId] || null;
+            }
+            return joined['id:' + num] || null;
+        }
+        return joined[stripped.toLowerCase()] || null;
+    }
+
+    // Track all configured channel keys for the "extra" section
+    const allConfiguredKeys = new Set();
+
+    // ── Section 1: Grouped by collection ──
+    let totalConfigured = 0, totalJoined = 0;
+
+    const collectionSections = Object.entries(globalConfig.collections || {}).map(([collName, coll]) => {
+        // Merge source + target, deduplicated by key, preserving both roles
+        const channelMap = {};
+        const addCh = (raw, role) => {
+            const key = raw.replace(/^@/, '').trim().toLowerCase();
+            allConfiguredKeys.add(key);
+            if (!channelMap[key]) channelMap[key] = { raw, roles: [], ch: resolveJoined(raw) };
+            if (!channelMap[key].roles.includes(role)) channelMap[key].roles.push(role);
+        };
+        (coll.source_channels || []).forEach(ch => addCh(ch, 'source'));
+        const targets = coll.target_channels || (coll.target_channel ? [coll.target_channel] : []);
+        targets.forEach(ch => addCh(ch, 'target'));
+
+        const rows = Object.values(channelMap).map(({ raw, roles, ch }) => {
+            const isJoined = !!ch;
+            const isNumeric = /^-?\d+$/.test(raw.replace(/^@/, '').trim());
+            totalConfigured++;
+            if (isJoined) totalJoined++;
+
+            const roleBadges = roles.map(r =>
+                r === 'source'
+                    ? '<span class="ch-val-role source">📥 Reads from</span>'
+                    : '<span class="ch-val-role target">📤 Posts to</span>'
+            ).join('');
+
+            const statusBadge = isJoined
+                ? '<span class="ch-val-badge ok">✓ Joined</span>'
+                : (isNumeric
+                    ? '<span class="ch-val-badge warn">⚠ Not found (numeric ID)</span>'
+                    : '<span class="ch-val-badge warn">✗ Not Joined</span>');
+
+            const displayName = ch?.username ? `@${ch.username}` : raw;
+            const titleText   = ch ? escapeHtmlSys(ch.title) : '';
+
+            return `
+                <div class="ch-val-row">
+                    <div class="ch-val-name">
+                        <span class="ch-val-at">${displayName}</span>
+                        ${titleText ? `<span class="ch-val-title-text">${titleText}</span>` : ''}
+                    </div>
+                    <div class="ch-val-meta">${roleBadges}${statusBadge}</div>
+                </div>`;
+        }).join('');
+
+        return `
+            <div class="ch-val-collection">
+                <div class="ch-val-collection-name">📁 ${escapeHtmlSys(collName)}</div>
+                ${rows || '<p class="mon-empty" style="padding:4px 0">No channels configured</p>'}
+            </div>`;
+    }).join('');
+
+    // ── Section 2: Extra joined channels not in any collection ──
+    const extraRows = (data.channels || []).filter(ch => {
+        if (!ch.username) return false;
+        return !allConfiguredKeys.has(ch.username.toLowerCase());
+    }).map(ch => {
+        const type = ch.is_broadcast
+            ? '<span class="ch-val-role channel">Channel</span>'
+            : '<span class="ch-val-role group">Group</span>';
+        return `
+            <div class="ch-val-row extra">
+                <div class="ch-val-name">
+                    <span class="ch-val-at">@${ch.username}</span>
+                    <span class="ch-val-title-text">${escapeHtmlSys(ch.title)}</span>
+                </div>
+                <div class="ch-val-meta">${type}<span class="ch-val-badge info">Not in Config</span></div>
+            </div>`;
+    }).join('');
+
+    const summaryClass = totalJoined < totalConfigured ? 'ch-val-sum-warn' : 'ch-val-sum-ok';
+    const extraCount   = (data.channels || []).filter(c => c.username && !allConfiguredKeys.has(c.username.toLowerCase())).length;
+    const updatedAt    = data.updated_at
+        ? new Date(data.updated_at).toLocaleString()
+        : null;
+
+    body.innerHTML = `
+        <div class="ch-val-summary ${summaryClass}">
+            <span>${totalJoined === totalConfigured
+                ? `✅ All ${totalConfigured} configured channels joined`
+                : `⚠️ ${totalJoined} of ${totalConfigured} configured channels joined`}</span>
+            ${updatedAt ? `<span class="ch-val-updated">cached ${updatedAt}</span>` : ''}
+        </div>
+        <div class="ch-val-section">
+            <div class="ch-val-section-title">Configured channels</div>
+            ${collectionSections || '<p class="mon-empty">No collections configured yet.</p>'}
+        </div>
+        <div class="ch-val-section">
+            <div class="ch-val-section-title">Other joined channels <span class="ch-val-count">${extraCount}</span></div>
+            ${extraRows || '<p class="mon-empty" style="padding:8px 0">None</p>'}
+        </div>`;
+}
+
 // ==================== Channel Tag Input Helpers ====================
 function renderChannelTags(type) {
     const arr = type === 'source' ? modalSources : modalTargets;
@@ -464,14 +625,27 @@ function renderChannelTags(type) {
     if (!container) return;
 
     const placeholder = type === 'source' ? '+ @channel to read from' : '+ @channel to post into';
-    container.innerHTML = arr.map(ch => `
-        <span class="tag">
-            ${ch}
+    container.innerHTML = arr.map(ch => {
+        const state = _channelValidation[ch];
+        const badge = state === 'ok'      ? '<span class="tag-status ok" title="Userbot is a member ✓">✓</span>'
+                    : state === 'warn'    ? '<span class="tag-status warn" title="Userbot is NOT a member">✗</span>'
+                    : state === 'pending' ? '<span class="tag-status pending" title="Checking…">⏳</span>'
+                    : '';
+        return `<span class="tag">
+            ${ch}${badge}
             <span class="tag-remove" onclick="removeChannelTag('${ch.replace(/'/g, "\\'")}', '${type}')">×</span>
-        </span>
-    `).join('') + `<input type="text" class="tag-input" placeholder="${placeholder}"
+        </span>`;
+    }).join('') + `<input type="text" class="tag-input" placeholder="${placeholder}"
         onkeydown="handleChannelTagInput(event, '${type}')"
         onblur="commitChannelTagInput(this, '${type}')">`;
+}
+
+async function validateChannelTag(ch, type) {
+    _channelValidation[ch] = 'pending';
+    renderChannelTags(type);
+    const res = await api('/api/telegram/check_channel', { channel: ch });
+    _channelValidation[ch] = (res && res.joined) ? 'ok' : 'warn';
+    renderChannelTags(type);
 }
 
 function handleChannelTagInput(event, type) {
@@ -480,8 +654,12 @@ function handleChannelTagInput(event, type) {
         const value = event.target.value.trim().replace(/,/g, '');
         if (value) {
             const arr = type === 'source' ? modalSources : modalTargets;
-            if (!arr.includes(value)) arr.push(value);
-            renderChannelTags(type);
+            if (!arr.includes(value)) {
+                arr.push(value);
+                validateChannelTag(value, type);
+            } else {
+                renderChannelTags(type);
+            }
         }
     }
 }
@@ -490,8 +668,12 @@ function commitChannelTagInput(input, type) {
     const value = input.value.trim().replace(/,/g, '');
     if (value) {
         const arr = type === 'source' ? modalSources : modalTargets;
-        if (!arr.includes(value)) arr.push(value);
-        renderChannelTags(type);
+        if (!arr.includes(value)) {
+            arr.push(value);
+            validateChannelTag(value, type);
+        } else {
+            renderChannelTags(type);
+        }
     }
 }
 
@@ -501,6 +683,7 @@ function removeChannelTag(channel, type) {
     } else {
         modalTargets = modalTargets.filter(c => c !== channel);
     }
+    delete _channelValidation[channel];
     renderChannelTags(type);
 }
 
@@ -512,6 +695,12 @@ function showAddCollectionModal(existingName = null) {
     modalTargets = existing
         ? [...(existing.target_channels || (existing.target_channel ? [existing.target_channel] : []))]
         : [];
+    _channelValidation = {};
+    // Pre-validate existing channels in the background
+    [...modalSources, ...modalTargets].forEach(ch => {
+        const type = modalSources.includes(ch) ? 'source' : 'target';
+        validateChannelTag(ch, type);
+    });
 
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -540,12 +729,12 @@ function showAddCollectionModal(existingName = null) {
                 <div class="form-group">
                     <label class="form-label">Source Channels</label>
                     <div class="tags-container" id="source-tags"></div>
-                    <small class="form-hint">Type @channel and press Enter. Bot does not need to be admin in source channels.</small>
+                    <small class="form-hint">Type @channel and press Enter. Userbot must be a member to receive messages.</small>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Target Channels</label>
                     <div class="tags-container" id="target-tags"></div>
-                    <small class="form-hint">Type @channel and press Enter. Bot must be admin with "Post Messages" permission in target channels.</small>
+                    <small class="form-hint">Type @channel and press Enter. Userbot must be a member and have send permission.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -1069,8 +1258,13 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                         </label>
                                         <strong>${schedule.name}</strong>
                                     </div>
-                                    <button class="btn-icon btn-danger"
-                                            onclick="deleteTopicSchedule('${botName}', '${categoryName}', '${topicName}', ${idx})">🗑️</button>
+                                    <div class="sch-menu-wrap">
+                                        <button class="sch-menu-btn" onclick="toggleSchMenu(event, this)" title="Options">⋮</button>
+                                        <div class="sch-menu-dropdown">
+                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${botName}', '${categoryName}', '${topicName}', ${idx})">✏️ Edit</button>
+                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${botName}', '${categoryName}', '${topicName}', ${idx})">🗑️ Delete</button>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div class="summary-details">
                                     <span>📅 ${formatSchedule(schedule)}</span>
@@ -1111,7 +1305,11 @@ function formatSchedule(schedule) {
     const type = schedule.type;
     if (type === 'minute') return `Every ${schedule.minute || 1} minute(s)`;
     if (type === 'hourly') return `Hourly at :${String(schedule.minute || 0).padStart(2, '0')}`;
-    if (type === 'interval') return `Every ${schedule.hours} hour(s)`;
+    if (type === 'interval') {
+        const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
+        const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
+        return `Every ${schedule.hours || 1}h — starts ${sh}:${sm}`;
+    }
     if (type === 'daily') return `Daily at ${String(schedule.hour || 0).padStart(2, '0')}:${String(schedule.minute || 0).padStart(2, '0')}`;
     return type;
 }
@@ -1743,7 +1941,12 @@ function updateTopicScheduleInputs() {
         container.innerHTML = `
             <label class="form-label">Every X Hours</label>
             <input type="number" class="input" id="topic-schedule-hours" min="1" max="24" value="2">
-            <small class="text-muted">Run every 1-24 hours</small>
+            <label class="form-label mt-1">Starting at (HH : MM)</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="topic-schedule-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="topic-schedule-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at this time, then every X hours</small>
         `;
     } else if (type === 'daily') {
         container.innerHTML = `
@@ -1777,12 +1980,14 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     } else if (type === 'hourly') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
     } else if (type === 'interval') {
-        schedule.hours = Number(document.getElementById('topic-schedule-hours').value);
+        schedule.hours        = Number(document.getElementById('topic-schedule-hours').value);
+        schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
+        schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
     } else if (type === 'daily') {
         schedule.hour = Number(document.getElementById('topic-schedule-hour').value);
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
     }
-    
+
     const result = await api('/api/topic/schedule/add', {
         bot_name: botName,
         category_name: categoryName,
@@ -1842,6 +2047,170 @@ async function deleteTopicSchedule(botName, categoryName, topicName, scheduleInd
             showNotification('Schedule deleted', 'success');
         }
     }, { title: 'Delete Schedule' });
+}
+
+// ==================== Schedule 3-dots Menu ====================
+function toggleSchMenu(e, btn) {
+    e.stopPropagation();
+    const dropdown = btn.nextElementSibling;
+    const isOpen = dropdown.classList.contains('open');
+    closeAllSchMenus();
+    if (!isOpen) {
+        // Show hidden first to measure dimensions, then position
+        dropdown.style.visibility = 'hidden';
+        dropdown.classList.add('open');
+        const rect = btn.getBoundingClientRect();
+        const dw   = dropdown.offsetWidth;
+        const dh   = dropdown.offsetHeight;
+        // Right-align with button; flip up if no room below
+        const left     = Math.max(4, rect.right - dw);
+        const topBelow = rect.bottom + 4;
+        const topAbove = rect.top - dh - 4;
+        const finalTop = (topBelow + dh > window.innerHeight) ? topAbove : topBelow;
+        dropdown.style.top        = `${finalTop}px`;
+        dropdown.style.left       = `${left}px`;
+        dropdown.style.visibility = '';
+    }
+}
+
+function closeAllSchMenus() {
+    document.querySelectorAll('.sch-menu-dropdown.open').forEach(d => d.classList.remove('open'));
+}
+
+document.addEventListener('click', closeAllSchMenus);
+
+// ==================== Edit Schedule Modal ====================
+function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleIndex) {
+    const schedule = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName]?.schedules[scheduleIndex];
+    if (!schedule) return;
+
+    const botPrompts = (globalPrompts && globalPrompts[botName]) || {};
+    const existingModal = document.getElementById('topic-schedule-edit-modal');
+    if (existingModal) existingModal.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'topic-schedule-edit-modal';
+
+    const typeOptions = ['minute', 'hourly', 'interval', 'daily'];
+    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval: 'Every X Hours', daily: 'Daily' };
+
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Edit Schedule — ${escapeHtmlSys(schedule.name)}</h3>
+                <button class="btn-icon" onclick="closeModal('topic-schedule-edit-modal')">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Schedule Name</label>
+                    <input type="text" class="input" id="edit-sch-name" value="${escapeHtmlSys(schedule.name)}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Schedule Type</label>
+                    <select class="select" id="edit-sch-type" onchange="updateEditScheduleInputs()">
+                        ${typeOptions.map(t => `<option value="${t}"${schedule.type === t ? ' selected' : ''}>${typeLabels[t]}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group" id="edit-sch-inputs">
+                    ${buildEditScheduleInputs(schedule)}
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Prompt</label>
+                    <select class="select" id="edit-sch-prompt">
+                        ${Object.keys(botPrompts).map(key => `
+                            <option value="${key}"${schedule.prompt_key === key ? ' selected' : ''}>${key}</option>
+                        `).join('')}
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('topic-schedule-edit-modal')">Cancel</button>
+                <button class="btn btn-primary"
+                        onclick="saveEditedSchedule('${botName}', '${categoryName}', '${topicName}', ${scheduleIndex})">Save Changes</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+}
+
+function buildEditScheduleInputs(schedule) {
+    const type = schedule.type;
+    if (type === 'minute') {
+        return `<label class="form-label">Every N Minutes</label>
+                <input type="number" class="input" id="edit-sch-minute" min="1" max="59" value="${schedule.minute || 1}">`;
+    } else if (type === 'hourly') {
+        return `<label class="form-label">Minute</label>
+                <input type="number" class="input" id="edit-sch-minute" min="0" max="59" value="${schedule.minute || 0}">`;
+    } else if (type === 'interval') {
+        return `<label class="form-label">Every X Hours</label>
+                <input type="number" class="input" id="edit-sch-hours" min="1" max="24" value="${schedule.hours || 2}">
+                <label class="form-label mt-1">Starting at (HH : MM)</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" class="input" id="edit-sch-start-hour" min="0" max="23" value="${schedule.start_hour ?? 0}" placeholder="HH" style="width:80px;">
+                    <input type="number" class="input" id="edit-sch-start-minute" min="0" max="59" value="${schedule.start_minute ?? 0}" placeholder="MM" style="width:80px;">
+                </div>
+                <small class="text-muted">First run at this time, then every X hours</small>`;
+    } else if (type === 'daily') {
+        return `<label class="form-label">Hour</label>
+                <input type="number" class="input" id="edit-sch-hour" min="0" max="23" value="${schedule.hour || 0}">
+                <label class="form-label mt-1">Minute</label>
+                <input type="number" class="input" id="edit-sch-minute" min="0" max="59" value="${schedule.minute || 0}">`;
+    }
+    return '';
+}
+
+function updateEditScheduleInputs() {
+    const type = document.getElementById('edit-sch-type').value;
+    const container = document.getElementById('edit-sch-inputs');
+    container.innerHTML = buildEditScheduleInputs({ type });
+}
+
+async function saveEditedSchedule(botName, categoryName, topicName, scheduleIndex) {
+    const name = document.getElementById('edit-sch-name').value.trim();
+    const type = document.getElementById('edit-sch-type').value;
+    const prompt_key = document.getElementById('edit-sch-prompt').value;
+
+    if (!name) {
+        showAlert('Please enter a schedule name', { icon: '✏️' });
+        return;
+    }
+
+    const original = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName]?.schedules[scheduleIndex];
+    const schedule = { name, type, prompt_key, enabled: original ? original.enabled : true };
+
+    if (type === 'minute') {
+        schedule.minute = Number(document.getElementById('edit-sch-minute').value);
+    } else if (type === 'hourly') {
+        schedule.minute = Number(document.getElementById('edit-sch-minute').value);
+    } else if (type === 'interval') {
+        schedule.hours        = Number(document.getElementById('edit-sch-hours').value);
+        schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
+        schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
+    } else if (type === 'daily') {
+        schedule.hour   = Number(document.getElementById('edit-sch-hour').value);
+        schedule.minute = Number(document.getElementById('edit-sch-minute').value);
+    }
+
+    const result = await api('/api/topic/schedule/update', {
+        bot_name: botName,
+        category_name: categoryName,
+        topic_name: topicName,
+        schedule_index: scheduleIndex,
+        schedule
+    });
+
+    if (result.status === 'ok') {
+        await loadAllData();
+        const topicId    = `topic-${botName}-${categoryName}-${topicName}`;
+        const categoryId = `categories-${botName}`;
+        renderBotsPage([topicId, categoryId]);
+        closeModal('topic-schedule-edit-modal');
+        showNotification('Schedule updated', 'success');
+    } else {
+        showNotification('Failed to update schedule', 'error');
+    }
 }
 
 // ==================== Utility Functions ====================
@@ -2156,16 +2525,22 @@ function renderMonitorBots(bots) {
 }
 
 function scheduleIcon(sch) {
-    if (sch.type === 'hourly') return '🕐';
-    if (sch.type === 'daily')  return '📅';
-    if (sch.type === 'minute') return '⚡';
+    if (sch.type === 'hourly')   return '🕐';
+    if (sch.type === 'daily')    return '📅';
+    if (sch.type === 'minute')   return '⚡';
+    if (sch.type === 'interval') return '🔁';
     return '🔔';
 }
 
 function scheduleSpec(sch) {
-    if (sch.type === 'hourly') return `every hour at :${String(sch.minute ?? 0).padStart(2,'0')}`;
-    if (sch.type === 'daily')  return `daily at ${String(sch.hour ?? 0).padStart(2,'0')}:${String(sch.minute ?? 0).padStart(2,'0')}`;
-    if (sch.type === 'minute') return `every ${sch.minute ?? 1} min`;
+    if (sch.type === 'hourly')   return `every hour at :${String(sch.minute ?? 0).padStart(2,'0')}`;
+    if (sch.type === 'daily')    return `daily at ${String(sch.hour ?? 0).padStart(2,'0')}:${String(sch.minute ?? 0).padStart(2,'0')}`;
+    if (sch.type === 'minute')   return `every ${sch.minute ?? 1} min`;
+    if (sch.type === 'interval') {
+        const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
+        const sm = String(sch.start_minute ?? 0).padStart(2, '0');
+        return `every ${sch.hours || 1}h — starts ${sh}:${sm}`;
+    }
     return sch.type;
 }
 
