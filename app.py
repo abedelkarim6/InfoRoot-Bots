@@ -101,4 +101,9 @@ def main_page():
 @app.get("/api/config")
 def get_config():
     from utils.helpers import load_config
-    return load_config()
+    cfg = load_config()
+    return {
+        "system":      cfg.get("system", {}),
+        "bots":        cfg.get("bots", {}),
+        "collections": cfg.get("collections", {}),
+    }
