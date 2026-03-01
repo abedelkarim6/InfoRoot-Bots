@@ -96,25 +96,29 @@ async def _try_join_channel(ch_identifier: str):
             hash_part = stripped.split('+')[-1] if '+' in stripped else stripped.split('joinchat/')[-1]
             hash_part = hash_part.split('?')[0].strip('/')
             await client(ImportChatInviteRequest(hash_part))
-            logger.info(f"[JOIN] Joined via invite link: {stripped}")
+            # logger.info(f"[JOIN] Joined via invite link: {stripped}")
         except UserAlreadyParticipantError:
             pass
         except InviteHashInvalidError:
-            logger.warning(f"[JOIN] Invalid invite hash: {stripped}")
+            # logger.warning(f"[JOIN] Invalid invite hash: {stripped}")
+            pass
         except Exception as e:
-            logger.warning(f"[JOIN] Could not join via invite '{stripped}': {e}")
+            # logger.warning(f"[JOIN] Could not join via invite '{stripped}': {e}")
+            pass
         return
 
     # @username channel
     try:
         await client(JoinChannelRequest(stripped))
-        logger.info(f"[JOIN] Joined channel: {stripped}")
+        # logger.info(f"[JOIN] Joined channel: {stripped}")
     except UserAlreadyParticipantError:
         pass
     except ChannelPrivateError:
-        logger.warning(f"[JOIN] Channel is private (invite needed): {stripped}")
+        # logger.warning(f"[JOIN] Channel is private (invite needed): {stripped}")
+        pass
     except Exception as e:
-        logger.warning(f"[JOIN] Could not join '{stripped}': {e}")
+        # logger.warning(f"[JOIN] Could not join '{stripped}': {e}")
+        pass
 
 
 async def build_source_channel_map(cfg):
@@ -138,11 +142,12 @@ async def build_source_channel_map(cfg):
                     new_map[num_id] = []
                 if coll_name not in new_map[num_id]:
                     new_map[num_id].append(coll_name)
-                logger.info(f"[MAP] {ch_identifier} → id={num_id} → collections={new_map[num_id]}")
+                # logger.info(f"[MAP] {ch_identifier} → id={num_id} → collections={new_map[num_id]}")
             except Exception as e:
-                logger.warning(f"[MAP] Could not resolve '{ch_identifier}': {e}")
+                # logger.warning(f"[MAP] Could not resolve '{ch_identifier}': {e}")
+                pass
     _source_channel_map = new_map
-    logger.info(f"[MAP] Source channel map ready: {len(new_map)} channel(s) resolved")
+    # logger.info(f"[MAP] Source channel map ready: {len(new_map)} channel(s) resolved")
 
 
 async def save_dialogs_to_db():
@@ -151,7 +156,7 @@ async def save_dialogs_to_db():
     Called at startup so the channel validator UI can show membership
     without needing to open a second Telegram connection.
     """
-    logger.info("[DIALOGS] Fetching dialog list from Telegram…")
+    # logger.info("[DIALOGS] Fetching dialog list from Telegram…")
     try:
         channels = []
         async for dialog in client.iter_dialogs(limit=500):
@@ -166,9 +171,10 @@ async def save_dialogs_to_db():
                 'is_megagroup': bool(getattr(entity, 'megagroup', False)),
             })
         db.save_userbot_dialogs(channels)
-        logger.info(f"[DIALOGS] Cached {len(channels)} dialogs to DB")
+        # logger.info(f"[DIALOGS] Cached {len(channels)} dialogs to DB")
     except Exception as e:
-        logger.warning(f"[DIALOGS] Failed to cache dialogs: {e}", exc_info=True)
+        # logger.warning(f"[DIALOGS] Failed to cache dialogs: {e}", exc_info=True)
+        pass
 
 
 # ==================== Message Handler ====================
@@ -178,15 +184,8 @@ async def read_channel_messages(event):
     Only processes broadcast channels (not groups/supergroups).
     """
     try:
-        # Log every incoming event so we can confirm the handler fires
-        is_channel = event.is_channel
-        is_group   = getattr(event, 'is_group', False)
-        is_private = getattr(event, 'is_private', False)
-        logger.info(f"[EVENT] chat_id={event.chat_id} | is_channel={is_channel} | is_group={is_group} | is_private={is_private}")
-
         # Skip private/DM messages — they are never source channels
-        if is_private:
-            logger.info(f"[SKIP] Private/DM message — skipping")
+        if getattr(event, 'is_private', False):
             return
 
         chat = await event.get_chat()
@@ -197,7 +196,7 @@ async def read_channel_messages(event):
         channel_id = channel_username  # Used for collection matching
 
         text_intro = (event.message.message or event.message.text or '')[:80].replace('\n', ' ')
-        logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
+        # logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
 
         # Load latest config
         current_cfg = load_config()
@@ -215,11 +214,11 @@ async def read_channel_messages(event):
                     matching_collections.append(coll_name)
 
         if not matching_collections:
-            logger.warning(
-                f"[SKIP] id={channel_id_numeric} (@{channel_id}) not in any collection — "
-                f"map has {len(_source_channel_map)} entries {list(_source_channel_map.keys())}, "
-                f"configured collections: {list(collections_cfg.keys())}"
-            )
+            # logger.warning(
+            #     f"[SKIP] id={channel_id_numeric} (@{channel_id}) not in any collection — "
+            #     f"map has {len(_source_channel_map)} entries {list(_source_channel_map.keys())}, "
+            #     f"configured collections: {list(collections_cfg.keys())}"
+            # )
             return
 
         # Step 2: Find which bots reference those collections
@@ -231,19 +230,19 @@ async def read_channel_messages(event):
         ]
 
         if not matching_bots:
-            logger.warning(
-                f"[SKIP] @{channel_id} → collections {matching_collections} not referenced "
-                f"by any enabled bot — configured bots: {list(bots_cfg.keys())}"
-            )
+            # logger.warning(
+            #     f"[SKIP] @{channel_id} → collections {matching_collections} not referenced "
+            #     f"by any enabled bot — configured bots: {list(bots_cfg.keys())}"
+            # )
             return
 
-        logger.info(f"[MATCH] @{channel_id} → Collections: {matching_collections} | Bots: {matching_bots}")
+        # logger.info(f"[MATCH] @{channel_id} → Collections: {matching_collections} | Bots: {matching_bots}")
 
         # Extract text (text or caption for media messages)
         text = event.message.message or event.message.text
 
         if not text:
-            logger.warning(f"[SKIP] No text in message from @{channel_id}")
+            # logger.warning(f"[SKIP] No text in message from @{channel_id}")
             return
 
         original_text = text
@@ -260,12 +259,12 @@ async def read_channel_messages(event):
                     continue
                 try:
                     if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
-                        logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
+                        # logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
                         skipped = True
                         break
                 except re.error:
                     if kw in text:
-                        logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
+                        # logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
                         skipped = True
                         break
             if skipped:
@@ -286,16 +285,16 @@ async def read_channel_messages(event):
 
             topics, categories, keywords = categorizer(replaced_text, bot_name, db)
 
-            if not topics:
-                logger.info(f"[CATEG] No topics matched | Bot: {bot_name} | @{channel_id} → {matching_collections}")
-            else:
-                kw_display = keywords[:5] if keywords else []
-                kw_extra = f" (+{len(keywords)-5} more)" if keywords and len(keywords) > 5 else ""
-                logger.info(
-                    f"[CATEG] Bot: {bot_name} | @{channel_id} → {matching_collections} | "
-                    f"Topics: {topics} | Categories: {categories} | "
-                    f"Keywords [{len(keywords or [])}]: {kw_display}{kw_extra}"
-                )
+            # if not topics:
+            #     logger.info(f"[CATEG] No topics matched | Bot: {bot_name} | @{channel_id} → {matching_collections}")
+            # else:
+            #     kw_display = keywords[:5] if keywords else []
+            #     kw_extra = f" (+{len(keywords)-5} more)" if keywords and len(keywords) > 5 else ""
+            #     logger.info(
+            #         f"[CATEG] Bot: {bot_name} | @{channel_id} → {matching_collections} | "
+            #         f"Topics: {topics} | Categories: {categories} | "
+            #         f"Keywords [{len(keywords or [])}]: {kw_display}{kw_extra}"
+            #     )
 
             message_id = db.add_message(
                 channel_id=channel_id_numeric,
@@ -311,10 +310,11 @@ async def read_channel_messages(event):
                 channel_username=channel_username,
                 collection_name=collection_name_str
             )
-            logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
+            # logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
 
     except Exception as e:
-        logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
+        # logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
+        pass
 
 
 # ==================== Summary Handler ====================
@@ -340,7 +340,7 @@ async def generate_and_send_summary(job_data):
         messages = db.get_messages_for_schedule(schedule_type, bot_name)
 
         if not messages:
-            logger.debug(f"[SKIP]  SKIP | No messages | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type}")
+            # logger.debug(f"[SKIP]  SKIP | No messages | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type}")
             return
 
         # Filter messages that match this specific topic
@@ -352,17 +352,17 @@ async def generate_and_send_summary(job_data):
                     topic_messages.append(msg)
 
         if not topic_messages:
-            logger.debug(f"[SKIP]  SKIP | No messages for topic | Bot: {bot_name} | Topic: {topic_name}")
+            # logger.debug(f"[SKIP]  SKIP | No messages for topic | Bot: {bot_name} | Topic: {topic_name}")
             return
 
         # Check minimum messages requirement
         bot_cfg = config.get('bots', {}).get(bot_name, {})
         min_messages = bot_cfg.get('minimum_messages', 1)
         if len(topic_messages) < min_messages:
-            logger.info(f"[SKIP]  SKIP | Not enough messages ({len(topic_messages)}/{min_messages}) | Bot: {bot_name} | Topic: {topic_name}")
+            # logger.info(f"[SKIP]  SKIP | Not enough messages ({len(topic_messages)}/{min_messages}) | Bot: {bot_name} | Topic: {topic_name}")
             return
 
-        logger.info(f"[SUMMARY] SUMMARY TASK START | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type} | Messages: {len(topic_messages)}")
+        # logger.info(f"[SUMMARY] SUMMARY TASK START | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type} | Messages: {len(topic_messages)}")
 
         # Extract message texts
         texts = [m['text'] for m in topic_messages]
@@ -370,7 +370,7 @@ async def generate_and_send_summary(job_data):
         # Generate summary using bot-specific prompt
         prompt = get_summary_prompt(texts, bot_name, prompt_key)
 
-        logger.info(f"[AI] SUMMARY GENERATION | Bot: {bot_name} | Topic: {topic_name} | Prompt: {prompt_key} | Messages: {len(texts)}")
+        # logger.info(f"[AI] SUMMARY GENERATION | Bot: {bot_name} | Topic: {topic_name} | Prompt: {prompt_key} | Messages: {len(texts)}")
         summary_text = llm_client.generate_summary(prompt)
 
         # Get target channels from bot's collections
@@ -404,7 +404,7 @@ async def generate_and_send_summary(job_data):
         for target_chat in target_channels:
             try:
                 await client.send_message(target_chat, message_text, parse_mode='md')
-                logger.info(f"[SENT] SUMMARY SENT | Bot: {bot_name} | Topic: {topic_name} | Target: {target_chat}")
+                # logger.info(f"[SENT] SUMMARY SENT | Bot: {bot_name} | Topic: {topic_name} | Target: {target_chat}")
                 db.save_summary(
                     summary_text=summary_text,
                     message_count=len(topic_messages),
@@ -414,27 +414,24 @@ async def generate_and_send_summary(job_data):
                     topic_name=topic_name
                 )
             except Exception as e:
-                logger.error(f"Failed to send summary to {target_chat}: {e}")
+                # logger.error(f"Failed to send summary to {target_chat}: {e}")
+                pass
 
         # Mark messages as summarized
         msg_ids = [m['id'] for m in topic_messages]
         db.mark_as_summarized(msg_ids, schedule_type)
-        logger.info(f"[DONE]  MARKED AS SUMMARIZED | Bot: {bot_name} | Topic: {topic_name} | Count: {len(msg_ids)} messages")
+        # logger.info(f"[DONE]  MARKED AS SUMMARIZED | Bot: {bot_name} | Topic: {topic_name} | Count: {len(msg_ids)} messages")
 
     except Exception as e:
         logger.error(f"Critical error in summary generation: {e}", exc_info=True)
 
 async def trigger_summary(job_data):
     """Trigger summary generation with complete job data."""
-    bot_name = job_data.get('bot_name')
-    topic_name = job_data.get('topic_name')
-    schedule_type = job_data.get('schedule_type')
-    logger.info(f"[TRIGGER] SCHEDULE TRIGGER | Bot: {bot_name} | Topic: {topic_name} | Type: {schedule_type}")
-
     try:
         await generate_and_send_summary(job_data)
     except Exception as e:
-        logger.error(f"[ERROR] trigger_summary failed | Bot: {bot_name} | Topic: {topic_name} | Error: {e}", exc_info=True)
+        # logger.error(f"[ERROR] trigger_summary failed | Bot: {job_data.get('bot_name')} | Topic: {job_data.get('topic_name')} | Error: {e}", exc_info=True)
+        pass
 
 async def schedule_summaries():
     """
@@ -452,28 +449,28 @@ async def schedule_summaries():
     bots_cfg = config.get('bots', {})
 
     if not bots_cfg:
-        logger.warning("No bots configured")
+        # logger.warning("No bots configured")
         return
 
     job_count = 0
 
     for bot_name, bot in bots_cfg.items():
         if not bot.get('enabled', True):
-            logger.debug(f"Bot '{bot_name}' is disabled, skipping")
+            # logger.debug(f"Bot '{bot_name}' is disabled, skipping")
             continue
 
         categories = bot.get('categories', {})
 
         for category_name, category_data in categories.items():
             if not category_data.get('enabled', True):
-                logger.debug(f"Category '{category_name}' in bot '{bot_name}' is disabled, skipping")
+                # logger.debug(f"Category '{category_name}' in bot '{bot_name}' is disabled, skipping")
                 continue
 
             topics = category_data.get('topics', {})
 
             for topic_name, topic_data in topics.items():
                 if not topic_data.get('enabled', True):
-                    logger.debug(f"Topic '{topic_name}' is disabled, skipping")
+                    # logger.debug(f"Topic '{topic_name}' is disabled, skipping")
                     continue
 
                 schedules = topic_data.get('schedules', [])
@@ -487,7 +484,7 @@ async def schedule_summaries():
                     schedule_name = schedule.get('name', schedule_type)
 
                     if not schedule_type or not prompt_key:
-                        logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
+                        # logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
                         continue
 
                     job_data = {
@@ -537,12 +534,13 @@ async def schedule_summaries():
                             replace_existing=True
                         )
                         job_count += 1
-                        logger.info(f"[OK] Scheduled | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_name} ({schedule_type}) | Prompt: {prompt_key}")
+                        # logger.info(f"[OK] Scheduled | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_name} ({schedule_type}) | Prompt: {prompt_key}")
 
                     except Exception as e:
-                        logger.error(f"Failed to schedule {topic_name}/{schedule_name}: {e}", exc_info=True)
+                        # logger.error(f"Failed to schedule {topic_name}/{schedule_name}: {e}", exc_info=True)
+                        pass
 
-    logger.info(f"[SCHEDULER] Initialized with {job_count} jobs")
+    # logger.info(f"[SCHEDULER] Initialized with {job_count} jobs")
 
 async def scheduler_watcher():
     last_config = None
@@ -555,10 +553,11 @@ async def scheduler_watcher():
                 await build_source_channel_map(cfg)
                 last_config = cfg
                 asyncio.create_task(save_dialogs_to_db())
-                logger.info("Scheduler rebuilt + channel map refreshed — config change detected")
+                # logger.info("Scheduler rebuilt + channel map refreshed — config change detected")
 
         except Exception:
-            logger.exception("Failed to reload config during watcher")
+            # logger.exception("Failed to reload config during watcher")
+            pass
 
         await asyncio.sleep(2)
 
@@ -569,28 +568,28 @@ async def scheduler_watcher():
 async def main():
     global client
 
-    logger.info("="*60)
-    logger.info("Starting Telegram Summarizer Userbot")
-    logger.info("="*60)
+    # logger.info("="*60)
+    # logger.info("Starting Telegram Summarizer Userbot")
+    # logger.info("="*60)
 
     # Log configuration
     cfg = load_config()
     collections = cfg.get('collections', {})
     bots = cfg.get('bots', {})
 
-    logger.info(f"[CONFIG] COLLECTIONS: {len(collections)} configured")
-    for coll_name, coll_data in collections.items():
-        sources = coll_data.get('source_channels', [])
-        targets = coll_data.get('target_channels', [])
-        logger.info(f"   - {coll_name}: Sources={sources}, Targets={targets}")
+    # logger.info(f"[CONFIG] COLLECTIONS: {len(collections)} configured")
+    # for coll_name, coll_data in collections.items():
+    #     sources = coll_data.get('source_channels', [])
+    #     targets = coll_data.get('target_channels', [])
+    #     logger.info(f"   - {coll_name}: Sources={sources}, Targets={targets}")
 
-    logger.info(f"[AI] BOTS: {len(bots)} configured")
-    for bot_name, bot_data in bots.items():
-        enabled = bot_data.get('enabled', True)
-        bot_colls = bot_data.get('collections', [])
-        logger.info(f"   - {bot_name}: Enabled={enabled}, Collections={bot_colls}")
+    # logger.info(f"[AI] BOTS: {len(bots)} configured")
+    # for bot_name, bot_data in bots.items():
+    #     enabled = bot_data.get('enabled', True)
+    #     bot_colls = bot_data.get('collections', [])
+    #     logger.info(f"   - {bot_name}: Enabled={enabled}, Collections={bot_colls}")
 
-    logger.info("="*60)
+    # logger.info("="*60)
 
     # Create Telethon userbot client using the string session from config
     client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
@@ -602,26 +601,26 @@ async def main():
 
     try:
         # Connect and verify the session — don't call start() which blocks on auth prompts.
-        logger.info("[AUTH] Connecting to Telegram…")
+        # logger.info("[AUTH] Connecting to Telegram…")
         await client.connect()
-        logger.info("[AUTH] TCP connected — checking session authorization (30s timeout)…")
+        # logger.info("[AUTH] TCP connected — checking session authorization (30s timeout)…")
         try:
             authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=30)
         except asyncio.TimeoutError:
-            logger.error(
-                "[FATAL] is_user_authorized() timed out after 30s. "
-                "The session is likely expired or the auth key is invalid. "
-                "Run get_ss.py to generate a new string_session."
-            )
+            # logger.error(
+            #     "[FATAL] is_user_authorized() timed out after 30s. "
+            #     "The session is likely expired or the auth key is invalid. "
+            #     "Run get_ss.py to generate a new string_session."
+            # )
             return
         if not authorized:
-            logger.error(
-                "[FATAL] Userbot session is NOT authorized. "
-                "The string_session in config.yaml is invalid or expired. "
-                "Run get_ss.py to generate a new session string."
-            )
+            # logger.error(
+            #     "[FATAL] Userbot session is NOT authorized. "
+            #     "The string_session in config.yaml is invalid or expired. "
+            #     "Run get_ss.py to generate a new session string."
+            # )
             return
-        logger.info("Userbot connected successfully")
+        # logger.info("Userbot connected successfully")
 
         # Pre-resolve all source channels to numeric IDs so private channels work
         await build_source_channel_map(cfg)
@@ -634,18 +633,20 @@ async def main():
         # Start scheduler watcher (also rebuilds the channel map on config changes)
         asyncio.create_task(scheduler_watcher())
 
-        logger.info("Userbot is running... Press Ctrl+C to stop")
+        # logger.info("Userbot is running... Press Ctrl+C to stop")
         await client.run_until_disconnected()
 
     except KeyboardInterrupt:
-        logger.info("Userbot stopped by user")
+        # logger.info("Userbot stopped by user")
+        pass
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        # logger.error(f"Fatal error: {e}", exc_info=True)
+        pass
     finally:
         db.close()
         if SCHEDULER and SCHEDULER.running:
             SCHEDULER.shutdown()
-        logger.info("Userbot shutdown complete")
+        # logger.info("Userbot shutdown complete")
 
 
 if __name__ == "__main__":

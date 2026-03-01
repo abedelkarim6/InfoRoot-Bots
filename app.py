@@ -74,7 +74,14 @@ app.add_middleware(TokenAuthMiddleware)
 app.state.bot_process = None
 app.state.bot_lock = bot_lock
 
-# Serve static HTML/JS/CSS
+# Serve static HTML/JS/CSS (no-cache so browser always gets latest)
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Include routers

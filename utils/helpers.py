@@ -54,23 +54,23 @@ def setup_logging(config):
     )
     console_handler.setFormatter(console_format)
     
-    # File handler with rotation
-    file_handler = RotatingFileHandler(
-        log_config["file"],
-        maxBytes=log_config["max_file_size_mb"] * 1024 * 1024,
-        backupCount=log_config["backup_count"],
-        encoding='utf-8',
-    )
-    file_handler.setLevel(getattr(logging, log_config["level"]))
-    file_format = logging.Formatter(
-        '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    file_handler.setFormatter(file_format)
+    # File handler with rotation (DISABLED)
+    # file_handler = RotatingFileHandler(
+    #     log_config["file"],
+    #     maxBytes=log_config["max_file_size_mb"] * 1024 * 1024,
+    #     backupCount=log_config["backup_count"],
+    #     encoding='utf-8',
+    # )
+    # file_handler.setLevel(getattr(logging, log_config["level"]))
+    # file_format = logging.Formatter(
+    #     '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+    #     datefmt='%Y-%m-%d %H:%M:%S'
+    # )
+    # file_handler.setFormatter(file_format)
     
     # Add handlers
     logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+    # logger.addHandler(file_handler)
     
     return logger
 
