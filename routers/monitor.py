@@ -61,6 +61,25 @@ def get_monitor_data():
         db.close()
 
 
+@router.get("/monitor/summary-messages")
+def get_summary_messages(id: int = Query(...)):
+    """Return the source messages that were included in a specific summary."""
+    db = _get_db()
+    try:
+        cursor = db._get_cursor()
+        cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
+        row = cursor.fetchone()
+        if not row or not row['message_ids']:
+            return {'status': 'ok', 'messages': []}
+        ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
+        messages = db.get_messages_by_ids(ids)
+        return {'status': 'ok', 'messages': messages}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+    finally:
+        db.close()
+
+
 @router.get("/monitor/messages")
 def get_monitor_messages():
     """

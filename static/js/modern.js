@@ -2632,12 +2632,16 @@ function applyMonSummaryFilters() {
     const rows = filtered.map(s => {
         const ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '—';
         const typeCls = s.summary_type || 'hourly';
+        const count = s.message_count ?? '—';
+        const msgsCell = s.message_ids
+            ? `<span class="mon-msgs-link" onclick="showSummaryMessages(${s.id})">${count}</span>`
+            : count;
         return `<tr>
             <td style="white-space:nowrap;">${ts}</td>
             <td>${escapeHtml(s.bot_name || '—')}</td>
             <td>${escapeHtml(s.topic_name || '—')}</td>
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(s.summary_type || '—')}</span></td>
-            <td style="text-align:center;">${s.message_count ?? '—'}</td>
+            <td style="text-align:center;">${msgsCell}</td>
             <td>${escapeHtml(s.target_entity || '—')}</td>
             <td class="mon-ellipsis" title="${escapeHtml(s.preview || '')}">${escapeHtml(s.preview || '')}</td>
         </tr>`;
@@ -2647,6 +2651,42 @@ function applyMonSummaryFilters() {
             <thead><tr><th>Time</th><th>Bot</th><th>Topic</th><th>Type</th><th>Msgs</th><th>Target</th><th>Preview</th></tr></thead>
             <tbody>${rows}</tbody>
         </table></div>`;
+}
+
+// ---------- Summary Source Messages Modal ----------
+async function showSummaryMessages(summaryId) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog" style="max-width:720px;" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <h3>Source Messages</h3>
+                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
+            </div>
+            <div class="modal-body" style="max-height:65vh;overflow-y:auto;">
+                <p class="mon-empty">Loading…</p>
+            </div>
+        </div>`;
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+
+    const body = overlay.querySelector('.modal-body');
+    const data = await api(`/api/monitor/summary-messages?id=${summaryId}`);
+    if (data.status !== 'ok' || !data.messages?.length) {
+        body.innerHTML = `<p class="mon-empty">${data.message ? 'Error: ' + escapeHtml(data.message) : 'No linked messages found.'}</p>`;
+        return;
+    }
+    body.innerHTML = data.messages.map(m => {
+        const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+        const ch = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '';
+        return `<div class="sum-msg-item">
+            <div class="sum-msg-meta">
+                <span class="sum-msg-ch">${ch}</span>
+                <span class="sum-msg-ts">${ts}</span>
+            </div>
+            <div class="sum-msg-text">${escapeHtml(m.preview || '')}</div>
+        </div>`;
+    }).join('');
 }
 
 // ---------- Received Messages ----------

@@ -336,23 +336,18 @@ async def generate_and_send_summary(job_data):
     try:
         config = load_config()
 
-        # Get all unsummarized messages for this bot and schedule type
-        messages = db.get_messages_for_schedule(schedule_type, bot_name)
+        # Get unsummarized messages for this specific (bot, topic, schedule_type)
+        messages = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
 
-        if not messages:
-            # logger.debug(f"[SKIP]  SKIP | No messages | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type}")
-            return
-
-        # Filter messages that match this specific topic
+        # Filter to only messages that actually have this topic in their topics list
         topic_messages = []
         for msg in messages:
             if msg.get('topics'):
-                msg_topics = msg['topics'].split(',') if isinstance(msg['topics'], str) else []
+                msg_topics = [t.strip() for t in msg['topics'].split(',')]
                 if topic_name in msg_topics:
                     topic_messages.append(msg)
 
         if not topic_messages:
-            # logger.debug(f"[SKIP]  SKIP | No messages for topic | Bot: {bot_name} | Topic: {topic_name}")
             return
 
         # Check minimum messages requirement
@@ -401,6 +396,7 @@ async def generate_and_send_summary(job_data):
             message_text = f"{header_text}\n{'—'*20}\n\n{summary_text}"
 
         # Send summary to all target channels using the userbot client
+        msg_ids = [m['id'] for m in topic_messages]
         for target_chat in target_channels:
             try:
                 await client.send_message(target_chat, message_text, parse_mode='md')
@@ -411,15 +407,15 @@ async def generate_and_send_summary(job_data):
                     summary_type=schedule_type,
                     target_entity=str(target_chat),
                     bot_name=bot_name,
-                    topic_name=topic_name
+                    topic_name=topic_name,
+                    message_ids=msg_ids
                 )
             except Exception as e:
                 # logger.error(f"Failed to send summary to {target_chat}: {e}")
                 pass
 
-        # Mark messages as summarized
-        msg_ids = [m['id'] for m in topic_messages]
-        db.mark_as_summarized(msg_ids, schedule_type)
+        # Mark messages as summarized for this specific (bot, topic, schedule_type)
+        db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
         # logger.info(f"[DONE]  MARKED AS SUMMARIZED | Bot: {bot_name} | Topic: {topic_name} | Count: {len(msg_ids)} messages")
 
     except Exception as e:

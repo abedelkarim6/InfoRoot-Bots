@@ -4,6 +4,7 @@ Uses PostgreSQL via psycopg2.
 """
 
 import logging
+import re
 from typing import List
 
 import psycopg2
@@ -104,6 +105,18 @@ class Database:
             )
         """)
 
+        # Per-topic summarization tracking (replaces the old boolean flags)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS message_summarizations (
+                message_id INTEGER NOT NULL,
+                bot_name TEXT NOT NULL,
+                topic_name TEXT NOT NULL,
+                schedule_type TEXT NOT NULL,
+                summarized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_id, bot_name, topic_name, schedule_type)
+            )
+        """)
+
         # Safe column migrations using information_schema
         cursor.execute("""
             SELECT column_name FROM information_schema.columns
@@ -137,6 +150,8 @@ class Database:
             cursor.execute('ALTER TABLE summaries ADD COLUMN bot_name TEXT')
         if 'topic_name' not in cols2:
             cursor.execute('ALTER TABLE summaries ADD COLUMN topic_name TEXT')
+        if 'message_ids' not in cols2:
+            cursor.execute('ALTER TABLE summaries ADD COLUMN message_ids TEXT')
 
         self.connection.commit()
 
@@ -163,54 +178,52 @@ class Database:
         self.connection.commit()
         return row['id']
 
-    def get_messages_for_schedule(self, schedule_type: str, bot_name: str = None):
-        if schedule_type == "minute":
-            column = "summarized_minute"
-        elif schedule_type == "hourly":
-            column = "summarized_hourly"
-        else:  # daily or other
-            column = "summarized_daily"
-
+    def get_messages_for_schedule(self, schedule_type: str, bot_name: str, topic_name: str):
+        """Get messages not yet summarized for this specific (bot, topic, schedule_type) combo."""
         cursor = self._get_cursor()
-        if bot_name:
-            cursor.execute(
-                f"SELECT * FROM messages WHERE {column} = FALSE AND bot_name = %s",
-                (bot_name,)
-            )
-        else:
-            cursor.execute(f"SELECT * FROM messages WHERE {column} = FALSE")
-
+        cursor.execute(
+            """SELECT m.* FROM messages m
+               WHERE m.bot_name = %s
+                 AND NOT EXISTS (
+                     SELECT 1 FROM message_summarizations ms
+                     WHERE ms.message_id = m.id
+                       AND ms.bot_name = %s
+                       AND ms.topic_name = %s
+                       AND ms.schedule_type = %s
+                 )""",
+            (bot_name, bot_name, topic_name, schedule_type)
+        )
         return [dict(row) for row in cursor.fetchall()]
 
-    def mark_as_summarized(self, message_ids: List[int], schedule_type: str):
+    def mark_as_summarized(self, message_ids: List[int], schedule_type: str,
+                           bot_name: str, topic_name: str):
+        """Mark messages as summarized for a specific (bot, topic, schedule_type)."""
         if not message_ids:
             return
 
-        if schedule_type == "minute":
-            column = "summarized_minute"
-        elif schedule_type == "hourly":
-            column = "summarized_hourly"
-        else:  # daily or other
-            column = "summarized_daily"
-
         cursor = self._get_cursor()
-        cursor.execute(
-            f"UPDATE messages SET {column} = TRUE WHERE id = ANY(%s)",
-            (message_ids,)
-        )
+        for mid in message_ids:
+            cursor.execute(
+                """INSERT INTO message_summarizations (message_id, bot_name, topic_name, schedule_type)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING""",
+                (mid, bot_name, topic_name, schedule_type)
+            )
         self.connection.commit()
 
     def save_summary(self, summary_text: str, message_count: int,
                      summary_type: str, target_entity: str,
-                     bot_name: str = None, topic_name: str = None) -> int:
+                     bot_name: str = None, topic_name: str = None,
+                     message_ids: list = None) -> int:
         """Save a generated summary and return its id."""
+        ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
         cursor = self._get_cursor()
         cursor.execute(
             """INSERT INTO summaries
-               (summary_text, message_count, summary_type, target_entity, bot_name, topic_name)
-               VALUES (%s, %s, %s, %s, %s, %s)
+               (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
-            (summary_text, message_count, summary_type, target_entity, bot_name, topic_name)
+            (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str)
         )
         row = cursor.fetchone()
         self.connection.commit()
@@ -219,12 +232,19 @@ class Database:
     def get_pending_counts(self):
         """Returns pending message counts per bot per topic for each schedule type."""
         cursor = self._get_cursor()
+        # Get all messages with their topics, then check what's NOT yet summarized
         cursor.execute("""
-            SELECT bot_name, topics, summarized_hourly, summarized_daily, summarized_minute
-            FROM messages
-            WHERE summarized_hourly = FALSE OR summarized_daily = FALSE OR summarized_minute = FALSE
+            SELECT m.id, m.bot_name, m.topics
+            FROM messages m
+            WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
         """)
         rows = cursor.fetchall()
+
+        # Get all existing summarizations
+        cursor.execute("SELECT message_id, bot_name, topic_name, schedule_type FROM message_summarizations")
+        done = set()
+        for r in cursor.fetchall():
+            done.add((r['message_id'], r['bot_name'], r['topic_name'], r['schedule_type']))
 
         counts = {}  # bot_name -> topic -> {hourly, daily, minute}
         for row in rows:
@@ -238,12 +258,9 @@ class Database:
             for topic in topics:
                 if topic not in counts[bn]:
                     counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0}
-                if not row['summarized_hourly']:
-                    counts[bn][topic]['hourly'] += 1
-                if not row['summarized_daily']:
-                    counts[bn][topic]['daily'] += 1
-                if not row['summarized_minute']:
-                    counts[bn][topic]['minute'] += 1
+                for stype in ('hourly', 'daily', 'minute'):
+                    if (row['id'], bn, topic, stype) not in done:
+                        counts[bn][topic][stype] += 1
 
         return counts
 
@@ -252,8 +269,7 @@ class Database:
         cursor = self._get_cursor()
         cursor.execute(
             """SELECT id, bot_name, topic_name, summary_type, target_entity,
-                      message_count, timestamp,
-                      LEFT(summary_text, 300) AS preview
+                      message_count, timestamp, summary_text, message_ids
                FROM summaries
                ORDER BY timestamp DESC
                LIMIT %s""",
@@ -262,6 +278,31 @@ class Database:
         result = []
         for row in cursor.fetchall():
             d = dict(row)
+            txt = d.pop('summary_text', '') or ''
+            d['preview'] = txt[:300]
+            if d['timestamp']:
+                d['timestamp'] = d['timestamp'].isoformat()
+            result.append(d)
+        return result
+
+    def get_messages_by_ids(self, message_ids: list):
+        """Return messages matching the given IDs."""
+        if not message_ids:
+            return []
+        cursor = self._get_cursor()
+        cursor.execute(
+            """SELECT id, channel_id, channel_username, collection_name, bot_name,
+                      topics, categories, keywords_found, timestamp, text
+               FROM messages
+               WHERE id = ANY(%s)
+               ORDER BY timestamp ASC""",
+            (message_ids,)
+        )
+        result = []
+        for row in cursor.fetchall():
+            d = dict(row)
+            txt = d.pop('text', '') or ''
+            d['preview'] = txt[:300]
             if d['timestamp']:
                 d['timestamp'] = d['timestamp'].isoformat()
             result.append(d)
@@ -280,8 +321,7 @@ class Database:
         cursor = self._get_cursor()
         cursor.execute(
             """SELECT id, channel_id, channel_username, collection_name, bot_name,
-                      topics, categories, keywords_found, timestamp,
-                      LEFT(text, 220) AS preview
+                      topics, categories, keywords_found, timestamp, text
                FROM messages
                WHERE collection_name IS NOT NULL AND collection_name != ''
                ORDER BY timestamp DESC
@@ -291,6 +331,8 @@ class Database:
         result = []
         for row in cursor.fetchall():
             d = dict(row)
+            txt = d.pop('text', '') or ''
+            d['preview'] = txt[:220]
             if d['timestamp']:
                 d['timestamp'] = d['timestamp'].isoformat()
             result.append(d)
@@ -501,8 +543,7 @@ class Database:
         cursor.execute("SELECT COUNT(*) AS total FROM messages")
         total = cursor.fetchone()['total']
         cursor.execute(
-            "SELECT COUNT(*) AS cnt FROM messages "
-            "WHERE summarized_hourly = TRUE OR summarized_daily = TRUE"
+            "SELECT COUNT(DISTINCT message_id) AS cnt FROM message_summarizations"
         )
         summarized = cursor.fetchone()['cnt']
         return {
