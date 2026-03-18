@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import threading
@@ -26,13 +27,54 @@ from starlette.responses import RedirectResponse
 
 from routers import bot, category, telegram, prompts, rules, system, collection, topic, monitor, auth
 from routers.auth import validate_token
-from utils.database import Database, set_db_instance
+from utils.database import Database, set_db_instance, get_db
 from utils.helpers import load_config as _load_cfg, start_bot_subprocess, stop_bot_subprocess
+
+# YouTube monitor imports
+from youtube_monitor.db import YouTubeDB, set_yt_db
+from youtube_monitor.worker import init_worker
+from youtube_monitor.keyword_search import init_keyword_search
+from routers.youtube import router as youtube_router, websub_router
+from youtube_monitor.renew_websub import renew_all_subscriptions
+from youtube_monitor.cleanup import run_cleanup
 
 _cfg = _load_cfg()
 db = Database(_cfg["database"]["dsn"])
 set_db_instance(db)
 db.seed_keywords_from_config(_cfg)
+
+# Initialize YouTube DB (new tables only — never touches existing tables)
+yt_db = YouTubeDB(_cfg["database"]["dsn"])
+set_yt_db(yt_db)
+
+# Initialize YouTube feature — keys from config.yaml youtube section
+_yt_cfg = _cfg.get("youtube", {})
+init_keyword_search(youtube_data_api_key=_yt_cfg.get("data_api_key", ""))
+async def _yt_telegram_send(target: str, text: str):
+    """Send a Telegram message using a temporary Telethon client (userbot session)."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    tg_cfg = _cfg.get("telegram", {})
+    session_str = tg_cfg.get("string_session", "")
+    if not session_str:
+        logger.warning("[YT-TG] No string_session in config — cannot send")
+        return
+    client = TelegramClient(
+        StringSession(session_str),
+        int(tg_cfg["api_id"]),
+        tg_cfg["api_hash"],
+    )
+    try:
+        await client.connect()
+        await client.send_message(target, text, parse_mode='md')
+    finally:
+        await client.disconnect()
+
+init_worker(
+    youtube_gemini_api_key=_yt_cfg.get("gemini_api_key", ""),
+    youtube_data_api_key=_yt_cfg.get("data_api_key", ""),
+    telegram_send_fn=_yt_telegram_send,
+)
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
@@ -40,6 +82,10 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+
+        # WebSub callback is public (YouTube hub needs unauthenticated access)
+        if path.startswith("/youtube/websub/"):
+            return await call_next(request)
 
         # Page requests and static files pass through freely.
         # auth.js in the browser handles the /login redirect client-side.
@@ -61,9 +107,42 @@ bot_lock = threading.Lock()
 
 @asynccontextmanager
 async def lifespan(app):
-    """Auto-start the bot on server startup, stop it on shutdown."""
+    """Auto-start the bot on server startup, start YouTube scheduler, stop on shutdown."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+    from youtube_monitor.worker import process_pending_queue
+    from youtube_monitor.keyword_search import run_due_keyword_searches
+
     start_bot_subprocess(app.state)
+
+    # YouTube auto-processing scheduler
+    yt_scheduler = AsyncIOScheduler()
+
+    # Process video queue every 5 minutes
+    yt_scheduler.add_job(process_pending_queue, IntervalTrigger(minutes=5),
+                         id='yt_process_queue', replace_existing=True)
+
+    # Check for due keyword searches every 5 minutes (per-keyword scheduling)
+    yt_scheduler.add_job(run_due_keyword_searches, IntervalTrigger(minutes=5),
+                         id='yt_keyword_search', replace_existing=True)
+
+    # Renew WebSub subscriptions every 9 days
+    cb_url = _yt_cfg.get("callback_url", "").rstrip("/")
+    if cb_url:
+        full_cb = f"{cb_url}/youtube/websub/callback"
+        yt_scheduler.add_job(renew_all_subscriptions, IntervalTrigger(days=9),
+                             args=[full_cb], id='yt_websub_renew', replace_existing=True)
+
+    # Weekly queue cleanup
+    yt_scheduler.add_job(run_cleanup, IntervalTrigger(weeks=1),
+                         id='yt_cleanup', replace_existing=True)
+
+    yt_scheduler.start()
+    logger.info("[YT-SCHEDULER] YouTube auto-processing scheduler started")
+
     yield
+
+    yt_scheduler.shutdown(wait=False)
     stop_bot_subprocess(app.state, bot_lock)
 
 
@@ -96,6 +175,11 @@ app.include_router(rules.router, prefix="/api", tags=["rules"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 
+# YouTube monitor routes (API endpoints under /api/youtube/*)
+app.include_router(youtube_router, prefix="/api", tags=["youtube"])
+# WebSub callback route (public, no /api prefix — YouTube hub needs direct access)
+app.include_router(websub_router)
+
 # Serve static pages
 @app.get("/login")
 def login_page():
@@ -109,8 +193,18 @@ def main_page():
 def get_config():
     from utils.helpers import load_config
     cfg = load_config()
+    bots = cfg.get("bots", {})
+
+    # Enrich topics with keywords from DB
+    db = get_db()
+    if db:
+        for bot_name, bot in bots.items():
+            for cat_name, cat in (bot.get("categories") or {}).items():
+                for topic_name, topic in (cat.get("topics") or {}).items():
+                    topic["keywords"] = db.get_topic_keywords(bot_name, cat_name, topic_name)
+
     return {
         "system":      cfg.get("system", {}),
-        "bots":        cfg.get("bots", {}),
+        "bots":        bots,
         "collections": cfg.get("collections", {}),
     }

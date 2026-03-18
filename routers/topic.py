@@ -21,9 +21,10 @@ def add_category(data: dict = Body(...)):
     if not bot_name or not category_name:
         return {"status": "error", "message": "Missing required fields"}
     
-    # Validate name format
-    if not category_name.replace('_', '').replace('-', '').isalnum():
-        return {"status": "error", "message": "Invalid category name"}
+    # Validate name is not empty after trimming
+    category_name = category_name.strip()
+    if not category_name:
+        return {"status": "error", "message": "Category name cannot be empty"}
     
     cfg = load_config()
     bots = cfg.get('bots', {})
@@ -114,9 +115,10 @@ def add_topic(data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name:
         return {"status": "error", "message": "Missing required fields"}
     
-    # Validate name format
-    if not topic_name.replace('_', '').replace('-', '').isalnum():
-        return {"status": "error", "message": "Invalid topic name"}
+    # Validate name is not empty after trimming
+    topic_name = topic_name.strip()
+    if not topic_name:
+        return {"status": "error", "message": "Topic name cannot be empty"}
     
     cfg = load_config()
     bots = cfg.get('bots', {})

@@ -5,6 +5,8 @@ apscheduler
 requests
 uvicorn==0.40.0
 websockets==15.0.1
+youtube-transcript-api
+google-api-python-client
 
 annotated-doc==0.0.4
 annotated-types==0.7.0

@@ -98,7 +98,12 @@ async function api(path, body) {
     if (body) options.body = JSON.stringify(body);
     try {
         const response = await fetch(path, options);
-        return await response.json();
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch {
+            return { status: 'error', message: text || `Server error (${response.status})` };
+        }
     } catch (error) {
         console.error('API Error:', error);
         return { status: 'error', message: error.message };
@@ -140,6 +145,11 @@ function showPage(pageName) {
     }
     else if (pageName === 'monitor') loadMonitorData();
     else if (pageName === 'dashboard') loadDashboardData();
+    // YouTube pages
+    else if (pageName === 'yt-channels') loadYtChannelsData();
+    else if (pageName === 'yt-keywords') loadYtKeywordsData();
+    else if (pageName === 'yt-videos') loadYtVideosData();
+    else if (pageName === 'yt-chat') ytChatInit();
 }
 
 // ==================== Data Loading ====================
@@ -217,9 +227,81 @@ function renderSystemPage() {
     container.innerHTML = Object.entries(bots)
         .map(([name, bot]) => createBotDetailCard(name, bot))
         .join('');
-    
+
     updateStats();
     updateSystemStatus();
+    renderYoutubeOverview();
+}
+
+async function renderYoutubeOverview() {
+    const container = document.getElementById('system-yt-overview');
+    if (!container) return;
+    try {
+        const res = await api('/api/youtube/overview');
+        if (res.status !== 'ok') { container.innerHTML = '<p class="text-muted">YouTube Monitor not available</p>'; return; }
+        const ch = res.channels || {};
+        const kw = res.keywords || {};
+        const q  = res.queue || {};
+        const today = res.today || {};
+        const totalSummaries = res.summaries_total || 0;
+
+        const subLine = (on, total) => {
+            const off = total - on;
+            return off > 0
+                ? `<span style="color:var(--success)">${on} on</span> / <span style="color:var(--danger)">${off} off</span>`
+                : `<span style="color:var(--success)">all active</span>`;
+        };
+
+        const queueSub = () => {
+            const parts = [];
+            if (q.pending)    parts.push(`<span style="color:var(--warning)">${q.pending} pending</span>`);
+            if (q.processing) parts.push(`<span style="color:var(--info)">${q.processing} in progress</span>`);
+            if (q.failed)     parts.push(`<span style="color:var(--danger)">${q.failed} failed</span>`);
+            return parts.length ? parts.join(' · ') : `<span style="color:var(--success)">all clear</span>`;
+        };
+
+        container.innerHTML = `
+            <div class="stats-grid" style="margin-bottom:16px">
+                <div class="stat-card">
+                    <div class="stat-icon">📡</div>
+                    <div class="stat-content">
+                        <div class="stat-value">${ch.total || 0}</div>
+                        <div class="stat-label">Channels</div>
+                        <div class="stat-sub">${subLine(ch.active||0, ch.total||0)}</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🔑</div>
+                    <div class="stat-content">
+                        <div class="stat-value">${kw.total || 0}</div>
+                        <div class="stat-label">Keywords</div>
+                        <div class="stat-sub">${subLine(kw.active||0, kw.total||0)}</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📄</div>
+                    <div class="stat-content">
+                        <div class="stat-value">${totalSummaries}</div>
+                        <div class="stat-label">Summaries</div>
+                        <div class="stat-sub">${today.done_today||0} today</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📥</div>
+                    <div class="stat-content">
+                        <div class="stat-value">${q.done || 0}</div>
+                        <div class="stat-label">Queue Done</div>
+                        <div class="stat-sub">${queueSub()}</div>
+                    </div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <button class="btn btn-primary btn-sm" onclick="showPage('youtube')">Open YouTube Monitor →</button>
+            </div>
+        `;
+    } catch (e) {
+        container.innerHTML = '';
+    }
 }
 
 function createBotDetailCard(name, bot) {
@@ -293,6 +375,12 @@ function createBotDetailCard(name, bot) {
 function escapeHtmlSys(str) {
     if (str == null) return '';
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/** Escape a string for safe use inside single-quoted inline JS attributes (onclick, onkeydown, etc.) */
+function jsAttr(str) {
+    if (str == null) return '';
+    return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 function navigateToBotConfig(botName) {
@@ -1133,11 +1221,11 @@ function createCategoriesSection(botName, bot) {
                     ).join('')}
                     
                     <div class="add-category-section">
-                        <input type="text" class="input" id="new-category-${botName}" 
-                               placeholder="New category name" 
-                               onkeydown="if(event.key==='Enter'){event.preventDefault(); addCategory('${botName}'); return false;}"
+                        <input type="text" class="input" id="new-category-${botName}"
+                               placeholder="New category name"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault(); addCategory('${jsAttr(botName)}'); return false;}"
                                style="display:inline-block; width:auto; margin-right:8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="addCategory('${botName}')">
+                        <button class="btn btn-secondary btn-sm" onclick="addCategory('${jsAttr(botName)}')">
                             + Add Category
                         </button>
                     </div>
@@ -1153,12 +1241,13 @@ function createCategoryBox(botName, categoryName, category) {
     const sectionId = `category-${botName}-${categoryName}`;
     const savedState = loadCollapsibleState(sectionId);
     const defaultOpen = savedState !== null ? savedState : true; // Default open for Categories
+    const b = jsAttr(botName), c = jsAttr(categoryName);
 
     return `
         <div class="category-box collapsible-section ${defaultOpen ? 'open' : ''}" id="${sectionId}">
-            <div class="category-header-row" onclick="toggleCollapsible('${sectionId}')">
+            <div class="category-header-row" onclick="toggleCollapsible('${jsAttr(sectionId)}')">
                 <div class="category-title-group">
-                    <h4>🗂️ ${categoryName}</h4>
+                    <h4>🗂️ ${escapeHtmlSys(categoryName)}</h4>
                     <span class="text-muted" style="margin-left: 8px;">(${topicCount} topic${topicCount !== 1 ? 's' : ''})</span>
                 </div>
                 <div class="category-controls" onclick="event.stopPropagation()">
@@ -1168,11 +1257,11 @@ function createCategoryBox(botName, categoryName, category) {
                     </button>
                     <label class="toggle-switch">
                         <input type="checkbox" ${category.enabled ? 'checked' : ''}
-                               onchange="toggleCategory('${botName}', '${categoryName}', this.checked)">
+                               onchange="toggleCategory('${b}', '${c}', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                     <button class="btn-icon btn-danger"
-                            onclick="deleteCategory('${botName}', '${categoryName}')">🗑️</button>
+                            onclick="deleteCategory('${b}', '${c}')">🗑️</button>
                     <span class="collapsible-toggle">▼</span>
                 </div>
             </div>
@@ -1186,9 +1275,9 @@ function createCategoryBox(botName, categoryName, category) {
                     <div style="margin-top: 16px;">
                         <input type="text" class="input" id="new-topic-${botName}-${categoryName}"
                                placeholder="New topic name"
-                               onkeydown="if(event.key==='Enter'){event.preventDefault(); event.stopPropagation(); addTopic('${botName}', '${categoryName}'); return false;}"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault(); event.stopPropagation(); addTopic('${b}', '${c}'); return false;}"
                                style="display:inline-block; width:auto; margin-right:8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="addTopic('${botName}', '${categoryName}')">
+                        <button class="btn btn-secondary btn-sm" onclick="addTopic('${b}', '${c}')">
                             Add
                         </button>
                     </div>
@@ -1206,12 +1295,13 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
     const savedState = loadCollapsibleState(sectionId);
     const defaultOpen = savedState !== null ? savedState : false; // Default closed for Topics
     const isDisabledByCategory = !categoryEnabled;
+    const b = jsAttr(botName), c = jsAttr(categoryName), t = jsAttr(topicName);
 
     return `
         <div class="topic-box collapsible-section ${defaultOpen ? 'open' : ''} ${isDisabledByCategory ? 'category-disabled' : ''}" id="${sectionId}">
-            <div class="topic-header-row" onclick="toggleCollapsible('${sectionId}')">
+            <div class="topic-header-row" onclick="toggleCollapsible('${jsAttr(sectionId)}')">
                 <div class="topic-title-group">
-                    <strong>📌 ${topicName}</strong>
+                    <strong>📌 ${escapeHtmlSys(topicName)}</strong>
                     ${isDisabledByCategory ? '<span class="disabled-badge">Category Disabled</span>' : ''}
                     ${linkedTopics.length > 0 ? `<span class="linked-badge">🔗 ${linkedTopics.length} linked</span>` : ''}
                     <span class="schedule-indicator">🕐 ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''}</span>
@@ -1219,15 +1309,15 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                 <div class="topic-controls" onclick="event.stopPropagation()">
                     <label class="toggle-switch">
                         <input type="checkbox" ${topic.enabled ? 'checked' : ''}
-                               onchange="toggleTopic('${botName}', '${categoryName}', '${topicName}', this.checked)">
+                               onchange="toggleTopic('${b}', '${c}', '${t}', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                     <button class="btn-icon btn-danger"
-                            onclick="deleteTopic('${botName}', '${categoryName}', '${topicName}')">🗑️</button>
+                            onclick="deleteTopic('${b}', '${c}', '${t}')">🗑️</button>
                     <span class="collapsible-toggle">▼</span>
                 </div>
             </div>
-            
+
             <div class="collapsible-content">
                 <div class="topic-body">
                     <div class="form-group">
@@ -1235,16 +1325,16 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                         <div class="tags-container">
                             ${keywords.map((kw, idx) => `
                                 <span class="tag">
-                                    ${kw}
-                                    <span class="tag-remove" 
-                                          onclick="removeKeyword('${botName}', '${categoryName}', '${topicName}', ${idx})">×</span>
+                                    ${escapeHtmlSys(kw)}
+                                    <span class="tag-remove"
+                                          onclick="removeKeyword('${b}', '${c}', '${t}', ${idx})">×</span>
                                 </span>
                             `).join('')}
                             <input type="text" class="tag-input" placeholder="+ Add keywords (comma-separated)"
-                                   onkeydown="return handleKeywordInput(event, '${botName}', '${categoryName}', '${topicName}')">
+                                   onkeydown="return handleKeywordInput(event, '${b}', '${c}', '${t}')">
                         </div>
                     </div>
-                    
+
                     <div class="form-group">
                         <label class="form-label">Schedules</label>
                         ${schedules.map((schedule, idx) => `
@@ -1253,27 +1343,27 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                     <div class="summary-title">
                                         <label class="toggle-switch">
                                             <input type="checkbox" ${schedule.enabled ? 'checked' : ''}
-                                                   onchange="toggleTopicSchedule('${botName}', '${categoryName}', '${topicName}', ${idx}, this.checked)">
+                                                   onchange="toggleTopicSchedule('${b}', '${c}', '${t}', ${idx}, this.checked)">
                                             <span class="toggle-slider"></span>
                                         </label>
-                                        <strong>${schedule.name}</strong>
+                                        <strong>${escapeHtmlSys(schedule.name)}</strong>
                                     </div>
                                     <div class="sch-menu-wrap">
                                         <button class="sch-menu-btn" onclick="toggleSchMenu(event, this)" title="Options">⋮</button>
                                         <div class="sch-menu-dropdown">
-                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${botName}', '${categoryName}', '${topicName}', ${idx})">✏️ Edit</button>
-                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${botName}', '${categoryName}', '${topicName}', ${idx})">🗑️ Delete</button>
+                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${b}', '${c}', '${t}', ${idx})">✏️ Edit</button>
+                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${b}', '${c}', '${t}', ${idx})">🗑️ Delete</button>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="summary-details">
                                     <span>📅 ${formatSchedule(schedule)}</span>
-                                    <span>📝 ${schedule.prompt_key}</span>
+                                    <span>📝 ${escapeHtmlSys(schedule.prompt_key)}</span>
                                 </div>
                             </div>
                         `).join('')}
                         <button class="btn btn-secondary btn-sm mt-2"
-                                onclick="openAddTopicScheduleModal('${botName}', '${categoryName}', '${topicName}')">
+                                onclick="openAddTopicScheduleModal('${b}', '${c}', '${t}')">
                             + Add Schedule
                         </button>
                     </div>
@@ -1283,13 +1373,13 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                         <div class="tags-container">
                             ${linkedTopics.map((linkedTopic, idx) => `
                                 <span class="tag">
-                                    🔗 ${linkedTopic}
-                                    <span class="tag-remove" onclick="removeLinkedTopic('${botName}', '${categoryName}', '${topicName}', ${idx})">×</span>
+                                    🔗 ${escapeHtmlSys(linkedTopic)}
+                                    <span class="tag-remove" onclick="removeLinkedTopic('${b}', '${c}', '${t}', ${idx})">×</span>
                                 </span>
                             `).join('')}
                         </div>
                         <button class="btn btn-secondary btn-sm mt-1"
-                                onclick="showLinkTopicModal('${botName}', '${categoryName}', '${topicName}')">
+                                onclick="showLinkTopicModal('${b}', '${c}', '${t}')">
                             + Link Existing Topic
                         </button>
                         <small class="text-muted d-block mt-1">Link to other topics to inherit their keywords</small>

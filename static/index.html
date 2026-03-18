@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bot Manager V2</title>
+    <title> Summaries Bot Manager V2</title>
     <link rel="stylesheet" href="/static/css/modern.css?v=4">
     <link rel="stylesheet" href="/static/css/auto-save.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -12,7 +12,7 @@
     <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-header">
-            <h1>🤖 Bot Manager</h1>
+            <h1>🤖 Summaries Bot Manager</h1>
             <p class="version">v3.0</p>
         </div>
         
@@ -21,6 +21,10 @@
                 <span class="icon">🔌</span>
                 <span>System</span>
             </a>
+
+            <div class="nav-separator"></div>
+            <span class="nav-section-label">News Summaries</span>
+
             <a href="#" class="nav-item" data-page="collections">
                 <span class="icon">📦</span>
                 <span>Collections</span>
@@ -38,6 +42,26 @@
             <a href="#" class="nav-item" data-page="dashboard">
                 <span class="icon">📊</span>
                 <span>Dashboard</span>
+            </a>
+
+            <div class="nav-separator"></div>
+            <span class="nav-section-label">YouTube Summaries</span>
+
+            <a href="#" class="nav-item" data-page="yt-channels">
+                <span class="icon">📺</span>
+                <span>Channels</span>
+            </a>
+            <a href="#" class="nav-item" data-page="yt-keywords">
+                <span class="icon">🔎</span>
+                <span>Trackers</span>
+            </a>
+            <a href="#" class="nav-item" data-page="yt-videos">
+                <span class="icon">📋</span>
+                <span>Activity</span>
+            </a>
+            <a href="#" class="nav-item" data-page="yt-chat">
+                <span class="icon">💬</span>
+                <span>Video Chat</span>
             </a>
         </nav>
 
@@ -193,7 +217,8 @@
                 </p>
             </div>
 
-            <div class="stats-grid mt-4">
+            <h3 class="section-title mt-4">📰 News Summarizer Bots</h3>
+            <div class="stats-grid" style="margin-bottom:16px">
                 <div class="stat-card">
                     <div class="stat-icon">🤖</div>
                     <div class="stat-content">
@@ -227,10 +252,13 @@
                     </div>
                 </div>
             </div>
-
-            <h3 class="section-title mt-4">📊 All Bots</h3>
             <div id="system-bots-list">
                 <!-- Bot detail cards rendered here -->
+            </div>
+
+            <h3 class="section-title mt-4">📺 YouTube Monitor</h3>
+            <div id="system-yt-overview">
+                <!-- YouTube overview rendered here -->
             </div>
         </div>
 
@@ -351,6 +379,227 @@
                 </div>
             </div>
         </div>
+        <!-- ══ YouTube Channels Page ════════════════════════════════ -->
+        <div id="yt-channels-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>YouTube Channels</h2>
+                    <p class="subtitle">WebSub-monitored channel subscriptions</p>
+                </div>
+                <button class="btn btn-primary" onclick="showYtAddChannelModal()">
+                    <span>➕</span> Add Channel
+                </button>
+            </header>
+
+            <div id="yt-channels-container">
+                <p class="mon-empty">Loading…</p>
+            </div>
+        </div>
+
+        <!-- ══ YouTube Keywords Page ═══════════════════════════════ -->
+        <div id="yt-keywords-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Trackers</h2>
+                    <p class="subtitle">Keyword search configs with filtering rules</p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="input" id="yt-kw-search" placeholder="Search trackers…" oninput="ytFilterKeywords()" style="width:180px;">
+                    <button class="btn btn-secondary" id="yt-kw-run-selected" onclick="ytRunSelectedKeywords()" style="display:none;">▶ Run Selected (<span id="yt-kw-sel-count">0</span>)</button>
+                    <button class="btn btn-secondary" onclick="ytRunAllKeywords()">▶ Run All</button>
+                    <button class="btn btn-primary" onclick="showYtKeywordModal()">
+                        <span>➕</span> Add Tracker
+                    </button>
+                </div>
+            </header>
+
+            <div id="yt-keywords-container">
+                <p class="mon-empty">Loading…</p>
+            </div>
+        </div>
+
+        <!-- ══ YouTube Videos Page (unified queue + summaries) ═════ -->
+        <div id="yt-videos-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Activity</h2>
+                    <p class="subtitle">Queue, processing & summaries</p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
+                        <input type="checkbox" id="yt-queue-autorefresh" checked onchange="toggleYtQueueAutoRefresh(this.checked)">
+                        Auto-refresh
+                    </label>
+                    <button class="btn btn-danger btn-sm" onclick="ytClearAll()">🗑️ Clear All</button>
+                    <button class="btn btn-secondary" onclick="ytTriggerProcessQueue()">▶ Process Now</button>
+                    <button class="btn btn-primary" onclick="loadYtVideosData()">🔄 Refresh</button>
+                </div>
+            </header>
+
+            <!-- Manual video + Prompt row -->
+            <div class="yt-top-cards-row">
+                <div class="yt-manual-card">
+                    <h3>🔗 Add Video Manually</h3>
+                    <div class="yt-manual-form">
+                        <input type="text" class="input" id="yt-manual-url" placeholder="YouTube URL or video ID" style="flex:2;">
+                        <input type="text" class="input" id="yt-manual-target" placeholder="Telegram target (e.g. @channel)" style="flex:1;">
+                        <button class="btn btn-primary" onclick="ytAddManualVideo()">Add & Queue</button>
+                    </div>
+                </div>
+                <div class="yt-prompt-card">
+                    <div class="yt-prompt-header">
+                        <h3>📝 Summarization Prompt</h3>
+                        <div style="display:flex;gap:6px;">
+                            <button class="btn btn-secondary btn-sm" onclick="ytResetPrompt()">Reset Default</button>
+                            <button class="btn btn-primary btn-sm" onclick="ytSavePrompt()">Save</button>
+                        </div>
+                    </div>
+                    <textarea class="input yt-prompt-textarea" id="yt-prompt-text" rows="4" placeholder="Loading prompt…"></textarea>
+                </div>
+            </div>
+
+            <!-- Daily budget -->
+            <div class="yt-daily-budget" id="yt-daily-budget"></div>
+
+            <!-- Stat cards -->
+            <div class="dash-stat-grid" id="yt-queue-stats">
+                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('pending')">
+                    <div class="dash-stat-icon">⏳</div>
+                    <div class="dash-stat-value" id="ytq-pending">0</div>
+                    <div class="dash-stat-label">Pending</div>
+                </div>
+                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('processing')">
+                    <div class="dash-stat-icon">⚙️</div>
+                    <div class="dash-stat-value" id="ytq-processing">0</div>
+                    <div class="dash-stat-label">Processing</div>
+                </div>
+                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('done')">
+                    <div class="dash-stat-icon">✅</div>
+                    <div class="dash-stat-value" id="ytq-done">0</div>
+                    <div class="dash-stat-label">Done</div>
+                </div>
+                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('failed')">
+                    <div class="dash-stat-icon">❌</div>
+                    <div class="dash-stat-value" id="ytq-failed">0</div>
+                    <div class="dash-stat-label">Failed</div>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="dash-filter-bar">
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📅 Date</span>
+                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-from" style="width:140px;">
+                    <span class="text-muted">to</span>
+                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-to" style="width:140px;">
+                </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📊 Status</span>
+                    <select class="select dash-filter-select" id="ytv-filter-status">
+                        <option value="">All</option>
+                        <option value="pending">Pending</option>
+                        <option value="processing">Processing</option>
+                        <option value="done">Done</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📺 Channel</span>
+                    <input type="text" class="input dash-filter-select" id="ytv-filter-channel" placeholder="Filter…" style="width:140px;">
+                </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">🔧 Source</span>
+                    <select class="select dash-filter-select" id="ytv-filter-source">
+                        <option value="">All Sources</option>
+                        <option value="transcript_api">Transcript</option>
+                        <option value="metadata">Metadata</option>
+                    </select>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="ytGoToPage(0)">Apply</button>
+                <button class="btn btn-secondary btn-sm yt-filter-clear-btn" id="ytv-clear-filters" onclick="ytClearFilters()" style="display:none;">✕ Clear</button>
+            </div>
+
+            <div id="yt-videos-container">
+                <p class="mon-empty">Loading…</p>
+            </div>
+
+            <!-- Pagination -->
+            <div class="yt-pagination" id="yt-pagination" style="display:none;">
+                <button class="btn btn-secondary btn-sm" id="ytv-prev" onclick="ytPrevPage()">← Prev</button>
+                <span class="yt-page-info" id="ytv-page-info"></span>
+                <button class="btn btn-secondary btn-sm" id="ytv-next" onclick="ytNextPage()">Next →</button>
+            </div>
+        </div>
+
+        <!-- ==================== Video Chat Page ==================== -->
+        <div id="yt-chat-page" class="page">
+            <div class="yt-chat-layout">
+                <!-- Left: Chat panel -->
+                <div class="yt-chat-panel">
+                    <div class="yt-chat-header">
+                        <div class="yt-chat-video-input">
+                            <input type="text" class="input" id="yt-chat-url" placeholder="Paste YouTube URL or video ID…">
+                            <button class="btn btn-primary" id="yt-chat-load-btn" onclick="ytChatLoadVideo()">Load Video</button>
+                        </div>
+                        <div class="yt-chat-video-info" id="yt-chat-video-info" style="display:none;">
+                            <img id="yt-chat-thumb" class="yt-chat-thumb" src="" alt="">
+                            <div>
+                                <div class="yt-chat-video-title" id="yt-chat-video-title"></div>
+                                <div class="yt-chat-video-channel text-muted" id="yt-chat-video-channel"></div>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" onclick="ytChatReset()" title="Close video">✕</button>
+                        </div>
+                    </div>
+
+                    <div class="yt-chat-messages" id="yt-chat-messages">
+                        <div class="yt-chat-empty">
+                            <div class="yt-chat-empty-icon">💬</div>
+                            <p>Load a YouTube video to start chatting</p>
+                            <p class="text-muted">Ask questions, generate summaries, extract key points — all using the video's content</p>
+                        </div>
+                    </div>
+
+                    <div class="yt-chat-input-bar" id="yt-chat-input-bar" style="display:none;">
+                        <div class="yt-chat-suggestions" id="yt-chat-suggestions">
+                            <button class="yt-chat-suggestion" onclick="ytChatSend(this.textContent)">Summarize this video</button>
+                            <button class="yt-chat-suggestion" onclick="ytChatSend(this.textContent)">List the key points</button>
+                            <button class="yt-chat-suggestion" onclick="ytChatSend(this.textContent)">What are the main takeaways?</button>
+                            <button class="yt-chat-suggestion" onclick="ytChatSend(this.textContent)">Extract facts and statistics</button>
+                        </div>
+                        <div class="yt-chat-compose">
+                            <textarea class="input yt-chat-textarea" id="yt-chat-input" rows="1" placeholder="Ask about the video…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();ytChatSend();}"></textarea>
+                            <button class="btn btn-primary yt-chat-send-btn" id="yt-chat-send-btn" onclick="ytChatSend()">Send</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Composer panel -->
+                <div class="yt-chat-composer" id="yt-chat-composer">
+                    <div class="yt-chat-composer-header">
+                        <h3>Message Composer</h3>
+                        <span class="text-muted yt-chat-selected-count" id="yt-chat-selected-count">0 selected</span>
+                    </div>
+                    <div class="yt-chat-composer-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="ytChatSelectAll()">Select All</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ytChatDeselectAll()">Deselect All</button>
+                        <button class="btn btn-primary btn-sm" onclick="ytChatMerge()">Merge Selected</button>
+                    </div>
+                    <div class="yt-chat-composer-body">
+                        <textarea class="input yt-chat-final-textarea" id="yt-chat-final-text" rows="12" placeholder="Select chat responses and click 'Merge Selected' to build your message here…"></textarea>
+                    </div>
+                    <div class="yt-chat-tg-bar">
+                        <input type="text" class="input" id="yt-chat-tg-target" placeholder="@channel or chat ID" style="flex:1;font-size:13px;">
+                        <button class="btn btn-primary btn-sm" onclick="ytChatSendTelegram()">📤 Send to Telegram</button>
+                    </div>
+                    <div class="yt-chat-composer-footer">
+                        <button class="btn btn-secondary btn-sm" onclick="ytChatCopyFinal()">📋 Copy</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ytChatClearFinal()">🗑️ Clear</button>
+                        <button class="btn btn-primary btn-sm" onclick="ytChatRefine()">✨ Refine with AI</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </main>
 
     <!-- Scripts -->
@@ -358,5 +607,6 @@
     <script src="/static/js/auto-save-manager.js"></script>
     <script src="/static/js/modern.js?v=4"></script>
     <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/youtube.js"></script>
 </body>
 </html>
