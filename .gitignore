@@ -1,0 +1,11 @@
+# everything in bot folder
+bot/
+docs/
+.claude
+__pycache__/
+*.pyc
+bot.log
+get_ss.py
+.env
+config.yaml
+userbot.session

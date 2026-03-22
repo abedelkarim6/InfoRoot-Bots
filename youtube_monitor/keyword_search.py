@@ -13,6 +13,17 @@ from youtube_monitor.db import get_yt_db
 
 logger = logging.getLogger(__name__)
 
+
+def _get_default_targets() -> list:
+    """Read global default telegram targets from config.yaml."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        return cfg.get("youtube", {}).get("default_targets", []) or []
+    except Exception:
+        return []
+
+
 # Set by init_keyword_search() at startup
 _youtube_data_api_key = ""
 
@@ -37,74 +48,82 @@ def _build_youtube_service():
     return build('youtube', 'v3', developerKey=_youtube_data_api_key)
 
 
-def run_keyword_search(keyword_config: dict) -> int:
+def run_keyword_search(keyword_config: dict, global_blocked_ids: set = None) -> int:
     """
-    Execute a keyword search for one keyword config row.
+    Execute a keyword search for one keyword config row (+ sub-keywords).
     Returns number of new videos enqueued.
     """
     db = get_yt_db()
     youtube = _build_youtube_service()
 
-    keyword = keyword_config['keyword']
-    date_window = keyword_config.get('date_window_days', 1)
+    # Load global blocked channels if not passed in
+    if global_blocked_ids is None:
+        global_blocked_ids = db.get_blocked_channel_ids()
 
+    # Collect all search terms: main keyword + sub-keywords
+    main_keyword = keyword_config['keyword']
+    sub_keywords = keyword_config.get('sub_keywords') or []
+    all_keywords = [main_keyword] + [sk for sk in sub_keywords if sk]
+
+    date_window = keyword_config.get('date_window_days', 1)
     now = datetime.now(timezone.utc)
     published_after = (now - timedelta(days=date_window)).isoformat()
     published_before = now.isoformat()
 
-    # Build search params
-    search_params = {
-        'q': keyword,
-        'part': 'snippet',
-        'type': keyword_config.get('upload_type', 'video') or 'video',
-        'publishedAfter': published_after,
-        'publishedBefore': published_before,
-        'maxResults': 50,
-        'order': 'date',
-    }
-    lang = keyword_config.get('language')
-    if lang:
-        search_params['relevanceLanguage'] = lang
-
-    # Handle upload_type mapping for search
-    upload_type = keyword_config.get('upload_type', 'video')
-    if upload_type == 'live':
-        search_params['eventType'] = 'live'
-        search_params['type'] = 'video'
-    elif upload_type == 'completed':
-        search_params['eventType'] = 'completed'
-        search_params['type'] = 'video'
-    elif upload_type == 'any':
-        search_params['type'] = 'video'
-    else:
-        search_params['type'] = 'video'
-
-    try:
-        search_response = youtube.search().list(**search_params).execute()
-    except Exception as e:
-        logger.error(f"[YT-SEARCH] search.list failed for '{keyword}': {e}")
-        return 0
-
-    items = search_response.get('items', [])
-    if not items:
-        logger.info(f"[YT-SEARCH] No results for '{keyword}'")
-        return 0
-
-    video_ids = [item['id']['videoId'] for item in items if item['id'].get('videoId')]
-    if not video_ids:
-        return 0
-
-    # Snippet data from search results
+    # Search for each keyword variant, collecting results
+    all_video_ids = []  # preserve order, dedup later
     snippets = {}
-    for item in items:
-        vid = item['id'].get('videoId')
-        if vid:
-            snippets[vid] = item['snippet']
+    seen_vids = set()
+
+    for search_term in all_keywords:
+        search_params = {
+            'q': search_term,
+            'part': 'snippet',
+            'publishedAfter': published_after,
+            'publishedBefore': published_before,
+            'maxResults': 50,
+            'order': 'date',
+        }
+        lang = keyword_config.get('language')
+        if lang:
+            search_params['relevanceLanguage'] = lang
+
+        upload_type = keyword_config.get('upload_type', 'video')
+        if upload_type == 'live':
+            search_params['eventType'] = 'live'
+            search_params['type'] = 'video'
+        elif upload_type == 'completed':
+            search_params['eventType'] = 'completed'
+            search_params['type'] = 'video'
+        else:
+            search_params['type'] = 'video'
+
+        try:
+            search_response = youtube.search().list(**search_params).execute()
+        except Exception as e:
+            logger.error(f"[YT-SEARCH] search.list failed for '{search_term}': {e}")
+            continue
+
+        items = search_response.get('items', [])
+        if not items:
+            logger.info(f"[YT-SEARCH] No results for '{search_term}'")
+            continue
+
+        for item in items:
+            vid = item['id'].get('videoId')
+            if vid and vid not in seen_vids:
+                seen_vids.add(vid)
+                all_video_ids.append(vid)
+                snippets[vid] = item['snippet']
+
+    if not all_video_ids:
+        logger.info(f"[YT-SEARCH] No results for '{main_keyword}' (+ {len(sub_keywords)} sub-keywords)")
+        return 0
 
     # Batch fetch video details (contentDetails + statistics)
     video_details = {}
-    for i in range(0, len(video_ids), 50):
-        batch = video_ids[i:i+50]
+    for i in range(0, len(all_video_ids), 50):
+        batch = all_video_ids[i:i+50]
         try:
             details_resp = youtube.videos().list(
                 part='contentDetails,statistics,snippet',
@@ -117,12 +136,12 @@ def run_keyword_search(keyword_config: dict) -> int:
 
     # Apply filter pipeline
     enqueued = 0
-    for vid in video_ids:
+    for vid in all_video_ids:
         detail = video_details.get(vid)
         if not detail:
             continue
 
-        if not _passes_filters(detail, keyword_config, snippets.get(vid)):
+        if not _passes_filters(detail, keyword_config, snippets.get(vid), global_blocked_ids):
             continue
 
         # Dedup check
@@ -135,6 +154,9 @@ def run_keyword_search(keyword_config: dict) -> int:
         telegram_targets = keyword_config.get('telegram_targets') or []
         if not telegram_targets and keyword_config.get('telegram_target'):
             telegram_targets = [keyword_config['telegram_target']]
+        # Fall back to global default targets
+        if not telegram_targets:
+            telegram_targets = _get_default_targets()
         prompt = keyword_config.get('prompt')
 
         db.mark_video_seen(vid, title=title, channel_id=channel_id, source='keyword_search')
@@ -143,7 +165,8 @@ def run_keyword_search(keyword_config: dict) -> int:
         targets = telegram_targets if telegram_targets else [None]
         vid_enqueued = 0
         for tgt in targets:
-            qid = db.enqueue_video(vid, telegram_target=tgt, prompt=prompt)
+            qid = db.enqueue_video(vid, telegram_target=tgt, prompt=prompt,
+                                   source_keyword_id=keyword_config.get('id'))
             if qid:
                 vid_enqueued += 1
         if vid_enqueued:
@@ -152,17 +175,22 @@ def run_keyword_search(keyword_config: dict) -> int:
         else:
             logger.info(f"[YT-SEARCH] Skipped duplicate: {vid} — {title}")
 
-    logger.info(f"[YT-SEARCH] Keyword '{keyword}': {len(items)} found, {enqueued} enqueued")
+    sub_info = f" (+ {len(sub_keywords)} sub-keywords)" if sub_keywords else ""
+    logger.info(f"[YT-SEARCH] Keyword '{main_keyword}'{sub_info}: {len(all_video_ids)} found, {enqueued} enqueued")
     return enqueued
 
 
-def _passes_filters(detail: dict, config: dict, snippet: dict = None) -> bool:
+def _passes_filters(detail: dict, config: dict, snippet: dict = None, global_blocked_ids: set = None) -> bool:
     """Apply all filtering rules. Returns True if video passes."""
     content = detail.get('contentDetails', {})
     stats = detail.get('statistics', {})
     snip = detail.get('snippet', {}) or snippet or {}
     title = snip.get('title', '')
     channel_id = snip.get('channelId', '')
+
+    # 0. Global blocked channels
+    if global_blocked_ids and channel_id in global_blocked_ids:
+        return False
 
     # 1. Duration filter
     duration_secs = _parse_duration(content.get('duration'))
@@ -220,10 +248,11 @@ def run_all_keyword_searches() -> int:
     """Run search for all active keyword configs. Returns total enqueued."""
     db = get_yt_db()
     keywords = db.get_keywords(active_only=True)
+    global_blocked = db.get_blocked_channel_ids()
     total = 0
     for kw_cfg in keywords:
         try:
-            count = run_keyword_search(kw_cfg)
+            count = run_keyword_search(kw_cfg, global_blocked)
             db.update_keyword_last_run(kw_cfg['id'])
             total += count
         except Exception as e:
@@ -234,14 +263,19 @@ def run_all_keyword_searches() -> int:
 
 def run_due_keyword_searches() -> int:
     """Run searches only for keywords whose schedule interval has elapsed."""
+    from utils.database import get_db
+    if not get_db().get_system_enabled():
+        logger.debug("[YT-SEARCH] System disabled — skipping keyword searches")
+        return 0
     db = get_yt_db()
     due_keywords = db.get_due_keywords()
     if not due_keywords:
         return 0
+    global_blocked = db.get_blocked_channel_ids()
     total = 0
     for kw_cfg in due_keywords:
         try:
-            count = run_keyword_search(kw_cfg)
+            count = run_keyword_search(kw_cfg, global_blocked)
             db.update_keyword_last_run(kw_cfg['id'])
             total += count
             logger.info(f"[YT-SEARCH] Scheduled run for '{kw_cfg['keyword']}': {count} enqueued")

@@ -125,6 +125,23 @@ class YouTubeDB:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_blocked_channels (
+                id            SERIAL PRIMARY KEY,
+                channel_id    TEXT UNIQUE NOT NULL,
+                channel_name  TEXT,
+                created_at    TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_blocked_keywords (
+                id            SERIAL PRIMARY KEY,
+                keyword       TEXT UNIQUE NOT NULL,
+                created_at    TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         # ── Safe column migrations ──────────────────────────────────
         def _ensure_col(table, col, col_type, default=None):
             cursor.execute("""
@@ -143,9 +160,21 @@ class YouTubeDB:
         _ensure_col('yt_keywords', 'telegram_targets', "JSONB", "'[]'")
         _ensure_col('yt_keywords', 'schedule_interval_minutes', 'INTEGER')
         _ensure_col('yt_keywords', 'last_run_at', 'TIMESTAMP')
+        _ensure_col('yt_keywords', 'sub_keywords', 'JSONB', "'[]'")
         _ensure_col('yt_video_queue', 'telegram_target', 'TEXT')
         _ensure_col('yt_video_queue', 'prompt', 'TEXT')
         _ensure_col('yt_summaries', 'telegram_target', 'TEXT')
+        _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
+        _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
+
+        # Channel-level video filters (mirror of keyword filters)
+        _ensure_col('yt_channels', 'min_duration_seconds', 'INTEGER')
+        _ensure_col('yt_channels', 'max_duration_seconds', 'INTEGER')
+        _ensure_col('yt_channels', 'title_must_include', 'JSONB', "'[]'")
+        _ensure_col('yt_channels', 'title_must_exclude', 'JSONB', "'[]'")
+        _ensure_col('yt_channels', 'min_view_count', 'INTEGER', '0')
+        _ensure_col('yt_channels', 'language', 'TEXT')
+        _ensure_col('yt_channels', 'upload_type', 'TEXT')
 
         # Migrate old single telegram_target into new telegram_targets array
         cursor.execute("""
@@ -183,32 +212,54 @@ class YouTubeDB:
                 r['telegram_targets'] = [r['telegram_target']] if r.get('telegram_target') else []
         return rows
 
-    def add_channel(self, channel_id: str, channel_name: str = None,
-                    telegram_targets: list = None, prompt: str = None):
+    def add_channel(self, channel_id: str, data: dict):
         cursor = self._get_cursor()
-        targets_json = json.dumps(telegram_targets or [])
+        targets_json = json.dumps(data.get('telegram_targets') or [])
+        title_inc = json.dumps(data.get('title_must_include') or [])
+        title_exc = json.dumps(data.get('title_must_exclude') or [])
         cursor.execute("""
-            INSERT INTO yt_channels (channel_id, channel_name, telegram_targets, prompt)
-            VALUES (%s, %s, %s::jsonb, %s)
+            INSERT INTO yt_channels (channel_id, channel_name, telegram_targets, prompt,
+                min_duration_seconds, max_duration_seconds,
+                title_must_include, title_must_exclude,
+                min_view_count, language, upload_type)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s)
             ON CONFLICT (channel_id) DO UPDATE SET
                 channel_name = COALESCE(EXCLUDED.channel_name, yt_channels.channel_name),
                 telegram_targets = EXCLUDED.telegram_targets,
-                prompt = COALESCE(EXCLUDED.prompt, yt_channels.prompt)
+                prompt = COALESCE(EXCLUDED.prompt, yt_channels.prompt),
+                min_duration_seconds = EXCLUDED.min_duration_seconds,
+                max_duration_seconds = EXCLUDED.max_duration_seconds,
+                title_must_include = EXCLUDED.title_must_include,
+                title_must_exclude = EXCLUDED.title_must_exclude,
+                min_view_count = EXCLUDED.min_view_count,
+                language = EXCLUDED.language,
+                upload_type = EXCLUDED.upload_type
             RETURNING id
-        """, (channel_id, channel_name, targets_json, prompt))
+        """, (channel_id, data.get('channel_name'), targets_json, data.get('prompt'),
+              data.get('min_duration_seconds'), data.get('max_duration_seconds'),
+              title_inc, title_exc,
+              data.get('min_view_count', 0), data.get('language'), data.get('upload_type')))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
 
-    def update_channel(self, channel_id: str, channel_name: str = None,
-                       telegram_targets: list = None, prompt: str = None):
+    def update_channel(self, channel_id: str, data: dict):
         cursor = self._get_cursor()
-        targets_json = json.dumps(telegram_targets or [])
+        targets_json = json.dumps(data.get('telegram_targets') or [])
+        title_inc = json.dumps(data.get('title_must_include') or [])
+        title_exc = json.dumps(data.get('title_must_exclude') or [])
         cursor.execute("""
             UPDATE yt_channels
-            SET channel_name = %s, telegram_targets = %s::jsonb, prompt = %s
+            SET channel_name = %s, telegram_targets = %s::jsonb, prompt = %s,
+                min_duration_seconds = %s, max_duration_seconds = %s,
+                title_must_include = %s::jsonb, title_must_exclude = %s::jsonb,
+                min_view_count = %s, language = %s, upload_type = %s
             WHERE channel_id = %s
-        """, (channel_name, targets_json, prompt, channel_id))
+        """, (data.get('channel_name'), targets_json, data.get('prompt'),
+              data.get('min_duration_seconds'), data.get('max_duration_seconds'),
+              title_inc, title_exc,
+              data.get('min_view_count', 0), data.get('language'), data.get('upload_type'),
+              channel_id))
         self.connection.commit()
 
     def toggle_channel(self, channel_id: str, active: bool):
@@ -291,8 +342,8 @@ class YouTubeDB:
                 channel_allowlist, channel_blocklist,
                 title_must_include, title_must_exclude,
                 min_view_count, language, upload_type,
-                schedule_interval_minutes
-            ) VALUES (%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                schedule_interval_minutes, sub_keywords
+            ) VALUES (%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
             RETURNING id
         """, (
             data['keyword'],
@@ -310,6 +361,7 @@ class YouTubeDB:
             data.get('language'),
             data.get('upload_type', 'video'),
             data.get('schedule_interval_minutes'),
+            json.dumps(data.get('sub_keywords', [])),
         ))
         row = cursor.fetchone()
         self.connection.commit()
@@ -334,7 +386,8 @@ class YouTubeDB:
                 min_view_count = %s,
                 language = %s,
                 upload_type = %s,
-                schedule_interval_minutes = %s
+                schedule_interval_minutes = %s,
+                sub_keywords = %s::jsonb
             WHERE id = %s
         """, (
             data['keyword'],
@@ -352,6 +405,7 @@ class YouTubeDB:
             data.get('language'),
             data.get('upload_type', 'video'),
             data.get('schedule_interval_minutes'),
+            json.dumps(data.get('sub_keywords', [])),
             kw_id,
         ))
         self.connection.commit()
@@ -394,6 +448,72 @@ class YouTubeDB:
                 r['telegram_targets'] = [r['telegram_target']] if r.get('telegram_target') else []
         return rows
 
+    # ── yt_blocked_channels ─────────────────────────────────────
+
+    def get_blocked_channels(self):
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM yt_blocked_channels ORDER BY created_at DESC")
+        rows = [dict(r) for r in cursor.fetchall()]
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    def add_blocked_channel(self, channel_id: str, channel_name: str = None):
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO yt_blocked_channels (channel_id, channel_name)
+            VALUES (%s, %s)
+            ON CONFLICT (channel_id) DO UPDATE SET channel_name = COALESCE(EXCLUDED.channel_name, yt_blocked_channels.channel_name)
+            RETURNING id
+        """, (channel_id, channel_name))
+        row = cursor.fetchone()
+        self.connection.commit()
+        return row['id']
+
+    def delete_blocked_channel(self, channel_id: str):
+        cursor = self._get_cursor()
+        cursor.execute("DELETE FROM yt_blocked_channels WHERE channel_id = %s", (channel_id,))
+        self.connection.commit()
+
+    def get_blocked_channel_ids(self) -> set:
+        cursor = self._get_cursor()
+        cursor.execute("SELECT channel_id FROM yt_blocked_channels")
+        return {r['channel_id'] for r in cursor.fetchall()}
+
+    # ── yt_blocked_keywords ─────────────────────────────────────
+
+    def get_blocked_keywords(self):
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM yt_blocked_keywords ORDER BY created_at DESC")
+        rows = [dict(r) for r in cursor.fetchall()]
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+        return rows
+
+    def add_blocked_keyword(self, keyword: str):
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO yt_blocked_keywords (keyword)
+            VALUES (%s)
+            ON CONFLICT (keyword) DO NOTHING
+            RETURNING id
+        """, (keyword,))
+        row = cursor.fetchone()
+        self.connection.commit()
+        return row['id'] if row else None
+
+    def delete_blocked_keyword(self, keyword_id: int):
+        cursor = self._get_cursor()
+        cursor.execute("DELETE FROM yt_blocked_keywords WHERE id = %s", (keyword_id,))
+        self.connection.commit()
+
+    def get_blocked_keyword_list(self) -> list:
+        cursor = self._get_cursor()
+        cursor.execute("SELECT keyword FROM yt_blocked_keywords")
+        return [r['keyword'] for r in cursor.fetchall()]
+
     # ── yt_seen_videos ───────────────────────────────────────────
 
     def is_video_seen(self, video_id: str) -> bool:
@@ -432,16 +552,18 @@ class YouTubeDB:
             return "already summarized"
         return None
 
-    def enqueue_video(self, video_id: str, telegram_target: str = None, prompt: str = None):
+    def enqueue_video(self, video_id: str, telegram_target: str = None, prompt: str = None,
+                      source_channel_id: str = None, source_keyword_id: int = None):
         reason = self.is_video_already_queued_or_summarized(video_id)
         if reason:
             logger.info(f"[YT-DB] Skipping enqueue for {video_id}: {reason}")
             return None
         cursor = self._get_cursor()
         cursor.execute("""
-            INSERT INTO yt_video_queue (video_id, telegram_target, prompt) VALUES (%s, %s, %s)
+            INSERT INTO yt_video_queue (video_id, telegram_target, prompt, source_channel_id, source_keyword_id)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
-        """, (video_id, telegram_target, prompt))
+        """, (video_id, telegram_target, prompt, source_channel_id, source_keyword_id))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']

@@ -135,9 +135,25 @@ async def add_channel(request: Request):
             if not channel_name:
                 channel_name = resolved_name
 
+    min_dur_sec = data.get("min_duration_seconds")
+    max_dur_sec = data.get("max_duration_seconds")
+
+    channel_data = {
+        'channel_name': channel_name,
+        'telegram_targets': telegram_targets,
+        'prompt': prompt,
+        'min_duration_seconds': min_dur_sec,
+        'max_duration_seconds': max_dur_sec,
+        'title_must_include': data.get('title_must_include') or [],
+        'title_must_exclude': data.get('title_must_exclude') or [],
+        'min_view_count': data.get('min_view_count', 0),
+        'language': data.get('language') or None,
+        'upload_type': data.get('upload_type') or None,
+    }
+
     try:
         db = get_yt_db()
-        row_id = db.add_channel(channel_id, channel_name, telegram_targets, prompt)
+        row_id = db.add_channel(channel_id, channel_data)
     except Exception as e:
         logger.error(f"[YT] Failed to add channel {channel_id}: {e}")
         return {"status": "error", "message": f"Database error: {e}"}
@@ -158,13 +174,20 @@ async def add_channel(request: Request):
 async def update_channel(request: Request):
     data = await request.json()
     channel_id = data.get("channel_id")
+    channel_data = {
+        'channel_name': data.get('channel_name'),
+        'telegram_targets': data.get('telegram_targets') or [],
+        'prompt': data.get('prompt'),
+        'min_duration_seconds': data.get('min_duration_seconds'),
+        'max_duration_seconds': data.get('max_duration_seconds'),
+        'title_must_include': data.get('title_must_include') or [],
+        'title_must_exclude': data.get('title_must_exclude') or [],
+        'min_view_count': data.get('min_view_count', 0),
+        'language': data.get('language') or None,
+        'upload_type': data.get('upload_type') or None,
+    }
     db = get_yt_db()
-    db.update_channel(
-        channel_id,
-        channel_name=data.get("channel_name"),
-        telegram_targets=data.get("telegram_targets") or [],
-        prompt=data.get("prompt"),
-    )
+    db.update_channel(channel_id, channel_data)
     return {"status": "ok"}
 
 
@@ -265,6 +288,78 @@ async def run_all_keywords():
         return {"status": "error", "message": str(e)}
 
 
+# ── Blocked Channels ────────────────────────────────────────────
+
+@router.get("/blocked-channels")
+async def list_blocked_channels():
+    db = get_yt_db()
+    return {"status": "ok", "channels": db.get_blocked_channels()}
+
+
+@router.post("/blocked-channels/add")
+async def add_blocked_channel(request: Request):
+    data = await request.json()
+    channel_id = (data.get("channel_id") or "").strip()
+    channel_name = (data.get("channel_name") or "").strip() or None
+    if not channel_id:
+        return {"status": "error", "message": "channel_id is required"}
+    try:
+        db = get_yt_db()
+        row_id = db.add_blocked_channel(channel_id, channel_name)
+        return {"status": "ok", "id": row_id}
+    except Exception as e:
+        logger.error(f"[YT] Failed to add blocked channel: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/blocked-channels/delete")
+async def delete_blocked_channel(request: Request):
+    data = await request.json()
+    channel_id = data.get("channel_id")
+    try:
+        db = get_yt_db()
+        db.delete_blocked_channel(channel_id)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"[YT] Failed to delete blocked channel: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+# ── Blocked Keywords (for channels) ─────────────────────────────
+
+@router.get("/blocked-keywords")
+async def list_blocked_keywords():
+    db = get_yt_db()
+    return {"status": "ok", "keywords": db.get_blocked_keywords()}
+
+
+@router.post("/blocked-keywords/add")
+async def add_blocked_keyword(request: Request):
+    data = await request.json()
+    keyword = (data.get("keyword") or "").strip()
+    if not keyword:
+        return {"status": "error", "message": "keyword is required"}
+    try:
+        db = get_yt_db()
+        row_id = db.add_blocked_keyword(keyword)
+        return {"status": "ok", "id": row_id}
+    except Exception as e:
+        logger.error(f"[YT] Failed to add blocked keyword: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/blocked-keywords/delete")
+async def delete_blocked_keyword(request: Request):
+    data = await request.json()
+    try:
+        db = get_yt_db()
+        db.delete_blocked_keyword(data.get("id"))
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"[YT] Failed to delete blocked keyword: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 # ── Manual Video Submission ──────────────────────────────────────
 
 @router.post("/videos/add")
@@ -314,8 +409,11 @@ def _extract_video_id(url: str):
 async def get_prompt():
     from utils.helpers import load_config
     cfg = load_config()
-    prompt = cfg.get("youtube", {}).get("prompt", "")
-    return {"status": "ok", "prompt": prompt, "default_prompt": DEFAULT_PROMPT}
+    yt_cfg = cfg.get("youtube", {})
+    prompt = yt_cfg.get("prompt", "")
+    default_targets = yt_cfg.get("default_targets", [])
+    return {"status": "ok", "prompt": prompt, "default_prompt": DEFAULT_PROMPT,
+            "default_targets": default_targets}
 
 
 @router.post("/prompt/save")
@@ -327,6 +425,20 @@ async def save_prompt(request: Request):
     if "youtube" not in cfg:
         cfg["youtube"] = {}
     cfg["youtube"]["prompt"] = data.get("prompt", "")
+    with open("config.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return {"status": "ok"}
+
+
+@router.post("/default-targets/save")
+async def save_default_targets(request: Request):
+    import yaml
+    from utils.helpers import load_config
+    data = await request.json()
+    cfg = load_config()
+    if "youtube" not in cfg:
+        cfg["youtube"] = {}
+    cfg["youtube"]["default_targets"] = data.get("targets", [])
     with open("config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     return {"status": "ok"}

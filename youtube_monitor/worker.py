@@ -12,6 +12,7 @@ import google.genai as genai
 from google.genai import types
 
 from youtube_monitor.db import get_yt_db
+from youtube_monitor.keyword_search import _parse_duration
 
 logger = logging.getLogger(__name__)
 
@@ -124,17 +125,25 @@ def _fetch_video_metadata(video_id: str) -> dict:
         logger.warning("[YT-WORKER] youtube.data_api_key not set — cannot fetch metadata")
         return {}
     youtube = build('youtube', 'v3', developerKey=api_key)
-    resp = youtube.videos().list(part='snippet', id=video_id).execute()
+    resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
     items = resp.get('items', [])
     if items:
-        s = items[0]['snippet']
-        return {
+        item = items[0]
+        s = item['snippet']
+        result = {
             'title': s.get('title', ''),
             'description': s.get('description', ''),
             'channel_name': s.get('channelTitle', ''),
             'published_at': s.get('publishedAt'),
             'tags': s.get('tags', []),
         }
+        cd = item.get('contentDetails', {})
+        if cd.get('duration'):
+            result['duration'] = cd['duration']
+        st = item.get('statistics', {})
+        if st.get('viewCount'):
+            result['view_count'] = int(st['viewCount'])
+        return result
     return {}
 
 
@@ -152,6 +161,23 @@ async def process_queue_item(queue_item: dict) -> bool:
     queue_id = queue_item['id']
     video_id = queue_item['video_id']
     telegram_target = queue_item.get('telegram_target')
+
+    # Check if the source channel/keyword is still active before spending API credits
+    source_channel_id = queue_item.get('source_channel_id')
+    source_keyword_id = queue_item.get('source_keyword_id')
+    if source_channel_id:
+        ch_row = db.get_channel_by_yt_id(source_channel_id)
+        if ch_row and not ch_row.get('active', True):
+            logger.info(f"[YT-WORKER] Skipping {video_id} — source channel {source_channel_id} is inactive")
+            db.update_queue_status(queue_id, 'skipped', error_log='Source channel inactive')
+            return False
+    if source_keyword_id:
+        kw_row = db.get_keyword_by_id(source_keyword_id)
+        if kw_row and not kw_row.get('active', True):
+            logger.info(f"[YT-WORKER] Skipping {video_id} — source keyword #{source_keyword_id} is inactive")
+            db.update_queue_status(queue_id, 'skipped', error_log='Source keyword inactive')
+            return False
+
     # Per-item prompt from the queue row, fall back to global config prompt
     prompt = queue_item.get('prompt') or _get_global_prompt()
 
@@ -165,6 +191,33 @@ async def process_queue_item(queue_item: dict) -> bool:
     published_at = meta.get('published_at')
     tags = meta.get('tags', [])
     description = meta.get('description', '')
+
+    # Apply channel-level duration/view filters (title filters already applied in WebSub)
+    if source_channel_id:
+        ch_filter = db.get_channel_by_yt_id(source_channel_id)
+        if ch_filter:
+            # Duration filter
+            duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
+            min_dur = ch_filter.get('min_duration_seconds')
+            max_dur = ch_filter.get('max_duration_seconds')
+            if min_dur and duration_secs and duration_secs < min_dur:
+                reason = f'Video too short ({duration_secs}s < {min_dur}s min)'
+                logger.info(f"[YT-WORKER] Filtered {video_id}: {reason}")
+                db.update_queue_status(queue_id, 'skipped', error_log=reason)
+                return False
+            if max_dur and duration_secs and duration_secs > max_dur:
+                reason = f'Video too long ({duration_secs}s > {max_dur}s max)'
+                logger.info(f"[YT-WORKER] Filtered {video_id}: {reason}")
+                db.update_queue_status(queue_id, 'skipped', error_log=reason)
+                return False
+            # View count filter
+            min_views = ch_filter.get('min_view_count') or 0
+            view_count = meta.get('view_count', 0)
+            if min_views and view_count < min_views:
+                reason = f'Not enough views ({view_count} < {min_views} min)'
+                logger.info(f"[YT-WORKER] Filtered {video_id}: {reason}")
+                db.update_queue_status(queue_id, 'skipped', error_log=reason)
+                return False
 
     summary_text = None
     transcript_source = None
@@ -194,8 +247,8 @@ async def process_queue_item(queue_item: dict) -> bool:
                 await asyncio.sleep(delay)
             logger.warning(f"[YT-WORKER] Tier 2 (transcript) failed for {video_id}: {e}")
 
-    # Tier 3: Metadata only (last resort)
-    if not summary_text:
+    # Tier 3: Metadata only — only if description is substantial (>100 chars)
+    if not summary_text and description and len(description.strip()) > 100:
         try:
             summary_text = _summarize_via_metadata(video_id, title, description, tags, prompt)
             transcript_source = 'metadata'
@@ -204,6 +257,13 @@ async def process_queue_item(queue_item: dict) -> bool:
             logger.error(f"[YT-WORKER] All tiers failed for {video_id}: {e}")
             db.update_queue_status(queue_id, 'failed', error_log=str(e))
             return False
+
+    # All tiers exhausted — mark as failed so user can retry
+    if not summary_text:
+        reason = 'No transcript or meaningful metadata available'
+        logger.warning(f"[YT-WORKER] All tiers failed for {video_id}: {reason}")
+        db.update_queue_status(queue_id, 'failed', error_log=reason)
+        return False
 
     # Save summary
     summary_id = db.save_summary(
@@ -219,15 +279,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Send via Telegram if target is set and sender is available
     if telegram_target and _telegram_send_fn:
         try:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            tg_message = (
-                f"**YouTube Summary**\n"
-                f"{'—' * 20}\n\n"
-                f"**{title}**\n"
-                f"Channel: {channel_name}\n"
-                f"Link: {url}\n\n"
-                f"{summary_text}"
-            )
+            tg_message = summary_text
             await _telegram_send_fn(telegram_target, tg_message)
             db.mark_telegram_sent(summary_id)
             logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
@@ -244,6 +296,10 @@ async def process_pending_queue():
     Process all pending queue items (up to batch limit).
     Called by the scheduler every 5 minutes.
     """
+    from utils.database import get_db
+    if not get_db().get_system_enabled():
+        logger.debug("[YT-WORKER] System disabled — skipping queue processing")
+        return 0
     db = get_yt_db()
     items = db.get_pending_queue_items(limit=5)
     if not items:

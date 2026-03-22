@@ -23,9 +23,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
 
-from routers import bot, category, telegram, prompts, rules, system, collection, topic, monitor, auth
+from routers import bot, telegram, prompts, rules, system, collection, topic, monitor, auth, chatbot
 from routers.auth import validate_token
 from utils.database import Database, set_db_instance, get_db
 from utils.helpers import load_config as _load_cfg, start_bot_subprocess, stop_bot_subprocess
@@ -41,7 +40,9 @@ from youtube_monitor.cleanup import run_cleanup
 _cfg = _load_cfg()
 db = Database(_cfg["database"]["dsn"])
 set_db_instance(db)
-db.seed_keywords_from_config(_cfg)
+db.seed_keywords_from_config(_cfg)  # One-time seed; no-op if DB already has keywords
+db.migrate_config_to_db(_cfg)  # Migrate bots and collections from config.yaml to DB
+
 
 # Initialize YouTube DB (new tables only — never touches existing tables)
 yt_db = YouTubeDB(_cfg["database"]["dsn"])
@@ -140,6 +141,12 @@ async def lifespan(app):
     yt_scheduler.start()
     logger.info("[YT-SCHEDULER] YouTube auto-processing scheduler started")
 
+    # Pre-generate chatbot suggestions so they're cached for the first visitor
+    import asyncio
+    from chatbot.service import generate_suggestions as _gen_suggestions
+    asyncio.create_task(_gen_suggestions(db))
+    logger.info("[CHATBOT] Suggestion pre-generation started in background")
+
     yield
 
     yt_scheduler.shutdown(wait=False)
@@ -168,12 +175,15 @@ app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(collection.router, prefix="/api", tags=["collection"])
 app.include_router(bot.router, prefix="/api", tags=["bot"])
 app.include_router(topic.router, prefix="/api", tags=["topic"])
-app.include_router(category.router, prefix="/api", tags=["category"])
+# category.py is legacy (YAML-based) — all category routes are now in topic.py (DB-based)
 app.include_router(telegram.router, prefix="/api", tags=["telegram"])
 app.include_router(prompts.router, prefix="/api", tags=["prompts"])
 app.include_router(rules.router, prefix="/api", tags=["rules"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+
+# Agent chatbot
+app.include_router(chatbot.router, prefix="/api", tags=["chatbot"])
 
 # YouTube monitor routes (API endpoints under /api/youtube/*)
 app.include_router(youtube_router, prefix="/api", tags=["youtube"])
@@ -191,20 +201,5 @@ def main_page():
 
 @app.get("/api/config")
 def get_config():
-    from utils.helpers import load_config
-    cfg = load_config()
-    bots = cfg.get("bots", {})
-
-    # Enrich topics with keywords from DB
     db = get_db()
-    if db:
-        for bot_name, bot in bots.items():
-            for cat_name, cat in (bot.get("categories") or {}).items():
-                for topic_name, topic in (cat.get("topics") or {}).items():
-                    topic["keywords"] = db.get_topic_keywords(bot_name, cat_name, topic_name)
-
-    return {
-        "system":      cfg.get("system", {}),
-        "bots":        bots,
-        "collections": cfg.get("collections", {}),
-    }
+    return db.get_full_config()

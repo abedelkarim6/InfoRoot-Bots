@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title> Summaries Bot Manager V2</title>
+    <title> Summaries Bot Manager v4</title>
     <link rel="stylesheet" href="/static/css/modern.css?v=4">
     <link rel="stylesheet" href="/static/css/auto-save.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -13,7 +13,7 @@
     <aside class="sidebar">
         <div class="sidebar-header">
             <h1>🤖 Summaries Bot Manager</h1>
-            <p class="version">v3.0</p>
+            <p class="version">v4.0</p>
         </div>
         
         <nav class="sidebar-nav">
@@ -62,6 +62,18 @@
             <a href="#" class="nav-item" data-page="yt-chat">
                 <span class="icon">💬</span>
                 <span>Video Chat</span>
+            </a>
+
+            <div class="nav-separator"></div>
+            <span class="nav-section-label">AI Tools</span>
+
+            <a href="#" class="nav-item" data-page="agent-chat">
+                <span class="icon">🤖</span>
+                <span>Agent Chat</span>
+            </a>
+            <a href="#" class="nav-item" data-page="system-chat">
+                <span class="icon">⚙️</span>
+                <span>System Chat</span>
             </a>
         </nav>
 
@@ -329,25 +341,29 @@
                     <h2>📡 Monitor</h2>
                     <p class="subtitle">Live pending messages &amp; schedule countdowns</p>
                 </div>
-                <div style="display:flex;gap:10px;align-items:center;">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
-                        <input type="checkbox" id="monitor-autorefresh" checked onchange="toggleMonitorAutoRefresh(this.checked)">
-                        Auto-refresh (15s)
-                    </label>
-                    <button class="btn btn-primary" onclick="loadMonitorData()">🔄 Refresh</button>
-                </div>
             </header>
 
             <!-- All monitor content in one tabbed card -->
             <div class="mon-section">
                 <div class="mon-tab-bar">
-                    <button class="mon-tab active" data-tab="schedules"  onclick="switchMonTab('schedules')">📡 Schedules</button>
-                    <button class="mon-tab"         data-tab="summaries" onclick="switchMonTab('summaries')">📬 Summaries</button>
-                    <button class="mon-tab"         data-tab="messages"  onclick="switchMonTab('messages')">📥 Messages</button>
+                    <button class="mon-tab active" data-tab="schedules"    onclick="switchMonTab('schedules')">📡 Schedules</button>
+                    <button class="mon-tab"         data-tab="summaries"   onclick="switchMonTab('summaries')">📬 Summaries</button>
+                    <button class="mon-tab"         data-tab="messages"    onclick="switchMonTab('messages')">📥 Messages</button>
+                    <button class="mon-tab"         data-tab="unclassified" onclick="switchMonTab('unclassified')">❓ Unclassified <span id="mon-uncl-badge" class="mon-uncl-badge" style="display:none;"></span></button>
                 </div>
 
                 <!-- Schedules tab -->
                 <div id="mon-tab-schedules" class="mon-tab-panel">
+                    <div class="mon-filter-bar">
+                        <div class="mon-multi-select" id="sch-filter-topic-wrap">
+                            <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
+                            <div class="mon-ms-dropdown" id="sch-filter-topic-dd"></div>
+                        </div>
+                        <select class="select mon-filter-sel" id="sch-filter-prompt" onchange="applySchFilters()">
+                            <option value="">All Prompts</option>
+                        </select>
+                        <label class="mon-sort-label"><input type="checkbox" id="sch-sort-time" onchange="applySchFilters()"> Sort by next run</label>
+                    </div>
                     <div id="monitor-bots-container"></div>
                 </div>
 
@@ -377,6 +393,19 @@
                     </div>
                     <div id="mon-messages-content"><p class="mon-empty">Loading…</p></div>
                 </div>
+
+                <!-- Unclassified tab -->
+                <div id="mon-tab-unclassified" class="mon-tab-panel" style="display:none;">
+                    <div class="mon-filter-bar">
+                        <select class="select mon-filter-sel" id="uncl-filter-bot"  onchange="loadUnclassifiedMessages()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="uncl-filter-coll" onchange="loadUnclassifiedMessages()"><option value="">All Collections</option></select>
+                        <input type="text" class="input mon-filter-search" id="uncl-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadUnclassifiedMessages()">
+                        <button class="btn btn-secondary btn-sm" onclick="loadUnclassifiedMessages()">Search</button>
+                        <button class="btn btn-sm" id="uncl-group-btn" onclick="toggleUnclGroupView()" style="margin-left:auto;">🔤 Group by words</button>
+                    </div>
+                    <div id="mon-uncl-stats"></div>
+                    <div id="mon-uncl-content"><p class="mon-empty">Loading…</p></div>
+                </div>
             </div>
         </div>
         <!-- ══ YouTube Channels Page ════════════════════════════════ -->
@@ -390,6 +419,23 @@
                     <span>➕</span> Add Channel
                 </button>
             </header>
+
+            <!-- Blocked Keywords Section -->
+            <div class="card" style="margin-bottom:18px;">
+                <div class="card-header" style="cursor:pointer;display:flex;align-items:center;gap:8px;" onclick="toggleYtBlockedKeywords()">
+                    <span id="yt-bkw-arrow" style="transition:transform .2s;display:inline-block;">▶</span>
+                    <strong>🚫 Blocked Keywords</strong>
+                    <span id="yt-bkw-count" class="text-muted" style="margin-left:4px;"></span>
+                </div>
+                <div id="yt-bkw-body" style="display:none;padding:12px 16px;">
+                    <p class="text-muted" style="margin:0 0 10px;">Videos with titles containing these keywords are excluded from <em>all</em> channel notifications.</p>
+                    <div style="display:flex;gap:8px;margin-bottom:12px;">
+                        <input type="text" class="input" id="yt-bkw-input" placeholder="Keyword to block" style="flex:1;">
+                        <button class="btn btn-primary btn-sm" onclick="ytAddBlockedKeyword()">Add</button>
+                    </div>
+                    <div id="yt-bkw-list"></div>
+                </div>
+            </div>
 
             <div id="yt-channels-container">
                 <p class="mon-empty">Loading…</p>
@@ -412,6 +458,24 @@
                     </button>
                 </div>
             </header>
+
+            <!-- Blocked Channels Section -->
+            <div class="card" style="margin-bottom:18px;">
+                <div class="card-header" style="cursor:pointer;display:flex;align-items:center;gap:8px;" onclick="toggleYtBlockedChannels()">
+                    <span id="yt-blocked-arrow" style="transition:transform .2s;display:inline-block;">▶</span>
+                    <strong>🚫 Blocked Channels</strong>
+                    <span id="yt-blocked-count" class="text-muted" style="margin-left:4px;"></span>
+                </div>
+                <div id="yt-blocked-body" style="display:none;padding:12px 16px;">
+                    <p class="text-muted" style="margin:0 0 10px;">Videos from these channels are excluded from <em>all</em> keyword searches.</p>
+                    <div style="display:flex;gap:8px;margin-bottom:12px;">
+                        <input type="text" class="input" id="yt-blocked-ch-id" placeholder="Channel ID (UCxxxx)" style="flex:1;">
+                        <input type="text" class="input" id="yt-blocked-ch-name" placeholder="Name (optional)" style="flex:1;">
+                        <button class="btn btn-primary btn-sm" onclick="ytAddBlockedChannel()">Add</button>
+                    </div>
+                    <div id="yt-blocked-list"></div>
+                </div>
+            </div>
 
             <div id="yt-keywords-container">
                 <p class="mon-empty">Loading…</p>
@@ -455,6 +519,14 @@
                         </div>
                     </div>
                     <textarea class="input yt-prompt-textarea" id="yt-prompt-text" rows="4" placeholder="Loading prompt…"></textarea>
+                </div>
+                <div class="yt-prompt-card" style="flex:0 0 auto;min-width:260px;">
+                    <div class="yt-prompt-header">
+                        <h3>📤 Default Targets</h3>
+                        <button class="btn btn-primary btn-sm" onclick="ytSaveDefaultTargets()">Save</button>
+                    </div>
+                    <p class="text-muted" style="margin:0 0 8px;font-size:13px;">Fallback targets when a channel/tracker has none set.</p>
+                    <input type="text" class="input" id="yt-default-targets" placeholder="@channel1, @channel2" style="width:100%;">
                 </div>
             </div>
 
@@ -600,6 +672,140 @@
             </div>
         </div>
 
+        <!-- ==================== Agent Chat Page ==================== -->
+        <div id="agent-chat-page" class="page">
+            <div class="agent-chat-layout">
+                <!-- Left: Chat panel -->
+                <div class="agent-chat-panel">
+                    <div class="agent-chat-header">
+                        <div class="agent-chat-header-left">
+                            <div class="agent-chat-avatar-sm">AI</div>
+                            <div>
+                                <h3>Agent Chat</h3>
+                                <span class="agent-chat-status" id="agent-chat-status">
+                                    <span class="agent-chat-status-dot"></span> Ready
+                                </span>
+                            </div>
+                        </div>
+                        <div class="agent-chat-header-actions">
+                            <button class="agent-chat-icon-btn" onclick="agentChatToggleComposer()" title="Toggle composer">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                            </button>
+                            <button class="agent-chat-icon-btn" onclick="agentChatReset()" title="New conversation">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="agent-chat-messages" id="agent-chat-messages">
+                        <!-- Rendered by JS -->
+                    </div>
+
+                    <div class="agent-chat-input-bar" id="agent-chat-input-bar">
+                        <div class="ac-context-bar" id="ac-context-bar">
+                            <select class="input ac-context-select" id="ac-context-type" onchange="agentChatContextTypeChanged()">
+                                <option value="">Context: All data</option>
+                                <option value="topic">Topic</option>
+                                <option value="category">Category</option>
+                                <option value="yt-channel">YouTube Channel</option>
+                                <option value="yt-keyword">YouTube Keyword</option>
+                            </select>
+                            <select class="input ac-context-select ac-context-value-select" id="ac-context-value" disabled>
+                                <option value="">— select above first —</option>
+                            </select>
+                            <button class="ac-context-clear" id="ac-context-clear" onclick="agentChatClearContext()" title="Clear context" style="display:none;">✕</button>
+                        </div>
+                        <div class="agent-chat-compose">
+                            <textarea class="input agent-chat-textarea" id="agent-chat-input" rows="1" placeholder="Message Agent Chat…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();agentChatSend();}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
+                            <button class="agent-chat-send-btn" id="agent-chat-send-btn" onclick="agentChatSend()" title="Send message">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Composer panel (collapsible) -->
+                <div class="agent-chat-composer" id="agent-chat-composer">
+                    <div class="agent-chat-composer-header">
+                        <h3>Message Composer</h3>
+                        <span class="text-muted agent-chat-selected-count" id="agent-chat-selected-count">0 selected</span>
+                    </div>
+                    <div class="agent-chat-composer-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="agentChatSelectAll()">Select All</button>
+                        <button class="btn btn-secondary btn-sm" onclick="agentChatDeselectAll()">Deselect All</button>
+                        <button class="btn btn-primary btn-sm" onclick="agentChatMerge()">Merge Selected</button>
+                    </div>
+                    <div class="agent-chat-composer-body">
+                        <textarea class="input agent-chat-final-textarea" id="agent-chat-final-text" rows="12" placeholder="Select chat responses and click 'Merge Selected' to build your message here…"></textarea>
+                    </div>
+                    <div class="agent-chat-tg-bar">
+                        <input type="text" class="input" id="agent-chat-tg-target" placeholder="@channel or chat ID" style="flex:1;font-size:13px;">
+                        <button class="btn btn-primary btn-sm" onclick="agentChatSendTelegram()">📤 Send to Telegram</button>
+                    </div>
+                    <div class="agent-chat-composer-footer">
+                        <button class="btn btn-secondary btn-sm" onclick="agentChatCopyFinal()">📋 Copy</button>
+                        <button class="btn btn-secondary btn-sm" onclick="agentChatClearFinal()">🗑️ Clear</button>
+                        <button class="btn btn-primary btn-sm" onclick="agentChatRefine()">✨ Refine with AI</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== System Chat Page ==================== -->
+        <div id="system-chat-page" class="page">
+            <div class="sc-layout">
+                <!-- Chat panel -->
+                <div class="sc-panel">
+                    <div class="sc-header">
+                        <div class="sc-header-left">
+                            <div class="sc-avatar">SYS</div>
+                            <div>
+                                <h3>System Control</h3>
+                                <span class="sc-status" id="sc-status">
+                                    <span class="sc-status-dot"></span> Ready
+                                </span>
+                            </div>
+                        </div>
+                        <div class="sc-header-actions">
+                            <button class="agent-chat-icon-btn" onclick="sysChatReset()" title="New conversation">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="sc-messages" id="sc-messages">
+                        <!-- Rendered by JS -->
+                    </div>
+
+                    <!-- Action cards rendered here after each response -->
+                    <div class="sc-actions-strip" id="sc-actions-strip" style="display:none;"></div>
+
+                    <div class="sc-input-bar">
+                        <div class="sc-suggestions" id="sc-suggestions">
+                            <button class="sc-suggestion" onclick="sysChatSend('Show me the full system status')">
+                                <span class="sc-suggestion-icon">📋</span> System status
+                            </button>
+                            <button class="sc-suggestion" onclick="sysChatSend('List all YouTube keyword trackers')">
+                                <span class="sc-suggestion-icon">🔎</span> YT keywords
+                            </button>
+                            <button class="sc-suggestion" onclick="sysChatSend('Show all topics and their status')">
+                                <span class="sc-suggestion-icon">🏷️</span> Topics overview
+                            </button>
+                            <button class="sc-suggestion" onclick="sysChatSend('List all YouTube channels')">
+                                <span class="sc-suggestion-icon">📺</span> YT channels
+                            </button>
+                        </div>
+                        <div class="sc-compose">
+                            <textarea class="input sc-textarea" id="sc-input" rows="1" placeholder="Tell me what to change…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sysChatSend();}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
+                            <button class="agent-chat-send-btn" id="sc-send-btn" onclick="sysChatSend()" title="Send">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </main>
 
     <!-- Scripts -->
@@ -608,5 +814,7 @@
     <script src="/static/js/modern.js?v=4"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/youtube.js"></script>
+    <script src="/static/js/chatbot.js"></script>
+    <script src="/static/js/system-chat.js"></script>
 </body>
 </html>

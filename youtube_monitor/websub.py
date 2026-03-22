@@ -15,6 +15,16 @@ from youtube_monitor.db import get_yt_db
 
 logger = logging.getLogger(__name__)
 
+def _get_default_targets() -> list:
+    """Read global default telegram targets from config.yaml."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        return cfg.get("youtube", {}).get("default_targets", []) or []
+    except Exception:
+        return []
+
+
 WEBSUB_HUB = "https://pubsubhubbub.appspot.com/subscribe"
 YOUTUBE_TOPIC_BASE = "https://www.youtube.com/xml/feeds/videos.xml?channel_id="
 
@@ -115,14 +125,30 @@ def process_websub_notification(body: bytes):
     Looks up the channel's telegram_target and prompt to pass to the queue.
     Returns the number of new videos enqueued.
     """
+    from utils.database import get_db
+    if not get_db().get_system_enabled():
+        logger.info("[WEBSUB] System disabled — ignoring notification")
+        return 0
     db = get_yt_db()
     videos = parse_feed_notification(body)
     enqueued = 0
+
+    # Load global blocked keywords once
+    blocked_keywords = db.get_blocked_keyword_list()
 
     for video in videos:
         vid = video['video_id']
         if db.is_video_seen(vid):
             continue
+
+        # Check global blocked keywords against video title
+        video_title = video.get('title', '')
+        if blocked_keywords and video_title:
+            title_lower = video_title.lower()
+            blocked_match = next((bk for bk in blocked_keywords if bk.lower() in title_lower), None)
+            if blocked_match:
+                logger.info(f"[WEBSUB] Skipping {vid} — title matches blocked keyword '{blocked_match}'")
+                continue
 
         # Look up the channel to get its telegram_targets and prompt
         yt_channel_id = video.get('channel_id')
@@ -131,10 +157,25 @@ def process_websub_notification(body: bytes):
         if yt_channel_id:
             ch_row = db.get_channel_by_yt_id(yt_channel_id)
             if ch_row:
+                # Skip inactive channels entirely (no processing, no Gemini calls)
+                if not ch_row.get('active', True):
+                    logger.info(f"[WEBSUB] Skipping video {vid} — channel {yt_channel_id} is inactive")
+                    continue
                 telegram_targets = ch_row.get('telegram_targets') or []
                 if not telegram_targets and ch_row.get('telegram_target'):
                     telegram_targets = [ch_row['telegram_target']]
                 prompt = ch_row.get('prompt')
+
+                # Apply title filters immediately (title is in the notification)
+                video_title = video.get('title', '')
+                must_include = ch_row.get('title_must_include') or []
+                must_exclude = ch_row.get('title_must_exclude') or []
+                if must_include and not any(t.lower() in video_title.lower() for t in must_include):
+                    logger.info(f"[WEBSUB] Skipping {vid} — title doesn't match include filter")
+                    continue
+                if must_exclude and any(t.lower() in video_title.lower() for t in must_exclude):
+                    logger.info(f"[WEBSUB] Skipping {vid} — title matches exclude filter")
+                    continue
 
         db.mark_video_seen(
             video_id=vid,
@@ -143,10 +184,15 @@ def process_websub_notification(body: bytes):
             source='websub',
         )
 
+        # Fall back to global default targets if none set on channel
+        if not telegram_targets:
+            telegram_targets = _get_default_targets()
+
         # Enqueue one row per target (or one with no target if none set)
         targets = telegram_targets if telegram_targets else [None]
         for tgt in targets:
-            qid = db.enqueue_video(vid, telegram_target=tgt, prompt=prompt)
+            qid = db.enqueue_video(vid, telegram_target=tgt, prompt=prompt,
+                                   source_channel_id=yt_channel_id)
             if qid:
                 enqueued += 1
         if enqueued:

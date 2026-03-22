@@ -71,6 +71,35 @@ function showConfirm(message, onConfirm, { title = 'Confirm', icon = '⚠️', c
     overlay.querySelector('.dialog-cancel').focus();
 }
 
+function showPrompt(title, defaultValue, onConfirm) {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+        <div class="dialog-box" role="dialog" aria-modal="true">
+            <span class="dialog-icon">✏️</span>
+            <div class="dialog-title">${title}</div>
+            <div class="dialog-message">
+                <input type="text" class="input dialog-input" value="${escapeHtmlSys(defaultValue)}" style="width:100%;margin-top:8px;">
+            </div>
+            <div class="dialog-actions">
+                <button class="btn btn-secondary dialog-cancel">Cancel</button>
+                <button class="btn btn-primary dialog-confirm">Save</button>
+            </div>
+        </div>
+    `;
+    const close = () => overlay.remove();
+    const input = overlay.querySelector('.dialog-input');
+    overlay.querySelector('.dialog-cancel').addEventListener('click', close);
+    overlay.querySelector('.dialog-confirm').addEventListener('click', () => { close(); onConfirm(input.value); });
+    overlay.addEventListener('keydown', e => {
+        if (e.key === 'Escape') close();
+        if (e.key === 'Enter') { close(); onConfirm(input.value); }
+    });
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+}
+
 // ==================== Global State ====================
 let globalConfig = null;
 let globalPrompts = null;
@@ -150,6 +179,8 @@ function showPage(pageName) {
     else if (pageName === 'yt-keywords') loadYtKeywordsData();
     else if (pageName === 'yt-videos') loadYtVideosData();
     else if (pageName === 'yt-chat') ytChatInit();
+    else if (pageName === 'agent-chat') agentChatInit();
+    else if (pageName === 'system-chat') sysChatInit();
 }
 
 // ==================== Data Loading ====================
@@ -199,9 +230,9 @@ function updateSystemStatus() {
     }
     
     if (statusTextEl) {
-        statusTextEl.textContent = enabled ? 
-            '✅ System is online. All bots and collections are operational.' : 
-            '⛔ System is offline. All bot operations are suspended.';
+        statusTextEl.textContent = enabled ?
+            '✅ System is online. All bots, collections, and YouTube monitors are operational.' :
+            '⛔ System is offline. All bot operations and YouTube processing are suspended.';
     }
 }
 
@@ -1014,6 +1045,35 @@ function createBasicSettingsSection(botName, bot) {
                                onchange="updateBotSetting('${botName}', 'minimum_messages', Number(this.value))">
                         <small class="text-muted">Number of messages required before generating a summary</small>
                     </div>
+
+                    <div class="form-group">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                            <label class="form-label" style="margin:0;">Default Schedules for New Topics</label>
+                            <button class="btn btn-secondary btn-sm" style="font-size:11px;padding:3px 10px;"
+                                    onclick="openDefaultScheduleModal('${botName}')">+ Add</button>
+                        </div>
+                        <small class="text-muted d-block mb-2">These schedules are automatically created when a new topic is added. Use <code>{topic_name}</code> in name/header.</small>
+                        <div id="default-schedules-${botName}">
+                            ${(bot.default_schedules || []).length === 0
+                                ? '<p class="text-muted" style="font-size:12px;">No default schedules configured.</p>'
+                                : (bot.default_schedules || []).map((ds, idx) => {
+                                    const tgCount = (ds.telegram_targets || []).length;
+                                    const tgLabel = tgCount ? `<span style="font-size:10px;padding:1px 7px;border-radius:20px;background:rgba(139,92,246,0.15);color:#a78bfa;">📡 ${tgCount}</span>` : '';
+                                    return `
+                                    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-md);margin-bottom:6px;padding:10px 14px;">
+                                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;">
+                                            <span style="font-size:14px;">${scheduleIcon(ds)}</span>
+                                            <span style="font-size:12px;font-weight:600;color:var(--text-primary);">${escapeHtmlSys(ds.name || ds.type)}</span>
+                                            <span style="font-size:10px;padding:1px 7px;border-radius:20px;background:rgba(59,130,246,0.12);color:#93c5fd;font-weight:600;">${escapeHtmlSys(ds.prompt_key || '')}</span>
+                                            <span style="font-size:11px;color:var(--text-muted);">${scheduleSpec(ds)}</span>
+                                            ${tgLabel}
+                                        </div>
+                                        <button class="btn-icon btn-danger" style="font-size:12px;flex-shrink:0;" onclick="removeDefaultSchedule('${botName}', ${idx})">🗑️</button>
+                                    </div>`;
+                                }).join('')
+                            }
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1039,27 +1099,20 @@ function createPromptsSection(botName) {
                 <div class="collapsible-body">
                     <p class="text-muted mb-2">Manage prompts for this bot</p>
                     ${Object.entries(prompts).map(([key, value]) => {
-                        const promptText   = (value && typeof value === 'object') ? (value.text   || '') : (value || '');
-                        const promptHeader = (value && typeof value === 'object') ? (value.header || '') : '';
+                        const promptText = (value && typeof value === 'object') ? (value.text || '') : (value || '');
                         return `
-                        <div class="form-group">
-                            <div class="flex-between mb-1">
-                                <input type="text" class="input" value="${key}"
-                                       onchange="renamePrompt('${botName}', '${key}', this.value)"
-                                       style="max-width: 200px;">
-                                <button class="btn-icon btn-danger" onclick="deletePrompt('${botName}', '${key}')">🗑️</button>
+                        <div class="prompt-card">
+                            <div class="prompt-card-header">
+                                <h4 class="prompt-card-title">${escapeHtmlSys(key)}</h4>
+                                <div class="prompt-card-actions">
+                                    <button class="btn-icon" onclick="renamePromptDialog('${jsAttr(botName)}', '${jsAttr(key)}')" title="Rename">✏️</button>
+                                    <button class="btn-icon btn-danger" onclick="deletePrompt('${jsAttr(botName)}', '${jsAttr(key)}')" title="Delete">🗑️</button>
+                                </div>
                             </div>
-                            <label class="form-label" style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Header <span style="font-weight:400;">(text shown above the summary in Telegram)</span></label>
-                            <input type="text" class="input mb-1"
-                                   id="prompt-header-${botName}-${key}"
-                                   value="${escapeHtml(promptHeader)}"
-                                   onchange="updateBotPrompt('${botName}', '${key}')"
-                                   placeholder="e.g. 📰 ملخص الأخبار  (leave empty to auto-generate)">
-                            <label class="form-label" style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Prompt</label>
                             <textarea class="textarea"
                                       id="prompt-${botName}-${key}"
                                       rows="3"
-                                      onchange="updateBotPrompt('${botName}', '${key}')"
+                                      onchange="updateBotPrompt('${jsAttr(botName)}', '${jsAttr(key)}')"
                                       placeholder="Enter prompt text...">${escapeHtml(promptText)}</textarea>
                         </div>`;
                     }).join('')}
@@ -1188,6 +1241,7 @@ async function saveBotRules(botName) {
         collections: bot.collections || [],
         minimum_messages: bot.minimum_messages ?? 5,
         rules: { remove, replace },
+        default_schedules: bot.default_schedules || [],
         categories: bot.categories || {}
     });
 
@@ -1319,12 +1373,21 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
             </div>
 
             <div class="collapsible-content">
+              <div class="collapsible-inner">
                 <div class="topic-body">
                     <div class="form-group">
-                        <label class="form-label">Keywords</label>
-                        <div class="tags-container">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                            <label class="form-label" style="margin:0;">Keywords (${keywords.length})</label>
+                            ${keywords.length > 0 ? `<div class="kw-bulk-actions" style="display:flex;gap:6px;align-items:center;">
+                                <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwToggleSelectAll('${b}','${c}','${t}')">Select All</button>
+                                <button class="btn btn-danger btn-sm kw-del-sel-btn" style="font-size:10px;padding:2px 8px;display:none;" data-topic="${b}|${c}|${t}" onclick="kwDeleteSelected('${b}','${c}','${t}')">Delete Selected</button>
+                                <button class="btn btn-danger btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwDeleteAll('${b}','${c}','${t}')">Delete All</button>
+                            </div>` : ''}
+                        </div>
+                        <div class="tags-container tags-scrollable" id="kw-tags-${b}-${c}-${t}">
                             ${keywords.map((kw, idx) => `
-                                <span class="tag">
+                                <span class="tag kw-selectable" data-idx="${idx}">
+                                    <input type="checkbox" class="kw-cb" style="margin:0 4px 0 0;accent-color:var(--accent-primary);cursor:pointer;" onchange="kwSelectionChanged('${b}','${c}','${t}')">
                                     ${escapeHtmlSys(kw)}
                                     <span class="tag-remove"
                                           onclick="removeKeyword('${b}', '${c}', '${t}', ${idx})">×</span>
@@ -1333,39 +1396,6 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                             <input type="text" class="tag-input" placeholder="+ Add keywords (comma-separated)"
                                    onkeydown="return handleKeywordInput(event, '${b}', '${c}', '${t}')">
                         </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label class="form-label">Schedules</label>
-                        ${schedules.map((schedule, idx) => `
-                            <div class="summary-block">
-                                <div class="summary-header">
-                                    <div class="summary-title">
-                                        <label class="toggle-switch">
-                                            <input type="checkbox" ${schedule.enabled ? 'checked' : ''}
-                                                   onchange="toggleTopicSchedule('${b}', '${c}', '${t}', ${idx}, this.checked)">
-                                            <span class="toggle-slider"></span>
-                                        </label>
-                                        <strong>${escapeHtmlSys(schedule.name)}</strong>
-                                    </div>
-                                    <div class="sch-menu-wrap">
-                                        <button class="sch-menu-btn" onclick="toggleSchMenu(event, this)" title="Options">⋮</button>
-                                        <div class="sch-menu-dropdown">
-                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${b}', '${c}', '${t}', ${idx})">✏️ Edit</button>
-                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${b}', '${c}', '${t}', ${idx})">🗑️ Delete</button>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="summary-details">
-                                    <span>📅 ${formatSchedule(schedule)}</span>
-                                    <span>📝 ${escapeHtmlSys(schedule.prompt_key)}</span>
-                                </div>
-                            </div>
-                        `).join('')}
-                        <button class="btn btn-secondary btn-sm mt-2"
-                                onclick="openAddTopicScheduleModal('${b}', '${c}', '${t}')">
-                            + Add Schedule
-                        </button>
                     </div>
 
                     <div class="form-group">
@@ -1385,6 +1415,43 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                         <small class="text-muted d-block mt-1">Link to other topics to inherit their keywords</small>
                     </div>
                 </div>
+
+                <div class="topic-schedules-section">
+                    <div class="form-group">
+                        <label class="form-label">Schedules</label>
+                        ${schedules.map((schedule, idx) => `
+                            <div class="summary-block">
+                                <div class="summary-header">
+                                    <div class="summary-title">
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" ${schedule.enabled ? 'checked' : ''}
+                                                   onchange="toggleTopicSchedule('${b}', '${c}', '${t}', ${schedule.id}, this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <strong>${escapeHtmlSys(schedule.name)}</strong>
+                                    </div>
+                                    <div class="sch-menu-wrap">
+                                        <button class="sch-menu-btn" onclick="toggleSchMenu(event, this)" title="Options">⋮</button>
+                                        <div class="sch-menu-dropdown">
+                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${b}', '${c}', '${t}', ${schedule.id})">✏️ Edit</button>
+                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${b}', '${c}', '${t}', ${schedule.id})">🗑️ Delete</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="summary-details">
+                                    <span>📅 ${formatSchedule(schedule)}</span>
+                                    <span>📝 ${escapeHtmlSys(schedule.prompt_key)}</span>
+                                    <span>📨 ${escapeHtmlSys(schedule.header || `*${schedule.name}*`)}${schedule.header_datetime ? ' 🕐' : ''}${schedule.telegram_targets?.length ? ` 📡 ${schedule.telegram_targets.length}` : ''}</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                        <button class="btn btn-secondary btn-sm mt-2"
+                                onclick="openAddTopicScheduleModal('${b}', '${c}', '${t}')">
+                            + Add Schedule
+                        </button>
+                    </div>
+                </div>
+              </div>
             </div>
         </div>
     `;
@@ -1395,6 +1462,11 @@ function formatSchedule(schedule) {
     const type = schedule.type;
     if (type === 'minute') return `Every ${schedule.minute || 1} minute(s)`;
     if (type === 'hourly') return `Hourly at :${String(schedule.minute || 0).padStart(2, '0')}`;
+    if (type === 'interval_minutes') {
+        const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
+        const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
+        return `Every ${schedule.minutes || 30}min — starts ${sh}:${sm}`;
+    }
     if (type === 'interval') {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
@@ -1478,6 +1550,174 @@ async function deleteBot(botName) {
     }, { title: 'Delete Bot' });
 }
 
+// ==================== Default Schedule Management ====================
+function openDefaultScheduleModal(botName) {
+    const botPrompts = globalPrompts[botName] || {};
+    const promptOptions = Object.keys(botPrompts).length
+        ? Object.keys(botPrompts).map(key => `<option value="${key}">${key}</option>`).join('')
+        : '<option value="">No prompts defined</option>';
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'default-schedule-modal';
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Add Default Schedule</h3>
+                <button class="btn-icon" onclick="closeModal('default-schedule-modal')">×</button>
+            </div>
+            <div class="modal-body">
+                <small class="text-muted d-block mb-2">This schedule template will be auto-created on every new topic. Use <code>{topic_name}</code> in name/header to insert the topic name.</small>
+                <div class="form-group">
+                    <label class="form-label">Schedule Name</label>
+                    <input type="text" class="input" id="ds-name" value="{topic_name}" placeholder="{topic_name}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Type</label>
+                    <select class="select" id="ds-type" onchange="updateDsInputs()">
+                        <option value="minute">Minute</option>
+                        <option value="hourly">Hourly</option>
+                        <option value="interval_minutes">Interval (Minutes)</option>
+                        <option value="interval">Interval (Hours)</option>
+                        <option value="daily">Daily</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Prompt</label>
+                    <select class="select" id="ds-prompt">${promptOptions}</select>
+                </div>
+                <div id="ds-type-inputs"></div>
+                <div class="form-group">
+                    <label class="form-label">Header</label>
+                    <input type="text" class="input" id="ds-header" value="*{topic_name}*" placeholder="*{topic_name}*">
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ds-header-datetime" onchange="toggleSchDatetimeOptions('ds')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="form-label" style="margin:0;">Show date & time in header</span>
+                </div>
+                <div id="ds-datetime-opts" style="display:none;padding-left:16px;">
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="ds-date-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Date in Arabic numerals</span>
+                    </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="ds-time-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Time in Arabic numerals</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Telegram Targets (optional)</label>
+                    <div class="tags-container" id="ds-tg-targets"></div>
+                    <input type="text" class="input mt-1" id="ds-tg-input"
+                           placeholder="@channel or chat ID — press Enter to add"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('ds');}">
+                    <small class="text-muted">Leave empty to use collection targets.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('default-schedule-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveDefaultSchedule('${botName}')">Add</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    updateDsInputs();
+}
+
+function updateDsInputs() {
+    const type = document.getElementById('ds-type')?.value;
+    const container = document.getElementById('ds-type-inputs');
+    if (!container) return;
+    if (type === 'minute') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">Every N Minutes</label>
+            <input type="number" class="input" id="ds-minute" min="1" max="59" value="30"></div>`;
+    } else if (type === 'hourly') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">At Minute</label>
+            <input type="number" class="input" id="ds-minute" min="0" max="59" value="0"></div>`;
+    } else if (type === 'interval_minutes') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">Every N Minutes</label>
+            <input type="number" class="input" id="ds-minutes" min="1" value="30"></div>
+            <div class="form-group"><label class="form-label">Start Hour</label>
+            <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0"></div>
+            <div class="form-group"><label class="form-label">Start Minute</label>
+            <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0"></div>`;
+    } else if (type === 'interval') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">Every N Hours</label>
+            <input type="number" class="input" id="ds-hours" min="1" max="24" value="3"></div>
+            <div class="form-group"><label class="form-label">Start Hour</label>
+            <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0"></div>
+            <div class="form-group"><label class="form-label">Start Minute</label>
+            <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0"></div>`;
+    } else if (type === 'daily') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">Hour</label>
+            <input type="number" class="input" id="ds-hour" min="0" max="23" value="18"></div>
+            <div class="form-group"><label class="form-label">Minute</label>
+            <input type="number" class="input" id="ds-minute" min="0" max="59" value="0"></div>`;
+    } else {
+        container.innerHTML = '';
+    }
+}
+
+async function saveDefaultSchedule(botName) {
+    const name = document.getElementById('ds-name')?.value.trim();
+    const type = document.getElementById('ds-type')?.value;
+    const prompt_key = document.getElementById('ds-prompt')?.value;
+    if (!name) { showAlert('Please enter a schedule name', { icon: '✏️' }); return; }
+
+    const ds = {
+        name, type, prompt_key, enabled: true,
+        header: document.getElementById('ds-header')?.value || `*${name}*`,
+        header_datetime: document.getElementById('ds-header-datetime')?.checked || false,
+        header_date_arabic: document.getElementById('ds-date-arabic')?.checked || false,
+        header_time_arabic: document.getElementById('ds-time-arabic')?.checked || false,
+        telegram_targets: getSchTgTargets('ds'),
+    };
+
+    if (type === 'minute' || type === 'hourly') ds.minute = Number(document.getElementById('ds-minute')?.value || 0);
+    if (type === 'interval_minutes') {
+        ds.minutes = Number(document.getElementById('ds-minutes')?.value || 30);
+        ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
+        ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+    }
+    if (type === 'interval') {
+        ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
+        ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
+        ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+    }
+    if (type === 'daily') {
+        ds.hour = Number(document.getElementById('ds-hour')?.value || 0);
+        ds.minute = Number(document.getElementById('ds-minute')?.value || 0);
+    }
+
+    const bot = globalConfig.bots[botName];
+    if (!bot.default_schedules) bot.default_schedules = [];
+    bot.default_schedules.push(ds);
+
+    await updateBotSetting(botName, 'default_schedules', bot.default_schedules);
+    closeModal('default-schedule-modal');
+    await loadAllData();
+    renderBotsPage();
+}
+
+async function removeDefaultSchedule(botName, index) {
+    showConfirm('Remove this default schedule?', async () => {
+        const bot = globalConfig.bots[botName];
+        bot.default_schedules.splice(index, 1);
+        await updateBotSetting(botName, 'default_schedules', bot.default_schedules);
+        await loadAllData();
+        renderBotsPage();
+    }, { title: 'Remove Default Schedule' });
+}
+
 async function updateBotSetting(botName, key, value) {
     const bot = globalConfig.bots[botName];
     if (!bot) return;
@@ -1492,6 +1732,7 @@ async function updateBotSetting(botName, key, value) {
         collections: bot.collections || [],
         minimum_messages: bot.minimum_messages ?? 5,
         rules: bot.rules || { remove: [], replace: [] },
+        default_schedules: bot.default_schedules || [],
         categories: bot.categories || {}
     };
 
@@ -1507,9 +1748,8 @@ async function updateBotSetting(botName, key, value) {
 }
 
 async function updateBotPrompt(botName, promptKey) {
-    const text   = document.getElementById(`prompt-${botName}-${promptKey}`)?.value || '';
-    const header = document.getElementById(`prompt-header-${botName}-${promptKey}`)?.value || '';
-    const result = await api('/api/prompts/update', { bot_name: botName, key: promptKey, text, header });
+    const text = document.getElementById(`prompt-${botName}-${promptKey}`)?.value || '';
+    const result = await api('/api/prompts/update', { bot_name: botName, key: promptKey, text });
     if (result.status === 'ok') {
         await loadAllData();
         renderBotsPage();
@@ -1534,10 +1774,6 @@ function showAddPromptModal(botName) {
                     <input type="text" class="input" id="new-prompt-name" placeholder="e.g., brief_update, detailed_summary">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Header <span style="font-weight:400;color:var(--text-muted)">(text shown above the summary in Telegram)</span></label>
-                    <input type="text" class="input" id="new-prompt-header" placeholder="e.g. 📰 ملخص الأخبار  (leave empty to auto-generate)">
-                </div>
-                <div class="form-group">
                     <label class="form-label">Prompt Text</label>
                     <textarea class="textarea" id="new-prompt-text" rows="5" placeholder="Enter the prompt text..."></textarea>
                 </div>
@@ -1553,9 +1789,8 @@ function showAddPromptModal(botName) {
 }
 
 async function saveNewPrompt(botName) {
-    const promptName   = document.getElementById('new-prompt-name').value.trim();
-    const promptHeader = document.getElementById('new-prompt-header').value.trim();
-    const promptText   = document.getElementById('new-prompt-text').value.trim();
+    const promptName = document.getElementById('new-prompt-name').value.trim();
+    const promptText = document.getElementById('new-prompt-text').value.trim();
 
     if (!promptName) {
         showAlert('Please enter a prompt name', { icon: '✏️' });
@@ -1563,7 +1798,7 @@ async function saveNewPrompt(botName) {
     }
 
     const doSave = async () => {
-        const result = await api('/api/prompts/update', { bot_name: botName, key: promptName, text: promptText, header: promptHeader });
+        const result = await api('/api/prompts/update', { bot_name: botName, key: promptName, text: promptText });
         if (result.status === 'ok') {
             await loadAllData();
             renderBotsPage();
@@ -1594,6 +1829,12 @@ async function deletePrompt(botName, promptKey) {
     }, { title: 'Delete Prompt' });
 }
 
+function renamePromptDialog(botName, oldKey) {
+    showPrompt('Rename Prompt', oldKey, async (newKey) => {
+        await renamePrompt(botName, oldKey, newKey);
+    });
+}
+
 async function renamePrompt(botName, oldKey, newKey) {
     newKey = newKey.trim();
     if (!newKey || oldKey === newKey) return;
@@ -1609,13 +1850,12 @@ async function renamePrompt(botName, oldKey, newKey) {
     }
 
     // Get the old prompt value (may be string or {header, text} dict)
-    const oldVal    = botPrompts[oldKey];
+    const oldVal = botPrompts[oldKey];
     if (!oldVal) return;
-    const oldText   = (oldVal && typeof oldVal === 'object') ? (oldVal.text   || '') : (oldVal || '');
-    const oldHeader = (oldVal && typeof oldVal === 'object') ? (oldVal.header || '') : '';
+    const oldText = (oldVal && typeof oldVal === 'object') ? (oldVal.text || '') : (oldVal || '');
 
     // Create new prompt with new key
-    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newKey, text: oldText, header: oldHeader });
+    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newKey, text: oldText });
     if (addResult.status === 'ok') {
         // Delete old prompt
         await api('/api/prompts/delete', { bot_name: botName, key: oldKey });
@@ -1675,6 +1915,8 @@ async function removeCollectionFromBot(botName, collectionName) {
             enabled: bot.enabled ?? true,
             collections: bot.collections || [],
             minimum_messages: bot.minimum_messages ?? 5,
+            rules: bot.rules || { remove: [], replace: [] },
+            default_schedules: bot.default_schedules || [],
             categories: bot.categories || {}
         };
 
@@ -1940,6 +2182,61 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
     }
 }
 
+function kwSelectionChanged(b, c, t) {
+    const container = document.getElementById(`kw-tags-${b}-${c}-${t}`);
+    if (!container) return;
+    const anyChecked = container.querySelector('.kw-cb:checked');
+    const delBtn = document.querySelector(`.kw-del-sel-btn[data-topic="${b}|${c}|${t}"]`);
+    if (delBtn) delBtn.style.display = anyChecked ? '' : 'none';
+}
+
+function kwToggleSelectAll(b, c, t) {
+    const container = document.getElementById(`kw-tags-${b}-${c}-${t}`);
+    if (!container) return;
+    const cbs = container.querySelectorAll('.kw-cb');
+    const allChecked = [...cbs].every(cb => cb.checked);
+    cbs.forEach(cb => cb.checked = !allChecked);
+    kwSelectionChanged(b, c, t);
+}
+
+function kwDeleteSelected(b, c, t) {
+    const container = document.getElementById(`kw-tags-${b}-${c}-${t}`);
+    if (!container) return;
+    const checked = container.querySelectorAll('.kw-cb:checked');
+    const indices = [...checked].map(cb => Number(cb.closest('.kw-selectable').dataset.idx));
+    if (!indices.length) return;
+    const count = indices.length;
+    showConfirm(`Delete ${count} selected keyword${count > 1 ? 's' : ''}?`, async () => {
+        const topic = globalConfig.bots[b].categories[c].topics[t];
+        // Remove from highest index first to preserve lower indices
+        indices.sort((a, x) => x - a).forEach(i => topic.keywords.splice(i, 1));
+        const result = await api('/api/topic/update', {
+            bot_name: b, category_name: c, topic_name: t, keywords: topic.keywords
+        });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage([`topic-${b}-${c}-${t}`, `categories-${b}`]);
+            showNotification(`${count} keyword${count > 1 ? 's' : ''} deleted`, 'success');
+        }
+    }, { title: 'Delete Keywords' });
+}
+
+function kwDeleteAll(b, c, t) {
+    const topic = globalConfig.bots[b]?.categories[c]?.topics[t];
+    if (!topic?.keywords?.length) return;
+    const count = topic.keywords.length;
+    showConfirm(`Delete all ${count} keywords from this topic?`, async () => {
+        const result = await api('/api/topic/update', {
+            bot_name: b, category_name: c, topic_name: t, keywords: []
+        });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage([`topic-${b}-${c}-${t}`, `categories-${b}`]);
+            showNotification(`All ${count} keywords deleted`, 'success');
+        }
+    }, { title: 'Delete All Keywords' });
+}
+
 async function removeKeyword(botName, categoryName, topicName, index) {
     const topic = globalConfig.bots[botName].categories[categoryName].topics[topicName];
     topic.keywords.splice(index, 1);
@@ -1985,6 +2282,7 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                     <select class="select" id="topic-schedule-type" onchange="updateTopicScheduleInputs()">
                         <option value="minute">Every Minute</option>
                         <option value="hourly" selected>Hourly</option>
+                        <option value="interval_minutes">Every X Minutes</option>
                         <option value="interval">Every X Hours</option>
                         <option value="daily">Daily</option>
                     </select>
@@ -2000,6 +2298,42 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                             <option value="${key}">${key}</option>
                         `).join('')}
                     </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Header</label>
+                    <input type="text" class="input" id="topic-schedule-header" placeholder="**Schedule Name**">
+                    <small class="text-muted">Leave empty to use *schedule name* as header. Clear completely to send without header.</small>
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="topic-schedule-header-datetime" onchange="toggleSchDatetimeOptions('topic-schedule')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="form-label" style="margin:0;">Show date & time in header</span>
+                </div>
+                <div id="topic-schedule-datetime-opts" style="display:none;padding-left:16px;">
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="topic-schedule-date-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Date in Arabic numerals (٢٠٢٦/٠٣/٢١)</span>
+                    </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="topic-schedule-time-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Telegram Targets (optional)</label>
+                    <div class="tags-container" id="topic-schedule-tg-targets"></div>
+                    <input type="text" class="input mt-1" id="topic-schedule-tg-input"
+                           placeholder="@channel or chat ID — press Enter to add"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('topic-schedule');}">
+                    <small class="text-muted">Leave empty to use collection targets. Add specific channels to override.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2026,6 +2360,17 @@ function updateTopicScheduleInputs() {
         container.innerHTML = `
             <label class="form-label">Minute</label>
             <input type="number" class="input" id="topic-schedule-minute" min="0" max="59" value="0">
+        `;
+    } else if (type === 'interval_minutes') {
+        container.innerHTML = `
+            <label class="form-label">Every X Minutes</label>
+            <input type="number" class="input" id="topic-schedule-minutes" min="1" max="1440" value="30">
+            <label class="form-label mt-1">Starting at (HH : MM)</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="topic-schedule-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="topic-schedule-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at this time, then every X minutes</small>
         `;
     } else if (type === 'interval') {
         container.innerHTML = `
@@ -2058,17 +2403,34 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         return;
     }
     
+    const headerInput = document.getElementById('topic-schedule-header').value;
+    const header = headerInput || `**${name}**`;
+    const header_datetime = document.getElementById('topic-schedule-header-datetime').checked;
+    const header_date_arabic = document.getElementById('topic-schedule-date-arabic').checked;
+    const header_time_arabic = document.getElementById('topic-schedule-time-arabic').checked;
+
+    const telegram_targets = getSchTgTargets('topic-schedule');
+
     const schedule = {
         name,
         type,
         prompt_key,
-        enabled: true
+        enabled: true,
+        header,
+        header_datetime,
+        header_date_arabic,
+        header_time_arabic,
+        telegram_targets
     };
-    
+
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
     } else if (type === 'hourly') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
+    } else if (type === 'interval_minutes') {
+        schedule.minutes      = Number(document.getElementById('topic-schedule-minutes').value);
+        schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
+        schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
     } else if (type === 'interval') {
         schedule.hours        = Number(document.getElementById('topic-schedule-hours').value);
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
@@ -2097,36 +2459,25 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     }
 }
 
-async function toggleTopicSchedule(botName, categoryName, topicName, scheduleIndex, enabled) {
-    const topic = globalConfig.bots[botName].categories[categoryName].topics[topicName];
-    if (topic.schedules && topic.schedules[scheduleIndex]) {
-        topic.schedules[scheduleIndex].enabled = enabled;
+async function toggleTopicSchedule(botName, categoryName, topicName, scheduleId, enabled) {
+    const result = await api('/api/topic/schedule/update', {
+        schedule_id: scheduleId,
+        schedule: { enabled }
+    });
 
-        const result = await api('/api/topic/schedule/update', {
-            bot_name: botName,
-            category_name: categoryName,
-            topic_name: topicName,
-            schedule_index: scheduleIndex,
-            schedule: topic.schedules[scheduleIndex]
-        });
-
-        if (result.status === 'ok') {
-            await loadAllData();
-            const topicId = `topic-${botName}-${categoryName}-${topicName}`;
-            const categoryId = `categories-${botName}`;
-            renderBotsPage([topicId, categoryId]);
-            showNotification('Schedule updated', 'success');
-        }
+    if (result.status === 'ok') {
+        await loadAllData();
+        const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+        const categoryId = `categories-${botName}`;
+        renderBotsPage([topicId, categoryId]);
+        showNotification('Schedule updated', 'success');
     }
 }
 
-async function deleteTopicSchedule(botName, categoryName, topicName, scheduleIndex) {
+async function deleteTopicSchedule(botName, categoryName, topicName, scheduleId) {
     showConfirm('Delete this schedule?', async () => {
         const result = await api('/api/topic/schedule/delete', {
-            bot_name: botName,
-            category_name: categoryName,
-            topic_name: topicName,
-            schedule_index: scheduleIndex
+            schedule_id: scheduleId
         });
 
         if (result.status === 'ok') {
@@ -2170,8 +2521,41 @@ function closeAllSchMenus() {
 document.addEventListener('click', closeAllSchMenus);
 
 // ==================== Edit Schedule Modal ====================
-function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleIndex) {
-    const schedule = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName]?.schedules[scheduleIndex];
+function toggleSchDatetimeOptions(prefix) {
+    const checked = document.getElementById(`${prefix}-header-datetime`).checked;
+    const opts = document.getElementById(`${prefix}-datetime-opts`);
+    if (opts) opts.style.display = checked ? 'block' : 'none';
+}
+
+function addSchTgTarget(prefix) {
+    const input = document.getElementById(`${prefix}-tg-input`);
+    const container = document.getElementById(`${prefix}-tg-targets`);
+    if (!input || !container) return;
+    const val = input.value.trim();
+    if (!val) return;
+    // Check for duplicate
+    const existing = [...container.querySelectorAll('.tag')].map(t => t.textContent.replace('×', '').trim());
+    if (existing.includes(val)) { input.value = ''; return; }
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = `${escapeHtmlSys(val)}<span class="tag-remove" onclick="removeSchTgTarget('${prefix}', this)">×</span>`;
+    container.appendChild(tag);
+    input.value = '';
+}
+
+function removeSchTgTarget(prefix, el) {
+    el.closest('.tag').remove();
+}
+
+function getSchTgTargets(prefix) {
+    const container = document.getElementById(`${prefix}-tg-targets`);
+    if (!container) return [];
+    return [...container.querySelectorAll('.tag')].map(t => t.textContent.replace('×', '').trim()).filter(Boolean);
+}
+
+function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId) {
+    const schedules = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName]?.schedules || [];
+    const schedule = schedules.find(s => s.id === scheduleId);
     if (!schedule) return;
 
     const botPrompts = (globalPrompts && globalPrompts[botName]) || {};
@@ -2181,9 +2565,12 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleIn
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'topic-schedule-edit-modal';
+    modal.dataset.botName = botName;
+    modal.dataset.categoryName = categoryName;
+    modal.dataset.topicName = topicName;
 
-    const typeOptions = ['minute', 'hourly', 'interval', 'daily'];
-    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval: 'Every X Hours', daily: 'Daily' };
+    const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval', 'daily'];
+    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval: 'Every X Hours', daily: 'Daily' };
 
     modal.innerHTML = `
         <div class="modal-dialog">
@@ -2213,11 +2600,53 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleIn
                         `).join('')}
                     </select>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Header</label>
+                    <input type="text" class="input" id="edit-sch-header" value="${escapeHtmlSys(schedule.header || `*${schedule.name}*`)}">
+                    <small class="text-muted">Leave empty to send without header.</small>
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="edit-sch-header-datetime" ${schedule.header_datetime ? 'checked' : ''} onchange="toggleSchDatetimeOptions('edit-sch')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="form-label" style="margin:0;">Show date & time in header</span>
+                </div>
+                <div id="edit-sch-datetime-opts" style="display:${schedule.header_datetime ? 'block' : 'none'};padding-left:16px;">
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="edit-sch-date-arabic" ${schedule.header_date_arabic ? 'checked' : ''}>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Date in Arabic numerals (٢٠٢٦/٠٣/٢١)</span>
+                    </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="edit-sch-time-arabic" ${schedule.header_time_arabic ? 'checked' : ''}>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Telegram Targets (optional)</label>
+                    <div class="tags-container" id="edit-sch-tg-targets">
+                        ${(schedule.telegram_targets || []).map(t => `
+                            <span class="tag">${escapeHtmlSys(t)}
+                                <span class="tag-remove" onclick="removeSchTgTarget('edit-sch', this)">×</span>
+                            </span>
+                        `).join('')}
+                    </div>
+                    <input type="text" class="input mt-1" id="edit-sch-tg-input"
+                           placeholder="@channel or chat ID — press Enter to add"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('edit-sch');}">
+                    <small class="text-muted">Leave empty to use collection targets. Add specific channels to override.</small>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('topic-schedule-edit-modal')">Cancel</button>
                 <button class="btn btn-primary"
-                        onclick="saveEditedSchedule('${botName}', '${categoryName}', '${topicName}', ${scheduleIndex})">Save Changes</button>
+                        onclick="saveEditedSchedule(${scheduleId})">Save Changes</button>
             </div>
         </div>
     `;
@@ -2233,6 +2662,15 @@ function buildEditScheduleInputs(schedule) {
     } else if (type === 'hourly') {
         return `<label class="form-label">Minute</label>
                 <input type="number" class="input" id="edit-sch-minute" min="0" max="59" value="${schedule.minute || 0}">`;
+    } else if (type === 'interval_minutes') {
+        return `<label class="form-label">Every X Minutes</label>
+                <input type="number" class="input" id="edit-sch-minutes" min="1" max="1440" value="${schedule.minutes || 30}">
+                <label class="form-label mt-1">Starting at (HH : MM)</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" class="input" id="edit-sch-start-hour" min="0" max="23" value="${schedule.start_hour ?? 0}" placeholder="HH" style="width:80px;">
+                    <input type="number" class="input" id="edit-sch-start-minute" min="0" max="59" value="${schedule.start_minute ?? 0}" placeholder="MM" style="width:80px;">
+                </div>
+                <small class="text-muted">First run at this time, then every X minutes</small>`;
     } else if (type === 'interval') {
         return `<label class="form-label">Every X Hours</label>
                 <input type="number" class="input" id="edit-sch-hours" min="1" max="24" value="${schedule.hours || 2}">
@@ -2257,7 +2695,7 @@ function updateEditScheduleInputs() {
     container.innerHTML = buildEditScheduleInputs({ type });
 }
 
-async function saveEditedSchedule(botName, categoryName, topicName, scheduleIndex) {
+async function saveEditedSchedule(scheduleId) {
     const name = document.getElementById('edit-sch-name').value.trim();
     const type = document.getElementById('edit-sch-type').value;
     const prompt_key = document.getElementById('edit-sch-prompt').value;
@@ -2267,13 +2705,21 @@ async function saveEditedSchedule(botName, categoryName, topicName, scheduleInde
         return;
     }
 
-    const original = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName]?.schedules[scheduleIndex];
-    const schedule = { name, type, prompt_key, enabled: original ? original.enabled : true };
+    const header = document.getElementById('edit-sch-header').value;
+    const header_datetime = document.getElementById('edit-sch-header-datetime').checked;
+    const header_date_arabic = document.getElementById('edit-sch-date-arabic').checked;
+    const header_time_arabic = document.getElementById('edit-sch-time-arabic').checked;
+    const telegram_targets = getSchTgTargets('edit-sch');
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, telegram_targets };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
     } else if (type === 'hourly') {
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
+    } else if (type === 'interval_minutes') {
+        schedule.minutes      = Number(document.getElementById('edit-sch-minutes').value);
+        schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
+        schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
     } else if (type === 'interval') {
         schedule.hours        = Number(document.getElementById('edit-sch-hours').value);
         schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
@@ -2284,18 +2730,18 @@ async function saveEditedSchedule(botName, categoryName, topicName, scheduleInde
     }
 
     const result = await api('/api/topic/schedule/update', {
-        bot_name: botName,
-        category_name: categoryName,
-        topic_name: topicName,
-        schedule_index: scheduleIndex,
+        schedule_id: scheduleId,
         schedule
     });
 
     if (result.status === 'ok') {
         await loadAllData();
-        const topicId    = `topic-${botName}-${categoryName}-${topicName}`;
-        const categoryId = `categories-${botName}`;
-        renderBotsPage([topicId, categoryId]);
+        const modal = document.getElementById('topic-schedule-edit-modal');
+        const bn = modal?.dataset.botName;
+        const cn = modal?.dataset.categoryName;
+        const tn = modal?.dataset.topicName;
+        const keepOpen = bn ? [`topic-${bn}-${cn}-${tn}`, `categories-${bn}`] : null;
+        renderBotsPage(keepOpen);
         closeModal('topic-schedule-edit-modal');
         showNotification('Schedule updated', 'success');
     } else {
@@ -2511,9 +2957,32 @@ style.textContent = `
     .mon-tab:hover { color:var(--text-primary); background:var(--bg-tertiary); }
     .mon-tab.active { color:var(--accent-primary); background:var(--bg-card); border-bottom:2px solid var(--accent-primary); font-weight:600; }
     .mon-tab-panel { padding:16px; }
+    .mon-uncl-badge { display:inline-block; background:var(--danger); color:#fff; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; margin-left:4px; vertical-align:middle; }
+    .mon-uncl-stats-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+    .uncl-word-groups { display:flex; flex-direction:column; gap:12px; }
+    .uncl-word-group { border:1px solid var(--border-color); border-radius:var(--radius-md); overflow:hidden; }
+    .uncl-word-hdr { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; background:var(--bg-tertiary); cursor:pointer; user-select:none; }
+    .uncl-word-hdr:hover { background:var(--bg-hover); }
+    .uncl-word-label { font-weight:600; font-size:14px; color:var(--accent-primary); }
+    .uncl-word-count { font-size:12px; color:var(--text-muted); }
+    .uncl-word-group mark { background:var(--accent-primary); color:#fff; padding:0 2px; border-radius:2px; }
     .mon-filter-bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 0 14px; border-bottom:1px solid var(--border-color); margin-bottom:14px; }
     .mon-filter-sel { min-width:130px; max-width:180px; height:32px; font-size:12px; padding:0 8px; }
     .mon-filter-search { flex:1; min-width:160px; max-width:320px; height:32px; font-size:12px; padding:0 10px; }
+    .mon-sort-label { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--text-muted); cursor:pointer; user-select:none; }
+    .mon-sort-label input { accent-color:var(--accent-primary); }
+    .mon-sch-topic { font-size:11px; background:var(--accent-primary); color:#fff; padding:1px 7px; border-radius:10px; white-space:nowrap; }
+
+    /* multi-select dropdown */
+    .mon-multi-select { position:relative; display:inline-block; }
+    .mon-ms-btn { display:flex; align-items:center; justify-content:space-between; gap:6px; cursor:pointer; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mon-ms-arrow { font-size:10px; flex-shrink:0; }
+    .mon-ms-dropdown { display:none; position:absolute; top:100%; left:0; min-width:200px; max-height:280px; overflow-y:auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); z-index:100; padding:4px 0; margin-top:2px; }
+    .mon-multi-select.open .mon-ms-dropdown { display:block; }
+    .mon-ms-item { display:flex; align-items:center; gap:8px; padding:5px 12px; font-size:12px; color:var(--text-secondary); cursor:pointer; transition:background 0.1s; }
+    .mon-ms-item:hover { background:var(--bg-tertiary); }
+    .mon-ms-item input { accent-color:var(--accent-primary); flex-shrink:0; }
+    .mon-ms-item.all-item { font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-color); margin-bottom:2px; }
     .rules-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
     .rules-row:last-child { margin-bottom:0; }
     .rules-input { flex:1; min-width:0; height:32px; font-size:13px; }
@@ -2530,18 +2999,49 @@ let _allMessages  = [];
 
 async function loadMonitorData() {
     const container = document.getElementById('monitor-bots-container');
-    container.innerHTML = '<p class="mon-empty">Loading…</p>';
+    const isFirstLoad = !_monitorData;
+    if (isFirstLoad) container.innerHTML = '<p class="mon-empty">Loading…</p>';
+
     const data = await api('/api/monitor/data');
     if (data.status !== 'ok') {
         container.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
         return;
     }
     _monitorData = data;
+
+    // Preserve scroll position on refresh
+    const scrollY = window.scrollY;
+    const pageEl = document.getElementById('page-monitor');
+
+    // Freeze the page height to prevent scroll jump during DOM swap
+    if (!isFirstLoad && pageEl) pageEl.style.minHeight = pageEl.offsetHeight + 'px';
+
     renderMonitorBots(data.bots || {});
     renderMonSummaries(data.recent_summaries || []);
-    if (_monActiveTab === 'messages') loadMonitorMessages();
-    else if (_monActiveTab === 'summaries') applyMonSummaryFilters();
+    // Only re-render summaries filter on auto-refresh (lightweight); messages/unclassified are on-demand
+    if (_monActiveTab === 'summaries') applyMonSummaryFilters();
     startMonitorCountdowns();
+
+    // Load unclassified badge count in background
+    api('/api/monitor/unclassified?limit=1').then(r => {
+        if (r.status === 'ok') {
+            const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
+            const badge = document.getElementById('mon-uncl-badge');
+            if (badge) {
+                badge.textContent = total;
+                badge.style.display = total > 0 ? 'inline-block' : 'none';
+            }
+        }
+    });
+
+    // Restore scroll position after paint
+    if (!isFirstLoad) {
+        window.scrollTo(0, scrollY);
+        requestAnimationFrame(() => {
+            window.scrollTo(0, scrollY);
+            if (pageEl) pageEl.style.minHeight = '';
+        });
+    }
 }
 
 function switchMonTab(tab) {
@@ -2549,76 +3049,206 @@ function switchMonTab(tab) {
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
-    document.getElementById('mon-tab-schedules').style.display = tab === 'schedules' ? '' : 'none';
-    document.getElementById('mon-tab-summaries').style.display = tab === 'summaries' ? '' : 'none';
-    document.getElementById('mon-tab-messages').style.display  = tab === 'messages'  ? '' : 'none';
-    if (tab === 'messages') loadMonitorMessages();
+    ['schedules', 'summaries', 'messages', 'unclassified'].forEach(t => {
+        const el = document.getElementById('mon-tab-' + t);
+        if (el) el.style.display = t === tab ? '' : 'none';
+    });
+    if (tab === 'messages' && !_allMessages.length) loadMonitorMessages();
+    if (tab === 'unclassified' && !_unclMessages.length) loadUnclassifiedMessages();
 }
 
 // ---------- Topics & Schedules ----------
+let _monSchFlat = []; // flat list of {botName, catName, topicName, topicEnabled, sch, pending}
+
+let _schSelectedTopics = new Set(); // multi-select state
+
 function renderMonitorBots(bots) {
+    // Build flat schedule list for filtering/sorting
+    _monSchFlat = [];
+    const allTopics = new Set();
+    const allPrompts = new Set();
+    Object.entries(bots).forEach(([botName, botData]) => {
+        Object.entries(botData.categories || {}).forEach(([catName, catData]) => {
+            Object.entries(catData.topics || {}).forEach(([topicName, topicData]) => {
+                allTopics.add(topicName);
+                (topicData.schedules || []).forEach(sch => {
+                    if (sch.prompt_key) allPrompts.add(sch.prompt_key);
+                    const p = topicData.pending || {};
+                    _monSchFlat.push({
+                        botName, catName, topicName,
+                        botEnabled: botData.enabled,
+                        topicEnabled: topicData.enabled !== false,
+                        sch, pending: p[sch.type] || 0
+                    });
+                });
+            });
+        });
+    });
+
+    // Populate topic multi-select dropdown (preserve selection)
+    const dd = document.getElementById('sch-filter-topic-dd');
+    if (dd) {
+        const sorted = [...allTopics].sort();
+        dd.innerHTML = `<label class="mon-ms-item all-item"><input type="checkbox" onchange="schTopicSelectAll(this.checked)" ${_schSelectedTopics.size === 0 ? 'checked' : ''}> All Topics</label>` +
+            sorted.map(t => {
+                const checked = _schSelectedTopics.has(t) ? 'checked' : '';
+                return `<label class="mon-ms-item"><input type="checkbox" value="${escapeHtml(t)}" ${checked} onchange="schTopicToggle(this)"> ${escapeHtml(t)}</label>`;
+            }).join('');
+        _updateSchTopicBtnLabel();
+    }
+
+    // Populate prompt filter dropdown (preserve selection)
+    const promptSel = document.getElementById('sch-filter-prompt');
+    if (promptSel) {
+        const cur = promptSel.value;
+        promptSel.innerHTML = '<option value="">All Prompts</option>' +
+            [...allPrompts].sort().map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+        promptSel.value = cur;
+    }
+
+    applySchFilters();
+}
+
+function toggleMonMultiSelect(wrapId) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    wrap.classList.toggle('open');
+}
+
+// Close multi-select when clicking outside
+document.addEventListener('click', e => {
+    document.querySelectorAll('.mon-multi-select.open').forEach(el => {
+        if (!el.contains(e.target)) el.classList.remove('open');
+    });
+});
+
+function schTopicSelectAll(checked) {
+    _schSelectedTopics.clear();
+    const dd = document.getElementById('sch-filter-topic-dd');
+    if (dd) dd.querySelectorAll('input[value]').forEach(cb => cb.checked = false);
+    _updateSchTopicBtnLabel();
+    applySchFilters();
+}
+
+function schTopicToggle(cb) {
+    if (cb.checked) _schSelectedTopics.add(cb.value);
+    else _schSelectedTopics.delete(cb.value);
+    // Update "All" checkbox
+    const dd = document.getElementById('sch-filter-topic-dd');
+    if (dd) {
+        const allCb = dd.querySelector('.all-item input');
+        if (allCb) allCb.checked = _schSelectedTopics.size === 0;
+    }
+    _updateSchTopicBtnLabel();
+    applySchFilters();
+}
+
+function _updateSchTopicBtnLabel() {
+    const wrap = document.getElementById('sch-filter-topic-wrap');
+    if (!wrap) return;
+    const btn = wrap.querySelector('.mon-ms-btn');
+    if (!btn) return;
+    if (_schSelectedTopics.size === 0) {
+        btn.innerHTML = 'All Topics <span class="mon-ms-arrow">▾</span>';
+    } else if (_schSelectedTopics.size <= 2) {
+        btn.innerHTML = `${[..._schSelectedTopics].join(', ')} <span class="mon-ms-arrow">▾</span>`;
+    } else {
+        btn.innerHTML = `${_schSelectedTopics.size} topics <span class="mon-ms-arrow">▾</span>`;
+    }
+}
+
+function applySchFilters() {
     const container = document.getElementById('monitor-bots-container');
-    if (!Object.keys(bots).length) {
-        container.innerHTML = '<p class="mon-empty">No bots configured.</p>';
+    const filterPrompt = document.getElementById('sch-filter-prompt')?.value || '';
+    const sortByTime = document.getElementById('sch-sort-time')?.checked || false;
+
+    let items = _monSchFlat;
+    if (_schSelectedTopics.size > 0) items = items.filter(r => _schSelectedTopics.has(r.topicName));
+    if (filterPrompt) items = items.filter(r => (r.sch.prompt_key || '') === filterPrompt);
+
+    if (!items.length) {
+        container.innerHTML = '<p class="mon-empty">No schedules match the filter.</p>';
         return;
     }
 
-    container.innerHTML = Object.entries(bots).map(([botName, botData]) => {
-        const dotCls = botData.enabled ? 'mon-bot-dot-on' : 'mon-bot-dot-off';
-        const dotTxt = botData.enabled ? '● ACTIVE' : '● OFF';
+    if (sortByTime) {
+        // Sort by next run time (earliest first), disabled at bottom
+        items = [...items].sort((a, b) => {
+            if (a.sch.enabled === false && b.sch.enabled !== false) return 1;
+            if (a.sch.enabled !== false && b.sch.enabled === false) return -1;
+            const na = computeNextRun(a.sch) || Infinity;
+            const nb = computeNextRun(b.sch) || Infinity;
+            return na - nb;
+        });
+        // Flat rendering (no grouping by bot/category)
+        const rows = items.map(r => renderSchRow(r)).join('');
+        container.innerHTML = `<div class="mon-bot-card"><div class="mon-bot-hdr">All Schedules (sorted by next run)</div>${rows}</div>`;
+    } else {
+        // Grouped rendering: bot → category → topic → schedules
+        const grouped = {};
+        items.forEach(r => {
+            if (!grouped[r.botName]) grouped[r.botName] = { enabled: r.botEnabled, cats: {} };
+            if (!grouped[r.botName].cats[r.catName]) grouped[r.botName].cats[r.catName] = {};
+            if (!grouped[r.botName].cats[r.catName][r.topicName]) grouped[r.botName].cats[r.catName][r.topicName] = { enabled: r.topicEnabled, rows: [] };
+            grouped[r.botName].cats[r.catName][r.topicName].rows.push(r);
+        });
 
-        const categoriesHtml = Object.entries(botData.categories || {}).map(([catName, catData]) => {
-            const topicsHtml = Object.entries(catData.topics || {}).map(([topicName, topicData]) => {
-                const p = topicData.pending || {};
-                const offCls = topicData.enabled === false ? ' mon-topic-off' : '';
-
-                const schRows = (topicData.schedules || []).map(sch => {
-                    const pending = p[sch.type] || 0;
-                    const pendingCls = pending > 0 ? 'has' : 'none';
-                    const pendingTxt = pending > 0 ? `${pending} pending` : 'none';
-                    const disabledCls = sch.enabled === false ? ' mon-sch-disabled' : '';
-                    const icon = scheduleIcon(sch);
-                    const spec = scheduleSpec(sch);
-                    const schJson = escapeHtml(JSON.stringify(sch));
-                    return `<div class="mon-sch-row${disabledCls}" data-schedule="${schJson}">
-                        <div class="mon-sch-left">
-                            <span class="mon-sch-icon">${icon}</span>
-                            <span class="mon-sch-name">${escapeHtml(sch.name || sch.type)}</span>
-                            <span class="mon-sch-prompt">${escapeHtml(sch.prompt_key || '')}</span>
-                            <span class="mon-sch-spec">${spec}</span>
+        container.innerHTML = Object.entries(grouped).map(([botName, bd]) => {
+            const dotCls = bd.enabled ? 'mon-bot-dot-on' : 'mon-bot-dot-off';
+            const dotTxt = bd.enabled ? '● ACTIVE' : '● OFF';
+            const catsHtml = Object.entries(bd.cats).map(([catName, topics]) => {
+                const topicsHtml = Object.entries(topics).map(([topicName, td]) => {
+                    const offCls = td.enabled ? '' : ' mon-topic-off';
+                    const schRows = td.rows.map(r => renderSchRow(r)).join('');
+                    return `<div class="mon-topic-block">
+                        <div class="mon-topic-title${offCls}">
+                            ${escapeHtml(topicName)}
+                            ${!td.enabled ? '<span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}
                         </div>
-                        <div class="mon-sch-right">
-                            <span class="mon-pending ${pendingCls}">${pendingTxt}</span>
-                            <span class="mon-next-label">next in</span>
-                            <span class="mon-countdown">${sch.enabled === false ? '—' : '…'}</span>
-                        </div>
+                        ${schRows}
                     </div>`;
                 }).join('');
-
-                return `<div class="mon-topic-block">
-                    <div class="mon-topic-title${offCls}">
-                        ${escapeHtml(topicName)}
-                        ${topicData.enabled === false ? '<span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}
-                    </div>
-                    ${schRows}
-                </div>`;
+                return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
             }).join('');
-
-            return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
+            return `<div class="mon-bot-card">
+                <div class="mon-bot-hdr">🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></div>
+                ${catsHtml}
+            </div>`;
         }).join('');
+    }
+}
 
-        return `<div class="mon-bot-card">
-            <div class="mon-bot-hdr">🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></div>
-            ${categoriesHtml}
-        </div>`;
-    }).join('');
+function renderSchRow(r) {
+    const pendingCls = r.pending > 0 ? 'has' : 'none';
+    const pendingTxt = r.pending > 0 ? `${r.pending} pending` : 'none';
+    const disabledCls = r.sch.enabled === false ? ' mon-sch-disabled' : '';
+    const icon = scheduleIcon(r.sch);
+    const spec = scheduleSpec(r.sch);
+    const schJson = escapeHtml(JSON.stringify(r.sch));
+    const topicLabel = document.getElementById('sch-sort-time')?.checked
+        ? `<span class="mon-sch-topic">${escapeHtml(r.topicName)}</span>` : '';
+    return `<div class="mon-sch-row${disabledCls}" data-schedule="${schJson}">
+        <div class="mon-sch-left">
+            <span class="mon-sch-icon">${icon}</span>
+            ${topicLabel}
+            <span class="mon-sch-name">${escapeHtml(r.sch.name || r.sch.type)}</span>
+            <span class="mon-sch-prompt">${escapeHtml(r.sch.prompt_key || '')}</span>
+            <span class="mon-sch-spec">${spec}</span>
+        </div>
+        <div class="mon-sch-right">
+            <span class="mon-pending ${pendingCls}">${pendingTxt}</span>
+            <span class="mon-next-label">next in</span>
+            <span class="mon-countdown">${r.sch.enabled === false ? '—' : '…'}</span>
+        </div>
+    </div>`;
 }
 
 function scheduleIcon(sch) {
-    if (sch.type === 'hourly')   return '🕐';
-    if (sch.type === 'daily')    return '📅';
-    if (sch.type === 'minute')   return '⚡';
-    if (sch.type === 'interval') return '🔁';
+    if (sch.type === 'hourly')           return '🕐';
+    if (sch.type === 'daily')            return '📅';
+    if (sch.type === 'minute')           return '⚡';
+    if (sch.type === 'interval')         return '🔁';
+    if (sch.type === 'interval_minutes') return '🔁';
     return '🔔';
 }
 
@@ -2626,6 +3256,11 @@ function scheduleSpec(sch) {
     if (sch.type === 'hourly')   return `every hour at :${String(sch.minute ?? 0).padStart(2,'0')}`;
     if (sch.type === 'daily')    return `daily at ${String(sch.hour ?? 0).padStart(2,'0')}:${String(sch.minute ?? 0).padStart(2,'0')}`;
     if (sch.type === 'minute')   return `every ${sch.minute ?? 1} min`;
+    if (sch.type === 'interval_minutes') {
+        const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
+        const sm = String(sch.start_minute ?? 0).padStart(2, '0');
+        return `every ${sch.minutes || 30}m — starts ${sh}:${sm}`;
+    }
     if (sch.type === 'interval') {
         const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
         const sm = String(sch.start_minute ?? 0).padStart(2, '0');
@@ -2780,23 +3415,37 @@ async function showSummaryMessages(summaryId) {
 }
 
 // ---------- Received Messages ----------
-async function loadMonitorMessages() {
+const _MSG_PAGE_SIZE = 50;
+let _msgOffset = 0;
+let _msgHasMore = true;
+
+async function loadMonitorMessages(append = false) {
     const el = document.getElementById('mon-messages-content');
-    el.innerHTML = '<p class="mon-empty">Loading…</p>';
-    const data = await api('/api/monitor/messages');
+    if (!append) {
+        _msgOffset = 0;
+        _msgHasMore = true;
+        _allMessages = [];
+        el.innerHTML = '<p class="mon-empty">Loading…</p>';
+    }
+    const scrollY = window.scrollY;
+    const data = await api(`/api/monitor/messages?limit=${_MSG_PAGE_SIZE}&offset=${_msgOffset}`);
     if (data.status !== 'ok') {
-        el.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
+        if (!append) el.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
         return;
     }
-    renderMonMessages(data.messages || []);
+    const newMsgs = data.messages || [];
+    _msgHasMore = newMsgs.length === _MSG_PAGE_SIZE;
+    _allMessages = _allMessages.concat(newMsgs);
+    _msgOffset += newMsgs.length;
+    renderMonMessages();
+    window.scrollTo(0, scrollY);
 }
 
-function renderMonMessages(messages) {
-    _allMessages = messages;
+function renderMonMessages() {
     // Populate dynamic dropdowns
-    const colls    = [...new Set(messages.map(m => m.collection).filter(Boolean))].sort();
-    const channels = [...new Set(messages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
-    const topics   = [...new Set(messages.flatMap(m => (m.topics || '').split(',').map(t => t.trim())).filter(Boolean))].sort();
+    const colls    = [...new Set(_allMessages.map(m => m.collection).filter(Boolean))].sort();
+    const channels = [...new Set(_allMessages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
+    const topics   = [...new Set(_allMessages.flatMap(m => (m.topics || '').split(',').map(t => t.trim())).filter(Boolean))].sort();
     _populateMonSelect('msg-filter-coll',    colls,    'All Collections');
     _populateMonSelect('msg-filter-channel', channels, 'All Channels');
     _populateMonSelect('msg-filter-topic',   topics,   'All Topics');
@@ -2831,7 +3480,7 @@ function applyMonMessageFilters() {
         grouped[c][ch].push(msg);
     }
 
-    el.innerHTML = Object.entries(grouped).map(([collName, channels]) => {
+    let html = Object.entries(grouped).map(([collName, channels]) => {
         const chHtml = Object.entries(channels).map(([chName, msgs]) => {
             const rowsHtml = msgs.map(m => {
                 const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
@@ -2858,6 +3507,16 @@ function applyMonMessageFilters() {
         }).join('');
         return `<div class="mon-coll-hdr">📦 ${escapeHtml(collName)}</div>${chHtml}`;
     }).join('');
+
+    if (_msgHasMore) {
+        html += `<div style="text-align:center;padding:16px;">
+            <button class="btn btn-secondary" onclick="loadMonitorMessages(true)">Load more messages…</button>
+            <span class="text-muted" style="margin-left:8px;font-size:12px;">${_allMessages.length} loaded</span>
+        </div>`;
+    } else if (_allMessages.length > _MSG_PAGE_SIZE) {
+        html += `<p class="text-muted" style="text-align:center;padding:8px;font-size:12px;">All ${_allMessages.length} messages loaded</p>`;
+    }
+    el.innerHTML = html;
 }
 
 // Populate a <select> keeping its first "All …" option and preserving current selection.
@@ -2870,6 +3529,281 @@ function _populateMonSelect(id, values, allLabel) {
     if (values.includes(current)) el.value = current;
 }
 
+// ---------- Unclassified messages ----------
+let _unclInitialized = false;
+let _unclMessages = [];
+let _unclGrouped = false;
+
+function toggleUnclGroupView() {
+    _unclGrouped = !_unclGrouped;
+    const btn = document.getElementById('uncl-group-btn');
+    if (btn) {
+        btn.classList.toggle('btn-primary', _unclGrouped);
+        btn.classList.toggle('btn-secondary', !_unclGrouped);
+    }
+    _renderUnclassified(_unclMessages);
+}
+
+// Stop-words to ignore when extracting common words
+const _unclStopWords = new Set([
+    'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','is','it',
+    'was','are','be','been','has','had','have','do','does','did','will','would','could','should',
+    'may','can','this','that','these','those','not','no','so','if','as','its','he','she','they',
+    'we','you','i','my','your','his','her','our','their','me','him','us','them','what','which',
+    'who','whom','when','where','how','why','all','each','every','both','few','more','most',
+    'other','some','such','than','too','very','just','about','above','after','again','also',
+    'any','because','before','between','during','into','only','over','same','then','through',
+    'under','until','up','while','into','out','new','one','two','said','says','been','being',
+    'get','got','still','back','much','even','well','here','there','now','via','per','المزيد',
+    'من','في','على','إلى','عن','مع','هذا','هذه','التي','الذي','ان','أن','لا','ما','هو','هي',
+    'كان','بين','بعد','قبل','حتى','عند','ذلك','أو','ولا','كل','غير','بل','لم','ثم','إن',
+    'يتم','تم','لن','قد','منذ','خلال','حول','ضد','نحو','عبر','أي','لها','له','لهم','التى',
+    'وفي','وقد','يوم','أنه','تلك','هؤلاء','الى','وهو','أكثر','فيها','فيه','وعلى','ومن'
+]);
+
+function _extractCommonWords(messages, topN = 30) {
+    const freq = {};
+    for (const m of messages) {
+        const text = (m.preview || '').toLowerCase();
+        // Split on non-word chars (supports Arabic + Latin)
+        const words = text.split(/[\s\p{P}\p{S}\d]+/u).filter(w => w.length > 2);
+        const seen = new Set(); // count each word once per message
+        for (const w of words) {
+            if (_unclStopWords.has(w) || w.length > 40) continue;
+            if (!seen.has(w)) {
+                seen.add(w);
+                freq[w] = (freq[w] || 0) + 1;
+            }
+        }
+    }
+    // Only words appearing in 2+ messages
+    return Object.entries(freq)
+        .filter(([, c]) => c >= 2)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, topN);
+}
+
+function _renderUnclassified(messages) {
+    const content = document.getElementById('mon-uncl-content');
+    if (!content) return;
+
+    if (!messages.length) {
+        content.innerHTML = '<p class="mon-empty">No unclassified messages found.</p>';
+        return;
+    }
+
+    if (_unclGrouped) {
+        _renderUnclGroupedByWords(messages, content);
+    } else {
+        _renderUnclByChannel(messages, content);
+    }
+    // Append load-more button
+    if (_unclHasMore) {
+        content.insertAdjacentHTML('beforeend', `<div style="text-align:center;padding:16px;">
+            <button class="btn btn-secondary" onclick="loadUnclassifiedMessages(true)">Load more messages…</button>
+            <span class="text-muted" style="margin-left:8px;font-size:12px;">${_unclMessages.length} loaded</span>
+        </div>`);
+    } else if (_unclMessages.length > _UNCL_PAGE_SIZE) {
+        content.insertAdjacentHTML('beforeend', `<p class="text-muted" style="text-align:center;padding:8px;font-size:12px;">All ${_unclMessages.length} messages loaded</p>`);
+    }
+}
+
+function _renderUnclByChannel(messages, content) {
+    const grouped = {};
+    for (const msg of messages) {
+        const c  = msg.collection_name || '—';
+        const ch = msg.channel_username ? `@${msg.channel_username}` : `id:${msg.channel_id}`;
+        if (!grouped[c])     grouped[c]     = {};
+        if (!grouped[c][ch]) grouped[c][ch] = [];
+        grouped[c][ch].push(msg);
+    }
+
+    content.innerHTML = Object.entries(grouped).map(([collName, channels]) => {
+        const chHtml = Object.entries(channels).map(([chName, msgs]) => {
+            const rowsHtml = msgs.map(m => {
+                const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+                const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '';
+                return `<tr>
+                    <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                    <td>${botTag}</td>
+                    <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+                </tr>`;
+            }).join('');
+            return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
+                <div style="overflow-x:auto;">
+                <table class="mon-table">
+                    <thead><tr><th style="width:140px;">Time</th><th style="width:100px;">Bot</th><th>Message Preview</th></tr></thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table></div>`;
+        }).join('');
+        return `<div class="mon-coll-hdr">📦 ${escapeHtml(collName)}</div>${chHtml}`;
+    }).join('');
+}
+
+function _renderUnclGroupedByWords(messages, content) {
+    const commonWords = _extractCommonWords(messages);
+
+    if (!commonWords.length) {
+        content.innerHTML = '<p class="mon-empty">No common words found across messages.</p>';
+        return;
+    }
+
+    // Assign each message to the first (most frequent) matching word group
+    const wordGroups = {};     // word → [messages]
+    const assigned = new Set(); // track assigned message ids
+
+    for (const [word] of commonWords) {
+        wordGroups[word] = [];
+    }
+
+    for (const m of messages) {
+        const text = (m.preview || '').toLowerCase();
+        for (const [word] of commonWords) {
+            if (text.includes(word)) {
+                wordGroups[word].push(m);
+                assigned.add(m.id);
+                break; // assign to first matching group only
+            }
+        }
+    }
+
+    // Collect unassigned messages
+    const unassigned = messages.filter(m => !assigned.has(m.id));
+
+    // Build HTML
+    let html = '<div class="uncl-word-groups">';
+
+    // Sort groups by count desc, filter out empty
+    const sortedGroups = commonWords
+        .filter(([w]) => wordGroups[w].length > 0)
+        .map(([word, totalFreq]) => [word, wordGroups[word], totalFreq]);
+
+    for (const [word, msgs] of sortedGroups) {
+        const rowsHtml = msgs.map(m => {
+            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ch = m.channel_username ? `@${m.channel_username}` : '';
+            // Highlight the word in preview
+            const preview = escapeHtml(m.preview || '');
+            const highlighted = preview.replace(
+                new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
+                '<mark>$1</mark>'
+            );
+            return `<tr>
+                <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                <td style="white-space:nowrap;font-size:11px;">${escapeHtml(ch)}</td>
+                <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${highlighted}</td>
+            </tr>`;
+        }).join('');
+        html += `<div class="uncl-word-group">
+            <div class="uncl-word-hdr" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+                <span class="uncl-word-label">"${escapeHtml(word)}"</span>
+                <span class="uncl-word-count">${msgs.length} messages</span>
+            </div>
+            <div style="overflow-x:auto;">
+            <table class="mon-table">
+                <thead><tr><th style="width:140px;">Time</th><th style="width:120px;">Channel</th><th>Message Preview</th></tr></thead>
+                <tbody>${rowsHtml}</tbody>
+            </table></div>
+        </div>`;
+    }
+
+    if (unassigned.length) {
+        const rowsHtml = unassigned.map(m => {
+            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ch = m.channel_username ? `@${m.channel_username}` : '';
+            return `<tr>
+                <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                <td style="white-space:nowrap;font-size:11px;">${escapeHtml(ch)}</td>
+                <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+            </tr>`;
+        }).join('');
+        html += `<div class="uncl-word-group">
+            <div class="uncl-word-hdr" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+                <span class="uncl-word-label" style="color:var(--text-muted);">Other (no common word)</span>
+                <span class="uncl-word-count">${unassigned.length} messages</span>
+            </div>
+            <div style="overflow-x:auto;">
+            <table class="mon-table">
+                <thead><tr><th style="width:140px;">Time</th><th style="width:120px;">Channel</th><th>Message Preview</th></tr></thead>
+                <tbody>${rowsHtml}</tbody>
+            </table></div>
+        </div>`;
+    }
+
+    html += '</div>';
+    content.innerHTML = html;
+}
+
+const _UNCL_PAGE_SIZE = 50;
+let _unclOffset = 0;
+let _unclHasMore = true;
+
+async function loadUnclassifiedMessages(append = false) {
+    const content = document.getElementById('mon-uncl-content');
+    if (!append) {
+        _unclOffset = 0;
+        _unclHasMore = true;
+        _unclMessages = [];
+        if (!_unclMessages.length) content.innerHTML = '<p class="mon-empty">Loading…</p>';
+    }
+    const scrollY = window.scrollY;
+
+    const bot  = document.getElementById('uncl-filter-bot')?.value  || '';
+    const coll = document.getElementById('uncl-filter-coll')?.value || '';
+    const search = document.getElementById('uncl-search')?.value?.trim() || '';
+
+    let url = `/api/monitor/unclassified?limit=${_UNCL_PAGE_SIZE}&offset=${_unclOffset}`;
+    if (bot)    url += `&bot=${encodeURIComponent(bot)}`;
+    if (coll)   url += `&collection=${encodeURIComponent(coll)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+
+    const data = await api(url);
+    if (data.status !== 'ok') {
+        if (!append) content.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message || 'Unknown error')}</p>`;
+        return;
+    }
+
+    const newMsgs = data.messages || [];
+    const stats = data.stats || [];
+    _unclHasMore = newMsgs.length === _UNCL_PAGE_SIZE;
+    _unclMessages = _unclMessages.concat(newMsgs);
+    _unclOffset += newMsgs.length;
+
+    // Update badge
+    const totalUncl = stats.reduce((s, r) => s + (r.cnt || 0), 0);
+    const badge = document.getElementById('mon-uncl-badge');
+    if (badge) {
+        badge.textContent = totalUncl;
+        badge.style.display = totalUncl > 0 ? 'inline-block' : 'none';
+    }
+
+    // Populate filter dropdowns (only once)
+    if (!_unclInitialized) {
+        const bots  = [...new Set(stats.map(s => s.bot_name).filter(Boolean))].sort();
+        const colls = [...new Set(stats.map(s => s.collection_name).filter(Boolean))].sort();
+        _populateMonSelect('uncl-filter-bot',  bots,  'All Bots');
+        _populateMonSelect('uncl-filter-coll', colls, 'All Collections');
+        if (bot)  document.getElementById('uncl-filter-bot').value  = bot;
+        if (coll) document.getElementById('uncl-filter-coll').value = coll;
+        _unclInitialized = true;
+    }
+
+    // Render stats summary
+    const statsEl = document.getElementById('mon-uncl-stats');
+    if (statsEl) {
+        if (stats.length) {
+            statsEl.innerHTML = `<div class="mon-uncl-stats-bar">${stats.map(s =>
+                `<span class="yt-filter-tag">${escapeHtml(s.bot_name || '?')} / ${escapeHtml(s.collection_name || '?')}: <strong>${s.cnt}</strong></span>`
+            ).join('')}</div>`;
+        } else {
+            statsEl.innerHTML = '';
+        }
+    }
+
+    _renderUnclassified(_unclMessages);
+    window.scrollTo(0, scrollY);
+}
+
 // ---------- Collapsible sections ----------
 function toggleMonSec(bodyId, iconId) {
     const body = document.getElementById(bodyId);
@@ -2880,14 +3814,9 @@ function toggleMonSec(bodyId, iconId) {
     if (icon) icon.textContent = isHidden ? '▼' : '▶';
 }
 
-// ---------- Auto-refresh ----------
-function toggleMonitorAutoRefresh(enabled) {
-    if (_monitorRefreshInterval) { clearInterval(_monitorRefreshInterval); _monitorRefreshInterval = null; }
-    if (enabled) _monitorRefreshInterval = setInterval(loadMonitorData, 15000);
-}
-
+// ---------- Auto-refresh (always on, seamless) ----------
 document.addEventListener('DOMContentLoaded', () => {
-    toggleMonitorAutoRefresh(true);
+    _monitorRefreshInterval = setInterval(loadMonitorData, 15000);
 });
 
 function escapeHtml(str) {

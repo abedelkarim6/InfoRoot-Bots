@@ -18,7 +18,7 @@ from utils.database import Database, set_db_instance
 from utils.openai_client import OpenAIClient
 from utils.gemini_client import GeminiClient
 from utils.prompts import get_summary_prompt
-from utils.helpers import load_config, load_prompts, setup_logging, categorizer
+from utils.helpers import load_config, setup_logging, categorizer
 
 import datetime
 from apscheduler.triggers.cron import CronTrigger
@@ -77,6 +77,11 @@ client: TelegramClient = None  # Set in main()
 # Avoids username-based matching which breaks for private channels (no username).
 _source_channel_map: dict = {}
 
+_ARABIC_DIGITS = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+
+def _to_arabic_numerals(s: str) -> str:
+    return s.translate(_ARABIC_DIGITS)
+
 
 async def _try_join_channel(ch_identifier: str):
     """
@@ -121,16 +126,17 @@ async def _try_join_channel(ch_identifier: str):
         pass
 
 
-async def build_source_channel_map(cfg):
+async def build_source_channel_map():
     """
-    Resolve every source_channel in the config to its numeric Telegram ID.
+    Resolve every source_channel in the DB collections to its numeric Telegram ID.
     Handles @username, @+invitelink, and plain numeric IDs.
     Auto-joins any channel the userbot is not already a member of.
     Updates the module-level _source_channel_map dict in-place.
     """
     global _source_channel_map
     new_map: dict = {}
-    for coll_name, coll_data in cfg.get('collections', {}).items():
+    collections_cfg = db.get_all_collections()
+    for coll_name, coll_data in collections_cfg.items():
         for ch_identifier in coll_data.get('source_channels', []):
             if not ch_identifier:
                 continue
@@ -142,12 +148,9 @@ async def build_source_channel_map(cfg):
                     new_map[num_id] = []
                 if coll_name not in new_map[num_id]:
                     new_map[num_id].append(coll_name)
-                # logger.info(f"[MAP] {ch_identifier} → id={num_id} → collections={new_map[num_id]}")
             except Exception as e:
-                # logger.warning(f"[MAP] Could not resolve '{ch_identifier}': {e}")
-                pass
+                logger.warning(f"[CHANNEL_MAP] Failed to resolve {ch_identifier}: {e}")
     _source_channel_map = new_map
-    # logger.info(f"[MAP] Source channel map ready: {len(new_map)} channel(s) resolved")
 
 
 async def save_dialogs_to_db():
@@ -173,8 +176,7 @@ async def save_dialogs_to_db():
         db.save_userbot_dialogs(channels)
         # logger.info(f"[DIALOGS] Cached {len(channels)} dialogs to DB")
     except Exception as e:
-        # logger.warning(f"[DIALOGS] Failed to cache dialogs: {e}", exc_info=True)
-        pass
+        logger.warning(f"[DIALOGS] Failed to cache dialogs: {e}")
 
 
 # ==================== Message Handler ====================
@@ -198,16 +200,13 @@ async def read_channel_messages(event):
         text_intro = (event.message.message or event.message.text or '')[:80].replace('\n', ' ')
         # logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
 
-        # Load latest config
-        current_cfg = load_config()
-        collections_cfg = current_cfg.get('collections', {})
-
         # Step 1: Find which collections include this channel as a source.
         # Use the pre-resolved numeric-ID map (handles private channels, invite links, etc.).
         # Fall back to username matching for any channels not yet in the map.
         matching_collections = list(_source_channel_map.get(channel_id_numeric, []))
 
         if not matching_collections and channel_username:
+            collections_cfg = db.get_all_collections()
             for coll_name, coll_data in collections_cfg.items():
                 source_channels = coll_data.get('source_channels', [])
                 if channel_username in source_channels or f'@{channel_username}' in source_channels:
@@ -222,7 +221,7 @@ async def read_channel_messages(event):
             return
 
         # Step 2: Find which bots reference those collections
-        bots_cfg = current_cfg.get('bots', {})
+        bots_cfg = db.get_all_bots_config()
         matching_bots = [
             bname for bname, bcfg in bots_cfg.items()
             if bcfg.get('enabled', True)
@@ -250,7 +249,7 @@ async def read_channel_messages(event):
 
         for bot_name in matching_bots:
             # ── Per-bot rules ────────────────────────────────────────────
-            bot_cfg_rules = current_cfg.get('bots', {}).get(bot_name, {}).get('rules', {}) or {}
+            bot_cfg_rules = bots_cfg.get(bot_name, {}).get('rules', {}) or {}
 
             # Remove rules: skip this bot if any keyword matches
             skipped = False
@@ -313,8 +312,7 @@ async def read_channel_messages(event):
             # logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
 
     except Exception as e:
-        # logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
-        pass
+        logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
 
 
 # ==================== Summary Handler ====================
@@ -334,8 +332,6 @@ async def generate_and_send_summary(job_data):
         return
 
     try:
-        config = load_config()
-
         # Get unsummarized messages for this specific (bot, topic, schedule_type)
         messages = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
 
@@ -351,7 +347,8 @@ async def generate_and_send_summary(job_data):
             return
 
         # Check minimum messages requirement
-        bot_cfg = config.get('bots', {}).get(bot_name, {})
+        bots_cfg = db.get_all_bots_config()
+        bot_cfg = bots_cfg.get(bot_name, {})
         min_messages = bot_cfg.get('minimum_messages', 1)
         if len(topic_messages) < min_messages:
             # logger.info(f"[SKIP]  SKIP | Not enough messages ({len(topic_messages)}/{min_messages}) | Bot: {bot_name} | Topic: {topic_name}")
@@ -363,37 +360,53 @@ async def generate_and_send_summary(job_data):
         texts = [m['text'] for m in topic_messages]
 
         # Generate summary using bot-specific prompt
-        prompt = get_summary_prompt(texts, bot_name, prompt_key)
+        prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
 
         # logger.info(f"[AI] SUMMARY GENERATION | Bot: {bot_name} | Topic: {topic_name} | Prompt: {prompt_key} | Messages: {len(texts)}")
         summary_text = llm_client.generate_summary(prompt)
 
-        # Get target channels from bot's collections
-        bot_collections = bot_cfg.get('collections', [])
-        collections_cfg = config.get('collections', {})
-        target_channels = []
-        for coll_name in bot_collections:
-            if coll_name in collections_cfg:
-                targets = collections_cfg[coll_name].get('target_channels', [])
-                target_channels.extend(targets)
-
-        # Remove duplicates
-        target_channels = list(set(target_channels))
+        # Get target channels: per-schedule override, or fall back to bot's collections
+        schedule_targets = job_data.get('telegram_targets', [])
+        if schedule_targets:
+            target_channels = list(set(schedule_targets))
+        else:
+            bot_collections = bot_cfg.get('collections', [])
+            collections_cfg = db.get_all_collections()
+            target_channels = []
+            for coll_name in bot_collections:
+                if coll_name in collections_cfg:
+                    targets = collections_cfg[coll_name].get('target_channels', [])
+                    target_channels.extend(targets)
+            target_channels = list(set(target_channels))
 
         if not target_channels:
             logger.warning(f"No target channels found for bot {bot_name}")
             return
 
-        # Build message text — use custom header from prompt if defined, else auto-generate
-        prompts_cfg = load_prompts()
-        prompt_val = prompts_cfg.get('bots', {}).get(bot_name, {}).get(prompt_key, {})
-        custom_header = prompt_val.get('header', '').strip() if isinstance(prompt_val, dict) else ''
+        # Build message text — use per-schedule header (defaults to *schedule_name*)
+        header_text = job_data.get('header', '').strip()
+        if header_text:
+            # Optionally append date-time line under the header
+            if job_data.get('header_datetime'):
+                ar_days = ['الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
+                now = datetime.datetime.now()
+                day_name = ar_days[now.weekday()]
+                hour_12 = now.hour % 12 or 12
+                am_pm = 'ص' if now.hour < 12 else 'م'
 
-        if custom_header:
-            message_text = f"{custom_header}\n{'—'*20}\n\n{summary_text}"
-        else:
-            header_text = f"{category_name.upper()} - {topic_name.upper()}" if category_name else topic_name.upper()
+                date_str = f"{now.year}/{now.month:02d}/{now.day:02d}"
+                time_str = f"{hour_12:02d}:{now.minute:02d} {am_pm}"
+
+                if job_data.get('header_date_arabic'):
+                    date_str = _to_arabic_numerals(date_str)
+                if job_data.get('header_time_arabic'):
+                    time_str = _to_arabic_numerals(time_str)
+
+                dt_line = f"{day_name} {date_str}  ؛  {time_str}"
+                header_text = f"{header_text}\n{dt_line}"
             message_text = f"{header_text}\n{'—'*20}\n\n{summary_text}"
+        else:
+            message_text = summary_text
 
         # Send summary to all target channels using the userbot client
         msg_ids = [m['id'] for m in topic_messages]
@@ -411,8 +424,7 @@ async def generate_and_send_summary(job_data):
                     message_ids=msg_ids
                 )
             except Exception as e:
-                # logger.error(f"Failed to send summary to {target_chat}: {e}")
-                pass
+                logger.error(f"Failed to send summary to {target_chat}: {e}")
 
         # Mark messages as summarized for this specific (bot, topic, schedule_type)
         db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
@@ -426,8 +438,7 @@ async def trigger_summary(job_data):
     try:
         await generate_and_send_summary(job_data)
     except Exception as e:
-        # logger.error(f"[ERROR] trigger_summary failed | Bot: {job_data.get('bot_name')} | Topic: {job_data.get('topic_name')} | Error: {e}", exc_info=True)
-        pass
+        logger.error(f"[ERROR] trigger_summary failed | Bot: {job_data.get('bot_name')} | Topic: {job_data.get('topic_name')} | Error: {e}", exc_info=True)
 
 async def schedule_summaries():
     """
@@ -441,8 +452,7 @@ async def schedule_summaries():
         SCHEDULER = AsyncIOScheduler()
         SCHEDULER.start()
 
-    config = load_config()
-    bots_cfg = config.get('bots', {})
+    bots_cfg = db.get_all_bots_config()
 
     if not bots_cfg:
         # logger.warning("No bots configured")
@@ -483,12 +493,20 @@ async def schedule_summaries():
                         # logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
                         continue
 
+                    schedule_header = schedule.get('header', f"*{schedule_name}*")
+                    header_datetime = schedule.get('header_datetime', False)
+
                     job_data = {
                         'schedule_type': schedule_type,
                         'bot_name': bot_name,
                         'topic_name': topic_name,
                         'category_name': category_name,
-                        'prompt_key': prompt_key
+                        'prompt_key': prompt_key,
+                        'header': schedule_header,
+                        'header_datetime': header_datetime,
+                        'header_date_arabic': schedule.get('header_date_arabic', False),
+                        'header_time_arabic': schedule.get('header_time_arabic', False),
+                        'telegram_targets': schedule.get('telegram_targets', []),
                     }
 
                     try:
@@ -498,6 +516,17 @@ async def schedule_summaries():
                         elif schedule_type == "hourly":
                             minute = schedule.get('minute', 0)
                             trigger = CronTrigger(minute=minute)
+                        elif schedule_type == "interval_minutes":
+                            interval_mins = schedule.get('minutes', 30)
+                            start_hour   = schedule.get('start_hour', 0)
+                            start_minute = schedule.get('start_minute', 0)
+                            now = datetime.datetime.now()
+                            start_dt = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                            if start_dt <= now:
+                                start_dt += datetime.timedelta(minutes=interval_mins)
+                                while start_dt <= now:
+                                    start_dt += datetime.timedelta(minutes=interval_mins)
+                            trigger = IntervalTrigger(minutes=interval_mins, start_date=start_dt)
                         elif schedule_type == "interval":
                             interval_hours = schedule.get('hours', 1)
                             start_hour   = schedule.get('start_hour', 0)
@@ -533,27 +562,24 @@ async def schedule_summaries():
                         # logger.info(f"[OK] Scheduled | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_name} ({schedule_type}) | Prompt: {prompt_key}")
 
                     except Exception as e:
-                        # logger.error(f"Failed to schedule {topic_name}/{schedule_name}: {e}", exc_info=True)
-                        pass
+                        logger.error(f"Failed to schedule {topic_name}/{schedule_name}: {e}", exc_info=True)
 
     # logger.info(f"[SCHEDULER] Initialized with {job_count} jobs")
 
 async def scheduler_watcher():
-    last_config = None
+    last_version = None
     while True:
         try:
-            cfg = load_config()
+            current_version = db.get_config_version()
 
-            if cfg != last_config:
+            if current_version != last_version:
                 await schedule_summaries()
-                await build_source_channel_map(cfg)
-                last_config = cfg
+                await build_source_channel_map()
+                last_version = current_version
                 asyncio.create_task(save_dialogs_to_db())
-                # logger.info("Scheduler rebuilt + channel map refreshed — config change detected")
 
-        except Exception:
-            # logger.exception("Failed to reload config during watcher")
-            pass
+        except Exception as e:
+            logger.warning(f"[SCHEDULER_WATCHER] Error: {e}")
 
         await asyncio.sleep(2)
 
@@ -569,9 +595,8 @@ async def main():
     # logger.info("="*60)
 
     # Log configuration
-    cfg = load_config()
-    collections = cfg.get('collections', {})
-    bots = cfg.get('bots', {})
+    collections = db.get_all_collections()
+    bots = db.get_all_bots_config()
 
     # logger.info(f"[CONFIG] COLLECTIONS: {len(collections)} configured")
     # for coll_name, coll_data in collections.items():
@@ -619,7 +644,7 @@ async def main():
         # logger.info("Userbot connected successfully")
 
         # Pre-resolve all source channels to numeric IDs so private channels work
-        await build_source_channel_map(cfg)
+        await build_source_channel_map()
 
         # Cache dialog list in DB so the channel validator UI can read it without
         # opening a second Telegram connection. Awaited directly so the cache is
@@ -636,8 +661,7 @@ async def main():
         # logger.info("Userbot stopped by user")
         pass
     except Exception as e:
-        # logger.error(f"Fatal error: {e}", exc_info=True)
-        pass
+        logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
         db.close()
         if SCHEDULER and SCHEDULER.running:

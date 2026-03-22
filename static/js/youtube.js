@@ -37,6 +37,15 @@ function ytToast(message, type = 'success', duration = 3000) {
 // ==================== Channels Page ====================
 
 async function loadYtChannelsData() {
+    // Load blocked keywords count for the badge
+    api('/api/youtube/blocked-keywords').then(r => {
+        if (r.status === 'ok') {
+            const cnt = (r.keywords || []).length;
+            const el = document.getElementById('yt-bkw-count');
+            if (el) el.textContent = cnt ? `(${cnt})` : '';
+        }
+    });
+
     const container = document.getElementById('yt-channels-container');
     container.innerHTML = '<p class="mon-empty">Loading…</p>';
 
@@ -76,6 +85,21 @@ async function loadYtChannelsData() {
             ? `<div class="yt-ch-detail">📤 ${targets.map(t => `<span class="yt-filter-tag">${escapeHtml(t)}</span>`).join(' ')}</div>`
             : '<div class="yt-ch-detail text-muted">📤 No Telegram targets</div>';
 
+        // Build filter tags
+        const chFilters = [];
+        if (ch.min_duration_seconds) chFilters.push(`Min ${Math.round(ch.min_duration_seconds/60)}min`);
+        if (ch.max_duration_seconds) chFilters.push(`Max ${Math.round(ch.max_duration_seconds/60)}min`);
+        if (ch.min_view_count > 0) chFilters.push(`≥${ch.min_view_count} views`);
+        if (ch.language) chFilters.push(`Lang: ${ch.language}`);
+        if (ch.upload_type) chFilters.push(`Type: ${ch.upload_type}`);
+        const chMustInc = ch.title_must_include || [];
+        const chMustExc = ch.title_must_exclude || [];
+        if (chMustInc.length) chFilters.push(`+${chMustInc.length} title terms`);
+        if (chMustExc.length) chFilters.push(`-${chMustExc.length} excluded`);
+        const filterSummary = chFilters.length
+            ? `<div class="yt-kw-filters">${chFilters.map(f => `<span class="yt-filter-tag">${f}</span>`).join('')}</div>`
+            : '';
+
         html += `
             <div class="yt-channel-card">
                 <div class="yt-ch-header">
@@ -87,6 +111,7 @@ async function loadYtChannelsData() {
                 </div>
                 <div class="yt-ch-detail">${websubBadge}</div>
                 ${tgTarget}
+                ${filterSummary}
                 ${lastVideo}
                 <div class="yt-ch-actions">
                     <label class="toggle-switch">
@@ -120,21 +145,77 @@ function _showYtChannelModal(ch) {
     const isEdit = !!ch;
     const overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
+    const mustIncVal = (ch?.title_must_include || []).join(', ');
+    const mustExcVal = (ch?.title_must_exclude || []).join(', ');
+
     overlay.innerHTML = `
-        <div class="dialog-box" style="max-width:500px;">
+        <div class="dialog-box yt-keyword-modal">
             <div class="dialog-title">${isEdit ? 'Edit' : 'Add'} YouTube Channel</div>
             <div class="yt-kw-form">
                 <div class="yt-kw-form-field">
                     <label class="input-label">Channel ID or URL *</label>
                     <input type="text" class="input" id="yt-ch-id" value="${escapeHtml(ch?.channel_id || '')}" placeholder="UCxxxx or youtube.com/channel/UCxxxx" ${isEdit ? 'readonly style="opacity:0.6"' : ''}>
                 </div>
-                <div class="yt-kw-form-field">
-                    <label class="input-label">Display Name</label>
-                    <input type="text" class="input" id="yt-ch-name" value="${escapeHtml(ch?.channel_name || '')}" placeholder="Channel name">
+                <div class="yt-kw-form-row">
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Display Name</label>
+                        <input type="text" class="input" id="yt-ch-name" value="${escapeHtml(ch?.channel_name || '')}" placeholder="Channel name">
+                    </div>
                 </div>
                 <div class="yt-kw-form-field">
                     <label class="input-label">Telegram Targets <span class="text-muted">(comma-separated: @ch1, @ch2)</span></label>
                     <input type="text" class="input" id="yt-ch-tg-targets" value="${escapeHtml((ch?.telegram_targets || []).join(', '))}" placeholder="@channel1, @channel2">
+                </div>
+                <div class="yt-kw-form-row">
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Min minutes</label>
+                        <input type="number" class="input" id="yt-ch-min-dur" value="${ch?.min_duration_seconds ? Math.round(ch.min_duration_seconds/60) : ''}" placeholder="No min">
+                    </div>
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Max minutes</label>
+                        <input type="number" class="input" id="yt-ch-max-dur" value="${ch?.max_duration_seconds ? Math.round(ch.max_duration_seconds/60) : ''}" placeholder="No max">
+                    </div>
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Min views</label>
+                        <input type="number" class="input" id="yt-ch-min-views" value="${ch?.min_view_count || 0}" min="0">
+                    </div>
+                </div>
+                <div class="yt-kw-form-row">
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Language</label>
+                        <select class="select" id="yt-ch-lang">
+                            <option value="">Any</option>
+                            <option value="en" ${ch?.language==='en'?'selected':''}>English</option>
+                            <option value="ar" ${ch?.language==='ar'?'selected':''}>Arabic</option>
+                            <option value="es" ${ch?.language==='es'?'selected':''}>Spanish</option>
+                            <option value="fr" ${ch?.language==='fr'?'selected':''}>French</option>
+                            <option value="de" ${ch?.language==='de'?'selected':''}>German</option>
+                            <option value="ru" ${ch?.language==='ru'?'selected':''}>Russian</option>
+                            <option value="zh" ${ch?.language==='zh'?'selected':''}>Chinese</option>
+                            <option value="ja" ${ch?.language==='ja'?'selected':''}>Japanese</option>
+                            <option value="ko" ${ch?.language==='ko'?'selected':''}>Korean</option>
+                            <option value="pt" ${ch?.language==='pt'?'selected':''}>Portuguese</option>
+                            <option value="hi" ${ch?.language==='hi'?'selected':''}>Hindi</option>
+                            <option value="tr" ${ch?.language==='tr'?'selected':''}>Turkish</option>
+                        </select>
+                    </div>
+                    <div class="yt-kw-form-field">
+                        <label class="input-label">Upload type</label>
+                        <select class="select" id="yt-ch-upload-type">
+                            <option value="" ${!ch?.upload_type?'selected':''}>Any</option>
+                            <option value="video" ${ch?.upload_type==='video'?'selected':''}>Video</option>
+                            <option value="live" ${ch?.upload_type==='live'?'selected':''}>Live</option>
+                            <option value="completed" ${ch?.upload_type==='completed'?'selected':''}>Completed</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="yt-kw-form-field">
+                    <label class="input-label">Title must include <span class="text-muted">(comma-separated, empty = no requirement)</span></label>
+                    <input type="text" class="input" id="yt-ch-must-include" value="${escapeHtml(mustIncVal)}" placeholder="term1, term2">
+                </div>
+                <div class="yt-kw-form-field">
+                    <label class="input-label">Title must exclude <span class="text-muted">(comma-separated)</span></label>
+                    <input type="text" class="input" id="yt-ch-must-exclude" value="${escapeHtml(mustExcVal)}" placeholder="term1, term2">
                 </div>
                 <div class="yt-kw-form-field">
                     <label class="input-label">Custom Prompt <span class="text-muted">(leave empty for global default)</span></label>
@@ -157,17 +238,26 @@ function _showYtChannelModal(ch) {
 
         if (!channelId) return ytToast('Channel ID is required.', 'error');
 
+        const minDurMin = document.getElementById('yt-ch-min-dur').value;
+        const maxDurMin = document.getElementById('yt-ch-max-dur').value;
+
+        const payload = {
+            channel_id: channelId, channel_name: channelName || null,
+            telegram_targets: tgTargets, prompt: prompt || null,
+            min_duration_seconds: minDurMin ? parseInt(minDurMin) * 60 : null,
+            max_duration_seconds: maxDurMin ? parseInt(maxDurMin) * 60 : null,
+            min_view_count: parseInt(document.getElementById('yt-ch-min-views').value) || 0,
+            language: document.getElementById('yt-ch-lang').value || null,
+            upload_type: document.getElementById('yt-ch-upload-type').value || null,
+            title_must_include: _parseCommaSep(document.getElementById('yt-ch-must-include').value),
+            title_must_exclude: _parseCommaSep(document.getElementById('yt-ch-must-exclude').value),
+        };
+
         let res;
         if (isEdit) {
-            res = await api('/api/youtube/channels/update', {
-                channel_id: channelId, channel_name: channelName || null,
-                telegram_targets: tgTargets, prompt: prompt || null,
-            });
+            res = await api('/api/youtube/channels/update', payload);
         } else {
-            res = await api('/api/youtube/channels/add', {
-                channel_id: channelId, channel_name: channelName || null,
-                telegram_targets: tgTargets, prompt: prompt || null,
-            });
+            res = await api('/api/youtube/channels/add', payload);
         }
         close();
         if (res.status === 'ok') {
@@ -207,9 +297,121 @@ async function ytSubscribeChannel(channelId) {
 }
 
 
+// ==================== Blocked Keywords (Channels page) ====================
+
+function toggleYtBlockedKeywords() {
+    const body = document.getElementById('yt-bkw-body');
+    const arrow = document.getElementById('yt-bkw-arrow');
+    const open = body.style.display === 'none';
+    body.style.display = open ? 'block' : 'none';
+    arrow.style.transform = open ? 'rotate(90deg)' : '';
+    if (open) loadYtBlockedKeywords();
+}
+
+async function loadYtBlockedKeywords() {
+    const list = document.getElementById('yt-bkw-list');
+    const res = await api('/api/youtube/blocked-keywords');
+    if (res.status !== 'ok') return;
+    const keywords = res.keywords || [];
+    document.getElementById('yt-bkw-count').textContent = keywords.length ? `(${keywords.length})` : '';
+    if (!keywords.length) {
+        list.innerHTML = '<p class="text-muted">No blocked keywords.</p>';
+        return;
+    }
+    list.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px;">' + keywords.map(kw => `
+        <span class="yt-filter-tag" style="display:inline-flex;align-items:center;gap:4px;">
+            ${escapeHtml(kw.keyword)}
+            <span style="cursor:pointer;opacity:0.6;font-size:14px;" onclick="ytRemoveBlockedKeyword(${kw.id})" title="Remove">✕</span>
+        </span>
+    `).join('') + '</div>';
+}
+
+async function ytAddBlockedKeyword() {
+    const input = document.getElementById('yt-bkw-input');
+    const keyword = input.value.trim();
+    if (!keyword) return ytToast('Keyword is required.', 'error');
+    const res = await api('/api/youtube/blocked-keywords/add', { keyword });
+    if (res.status === 'ok') {
+        input.value = '';
+        ytToast('Keyword blocked', 'success');
+        loadYtBlockedKeywords();
+    } else {
+        ytToast(res.message || 'Failed', 'error');
+    }
+}
+
+async function ytRemoveBlockedKeyword(id) {
+    await api('/api/youtube/blocked-keywords/delete', { id });
+    ytToast('Keyword unblocked', 'success');
+    loadYtBlockedKeywords();
+}
+
+// ==================== Blocked Channels ====================
+
+function toggleYtBlockedChannels() {
+    const body = document.getElementById('yt-blocked-body');
+    const arrow = document.getElementById('yt-blocked-arrow');
+    const open = body.style.display === 'none';
+    body.style.display = open ? 'block' : 'none';
+    arrow.style.transform = open ? 'rotate(90deg)' : '';
+    if (open) loadYtBlockedChannels();
+}
+
+async function loadYtBlockedChannels() {
+    const list = document.getElementById('yt-blocked-list');
+    const res = await api('/api/youtube/blocked-channels');
+    if (res.status !== 'ok') return;
+    const channels = res.channels || [];
+    document.getElementById('yt-blocked-count').textContent = channels.length ? `(${channels.length})` : '';
+    if (!channels.length) {
+        list.innerHTML = '<p class="text-muted">No blocked channels.</p>';
+        return;
+    }
+    list.innerHTML = channels.map(ch => `
+        <div class="yt-blocked-item" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+            <span style="flex:1;font-family:monospace;font-size:13px;">${escapeHtml(ch.channel_id)}</span>
+            <span style="flex:1;color:var(--text-secondary);">${escapeHtml(ch.channel_name || '')}</span>
+            <span class="text-muted" style="font-size:12px;">${ch.created_at ? timeAgo(ch.created_at) : ''}</span>
+            <button class="btn btn-danger btn-sm" onclick="ytRemoveBlockedChannel('${escapeHtml(ch.channel_id)}')" title="Unblock">✕</button>
+        </div>
+    `).join('');
+}
+
+async function ytAddBlockedChannel() {
+    const chId = document.getElementById('yt-blocked-ch-id').value.trim();
+    const chName = document.getElementById('yt-blocked-ch-name').value.trim();
+    if (!chId) return ytToast('Channel ID is required.', 'error');
+    const res = await api('/api/youtube/blocked-channels/add', { channel_id: chId, channel_name: chName || null });
+    if (res.status === 'ok') {
+        document.getElementById('yt-blocked-ch-id').value = '';
+        document.getElementById('yt-blocked-ch-name').value = '';
+        ytToast('Channel blocked', 'success');
+        loadYtBlockedChannels();
+    } else {
+        ytToast(res.message || 'Failed', 'error');
+    }
+}
+
+async function ytRemoveBlockedChannel(channelId) {
+    showConfirm(`Unblock channel <strong>${escapeHtml(channelId)}</strong>?`, async () => {
+        await api('/api/youtube/blocked-channels/delete', { channel_id: channelId });
+        ytToast('Channel unblocked', 'success');
+        loadYtBlockedChannels();
+    });
+}
+
 // ==================== Keywords Page ====================
 
 async function loadYtKeywordsData() {
+    // Load blocked channel count for the badge
+    api('/api/youtube/blocked-channels').then(r => {
+        if (r.status === 'ok') {
+            const cnt = (r.channels || []).length;
+            const el = document.getElementById('yt-blocked-count');
+            if (el) el.textContent = cnt ? `(${cnt})` : '';
+        }
+    });
+
     const container = document.getElementById('yt-keywords-container');
     container.innerHTML = '<p class="mon-empty">Loading…</p>';
 
@@ -263,6 +465,11 @@ async function loadYtKeywordsData() {
             scheduleInfo = '<div class="yt-ch-detail text-muted" style="margin-top:4px;">⏰ No schedule (manual only)</div>';
         }
 
+        const subKws = kw.sub_keywords || [];
+        const subKwHtml = subKws.length
+            ? `<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${subKws.map(sk => `<span class="yt-filter-tag" style="font-size:12px;">${escapeHtml(sk)}</span>`).join('')}</div>`
+            : '';
+
         html += `
             <div class="yt-keyword-card" data-kw-id="${kw.id}">
                 <div class="yt-kw-header">
@@ -272,6 +479,7 @@ async function loadYtKeywordsData() {
                     <div class="yt-kw-name">"${escapeHtml(kw.keyword)}"</div>
                     <span class="yt-status-badge ${statusClass}">${kw.active ? 'Active' : 'Inactive'}</span>
                 </div>
+                ${subKwHtml}
                 <div class="text-muted" style="font-size:12px;">Window: ${kw.date_window_days} day(s) · Type: ${kw.upload_type || 'video'}</div>
                 ${tgTarget}
                 ${scheduleInfo}
@@ -357,6 +565,7 @@ async function showYtKeywordModal(editId) {
     const blocklistVal = (kw?.channel_blocklist || []).join(', ');
     const mustIncVal = (kw?.title_must_include || []).join(', ');
     const mustExcVal = (kw?.title_must_exclude || []).join(', ');
+    const subKwVal = (kw?.sub_keywords || []).join(', ');
 
     overlay.innerHTML = `
         <div class="dialog-box yt-keyword-modal">
@@ -365,12 +574,16 @@ async function showYtKeywordModal(editId) {
                 <div class="yt-kw-form-row">
                     <div class="yt-kw-form-field">
                         <label class="input-label">Keyword *</label>
-                        <input type="text" class="input" id="ytkw-keyword" value="${escapeHtml(kw?.keyword || '')}" placeholder="Search term">
+                        <input type="text" class="input" id="ytkw-keyword" value="${escapeHtml(kw?.keyword || '')}" placeholder="Main search term">
                     </div>
                     <div class="yt-kw-form-field" style="max-width:100px;">
                         <label class="input-label">Window (days)</label>
                         <input type="number" class="input" id="ytkw-window" value="${kw?.date_window_days || 1}" min="1" max="30">
                     </div>
+                </div>
+                <div class="yt-kw-form-field">
+                    <label class="input-label">Sub-keywords <span class="text-muted">(comma-separated variations — same config, separate searches)</span></label>
+                    <input type="text" class="input" id="ytkw-sub-keywords" value="${escapeHtml(subKwVal)}" placeholder="variation1, variation2, …">
                 </div>
                 <div class="yt-kw-form-field">
                     <label class="input-label">Telegram Targets <span class="text-muted">(comma-separated: @ch1, @ch2)</span></label>
@@ -470,6 +683,7 @@ async function showYtKeywordModal(editId) {
 
         const data = {
             keyword,
+            sub_keywords: _parseCommaSep(document.getElementById('ytkw-sub-keywords').value),
             telegram_targets: _parseCommaSep(document.getElementById('ytkw-tg-targets').value),
             prompt: document.getElementById('ytkw-prompt').value.trim() || null,
             date_window_days: parseInt(document.getElementById('ytkw-window').value) || 1,
@@ -590,6 +804,9 @@ async function ytLoadPrompt() {
     _ytDefaultPrompt = res.default_prompt || '';
     const textarea = document.getElementById('yt-prompt-text');
     if (textarea) textarea.value = res.prompt || res.default_prompt || '';
+    // Load default targets
+    const targetsInput = document.getElementById('yt-default-targets');
+    if (targetsInput) targetsInput.value = (res.default_targets || []).join(', ');
 }
 
 async function ytSavePrompt() {
@@ -604,6 +821,14 @@ function ytResetPrompt() {
     const textarea = document.getElementById('yt-prompt-text');
     if (textarea && _ytDefaultPrompt) textarea.value = _ytDefaultPrompt;
     ytToast('Reset to default prompt', 'info');
+}
+
+async function ytSaveDefaultTargets() {
+    const input = document.getElementById('yt-default-targets');
+    const targets = _parseCommaSep(input ? input.value : '');
+    const res = await api('/api/youtube/default-targets/save', { targets });
+    if (res.status === 'ok') ytToast('Default targets saved', 'success');
+    else ytToast('Failed to save targets.', 'error');
 }
 
 

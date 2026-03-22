@@ -1,35 +1,33 @@
 import logging
 
 from fastapi import APIRouter, Body, Request
-from utils.helpers import load_config, save_config, start_bot_subprocess, stop_bot_subprocess
+from utils.helpers import start_bot_subprocess, stop_bot_subprocess
+from utils.database import get_db
 
 logger = logging.getLogger("system_router")
 router = APIRouter()
 
 @router.get("/system/status")
 def get_system_status(request: Request):
-    """Get system-wide status"""
-    cfg = load_config()
+    db = get_db()
+    full_cfg = db.get_full_config()
     bot_process = getattr(request.app.state, 'bot_process', None)
     bot_running = bot_process is not None and bot_process.poll() is None
     return {
-        "enabled": cfg.get("system", {}).get("enabled", True),
+        "enabled": full_cfg.get("system", {}).get("enabled", True),
         "bot_running": bot_running,
-        "bots_count": len(cfg.get("bots", {})),
-        "collections_count": len(cfg.get("collections", {}))
+        "bots_count": len(full_cfg.get("bots", {})),
+        "collections_count": len(full_cfg.get("collections", {}))
     }
 
 @router.post("/system/toggle")
 def toggle_system(request: Request, enabled: bool = Body(..., embed=True)):
-    """Toggle entire system on/off - also starts/stops the bot process"""
-    cfg = load_config()
-    cfg.setdefault("system", {})["enabled"] = enabled
-    save_config(cfg)
+    db = get_db()
+    db.set_system_enabled(enabled)
 
     bot_lock = request.app.state.bot_lock
 
     if enabled:
-        # Start the bot process
         with bot_lock:
             existing = getattr(request.app.state, 'bot_process', None)
             if existing and existing.poll() is None:
@@ -40,7 +38,6 @@ def toggle_system(request: Request, enabled: bool = Body(..., embed=True)):
         if proc is None:
             return {"status": "error", "enabled": True, "message": "Bot crashed on startup"}
     else:
-        # Stop the bot process
         stop_bot_subprocess(request.app.state, bot_lock)
 
     return {

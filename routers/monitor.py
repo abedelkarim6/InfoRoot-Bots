@@ -1,30 +1,17 @@
 from fastapi import APIRouter, Query
-from utils.helpers import load_config
-from utils.database import Database
+from utils.database import get_db
 
 router = APIRouter()
 
 
-def _get_db():
-    cfg = load_config()
-    return Database(cfg["database"]["dsn"])
-
-
 @router.get("/monitor/data")
 def get_monitor_data():
-    """
-    Returns all data needed by the Monitor page:
-    - Per-bot, per-topic pending message counts (hourly / daily / minute)
-    - Schedule definitions so the frontend can compute next-run countdowns
-    - 100 most recent summaries sent
-    """
-    cfg = load_config()
-    db = _get_db()
+    db = get_db()
     try:
-        pending_counts = db.get_pending_counts()   # {bot -> topic -> {hourly,daily,minute}}
+        pending_counts = db.get_pending_counts()
         recent_summaries = db.get_recent_summaries(limit=100)
 
-        bots_cfg = cfg.get('bots', {})
+        bots_cfg = db.get_all_bots_config()
 
         bots_data = {}
         for bot_name, bot in bots_cfg.items():
@@ -57,14 +44,11 @@ def get_monitor_data():
         }
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-    finally:
-        db.close()
 
 
 @router.get("/monitor/summary-messages")
 def get_summary_messages(id: int = Query(...)):
-    """Return the source messages that were included in a specific summary."""
-    db = _get_db()
+    db = get_db()
     try:
         cursor = db._get_cursor()
         cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
@@ -76,23 +60,19 @@ def get_summary_messages(id: int = Query(...)):
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-    finally:
-        db.close()
 
 
 @router.get("/monitor/messages")
-def get_monitor_messages():
-    """
-    Returns recent messages grouped by collection → channel_username.
-    Adds a 'collection' field to each message based on config lookup.
-    """
-    cfg = load_config()
-    db = _get_db()
+def get_monitor_messages(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    db = get_db()
     try:
-        db.cleanup_uncollected_messages()
-        messages = db.get_recent_messages(limit=200)
+        if offset == 0:
+            db.cleanup_uncollected_messages()
+        messages = db.get_recent_messages(limit=limit, offset=offset)
 
-        # Build channel_id → username from messages that already have a username (fills gaps for old rows)
         id_to_username = {}
         for msg in messages:
             if msg.get('channel_username') and msg.get('channel_id'):
@@ -101,15 +81,14 @@ def get_monitor_messages():
             if not msg.get('channel_username') and msg.get('channel_id'):
                 msg['channel_username'] = id_to_username.get(msg['channel_id'])
 
-        # Build username → collection name map
+        collections_cfg = db.get_all_collections()
         channel_to_collection = {}
-        for coll_name, coll_data in cfg.get('collections', {}).items():
+        for coll_name, coll_data in collections_cfg.items():
             for ch in coll_data.get('source_channels', []):
                 username = ch.lstrip('@').lower()
                 channel_to_collection[username] = coll_name
 
         for msg in messages:
-            # Prefer the stored collection_name (set since v2); fall back to config lookup for old rows
             if msg.get('collection_name'):
                 msg['collection'] = msg['collection_name']
             else:
@@ -119,8 +98,24 @@ def get_monitor_messages():
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-    finally:
-        db.close()
+
+
+@router.get("/monitor/unclassified")
+def get_unclassified_messages(
+    bot: str = Query(default=None),
+    collection: str = Query(default=None),
+    search: str = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    db = get_db()
+    try:
+        messages = db.get_unclassified_messages(
+            limit=limit, offset=offset, bot_name=bot, collection=collection, search=search)
+        stats = db.get_unclassified_stats()
+        return {'status': 'ok', 'messages': messages, 'stats': stats}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
 
 
 @router.get("/dashboard/stats")
@@ -129,12 +124,9 @@ def get_dashboard_stats(
     filter_source: str = Query(default=None),
     filter_topic: str = Query(default=None),
 ):
-    """Return all analytics data needed by the Dashboard page."""
-    db = _get_db()
+    db = get_db()
     try:
         data = db.get_dashboard_stats(days, filter_source=filter_source, filter_topic=filter_topic)
         return {'status': 'ok', **data}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-    finally:
-        db.close()
