@@ -8,6 +8,7 @@ websockets==15.0.1
 youtube-transcript-api
 google-api-python-client
 agno
+psycopg2
 
 annotated-doc==0.0.4
 annotated-types==0.7.0

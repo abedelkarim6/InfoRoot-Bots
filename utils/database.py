@@ -6,10 +6,12 @@ Uses PostgreSQL via psycopg2.
 import json
 import logging
 import re
+from contextlib import contextmanager
 from typing import List
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 logger = logging.getLogger(__name__)
 
@@ -21,29 +23,25 @@ class Database:
              "postgresql://user:password@localhost:5432/botdb"
         """
         self.dsn = dsn
+        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=dsn)
+        # Keep self.connection for backwards compat (commit calls throughout the class)
         self.connection = None
-        self._connect()
         self._create_tables()
 
     def _connect(self):
+        """Fallback: only used if pool is unavailable."""
         self.connection = psycopg2.connect(self.dsn)
         self.connection.autocommit = False
 
     def _get_cursor(self):
-        # Reconnect if connection was lost or in failed transaction state
-        try:
-            self.connection.isolation_level  # ping
-        except Exception:
-            self._connect()
-
-        # Rollback only failed (errored) transactions, not active ones
-        try:
-            status = self.connection.get_transaction_status()
-            if status == psycopg2.extensions.TRANSACTION_STATUS_INERROR:
-                self.connection.rollback()
-        except Exception:
-            pass
-
+        # Get a fresh connection from the pool each time — never holds an idle connection
+        if self.connection is not None:
+            try:
+                self.pool.putconn(self.connection)
+            except Exception:
+                pass
+        self.connection = self.pool.getconn()
+        self.connection.autocommit = False
         return self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     def _create_tables(self):
