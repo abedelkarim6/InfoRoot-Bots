@@ -228,28 +228,49 @@ def logout(request: Request):
 @router.get("/auth/me")
 def me(request: Request):
     token = _get_bearer(request)
-    if not token or not validate_token(token):
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    if not token:
+        return JSONResponse({"error": "Token missing"}, status_code=401)
+
+    if not validate_token(token):
+        return JSONResponse({"error": "Invalid token"}, status_code=401)
+
     user_id = get_token_user_id(token)
+    db = get_db()
+
     if user_id is None:
-        # Legacy token issued before DB migration — treat as admin
-        cfg   = load_config()
-        admin = cfg.get("admin", {})
-        return {"user_id": None, "username": admin.get("username", "admin"), "role": "admin"}
-    db   = get_db()
+        cfg = load_config()
+        admin_username = cfg.get("admin", {}).get("username", "admin")
+        user = db.get_user_by_username(admin_username)
+        if user:
+            user_id = user["id"]
+        else:
+            return {
+                "user_id": None,
+                "username": admin_username,
+                "role": "admin",
+                "has_bot_access": True,
+                "telegram_phone": None,
+                "created_at": None,
+            }
+
     user = db.get_user_by_id(user_id)
     if not user:
         return JSONResponse({"error": "User not found"}, status_code=404)
-    has_bot_access = bool(db.get_user_bot_inheritances(user["id"]) or db.get_owned_bots_config(user["id"]))
+
+    has_bot_access = bool(
+        db.get_user_bot_inheritances(user["id"]) or db.get_owned_bots_config(user["id"])
+    )
+
     return {
-        "user_id":        user["id"],
-        "username":       user["username"],
-        "role":           user["role"],
-        "is_active":      user["is_active"],
-        "youtube_on":     user["youtube_on"],
-        "agents_on":      user["agents_on"],
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": user["role"],
+        "is_active": user["is_active"],
+        "youtube_on": user["youtube_on"],
+        "agents_on": user["agents_on"],
         "telegram_phone": user.get("telegram_phone"),
-        "created_at":     str(user["created_at"]) if user.get("created_at") else None,
+        "telegram_session": user.get("telegram_session"),
+        "created_at": str(user["created_at"]) if user.get("created_at") else None,
         "has_bot_access": has_bot_access,
     }
 
@@ -403,6 +424,35 @@ async def telegram_verify_2fa(req: Telegram2FARequest):
 
 
 # ── Profile: change password ──────────────────────
+
+class UpdateSessionRequest(BaseModel):
+    session_string: str
+    phone: str = ""
+
+
+@router.post("/auth/profile/update-session")
+def update_session(req: UpdateSessionRequest, request: Request):
+    """Directly set a telegram session string for the current user (admin or DB user)."""
+    token   = _get_bearer(request)
+    user_id = get_token_user_id(token) if token else None
+
+    db = get_db()
+
+    if user_id is None:
+        # Legacy config-admin token — resolve via DB
+        from utils.helpers import load_config
+        admin_username = load_config().get("admin", {}).get("username", "")
+        user = db.get_user_by_username(admin_username)
+        if not user:
+            return JSONResponse({"error": "Admin not found in DB."}, status_code=404)
+        user_id = user["id"]
+
+    if not req.session_string.strip():
+        return JSONResponse({"error": "Session string cannot be empty."}, status_code=400)
+
+    db.update_user_telegram(user_id, req.phone.strip() or None, req.session_string.strip())
+    return {"status": "ok"}
+
 
 class ChangePasswordRequest(BaseModel):
     current_password: str

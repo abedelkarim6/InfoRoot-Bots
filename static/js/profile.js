@@ -28,7 +28,7 @@ async function loadProfileData() {
 
 function renderProfilePage(u) {
     const isAdmin     = u.role === 'admin';
-    const hasTelegram = !!u.telegram_phone;
+    const hasTelegram = !!u.telegram_phone || !!u.telegram_session;
     const joinedDate  = u.created_at
         ? new Date(u.created_at).toLocaleDateString()
         : '—';
@@ -80,8 +80,9 @@ function renderProfilePage(u) {
         ? `<div style="display:flex;align-items:center;gap:10px">
              <span style="font-size:22px">✅</span>
              <div>
-               <div style="font-size:14px;font-weight:500">${escapeHtmlSys(u.telegram_phone)}</div>
+               ${u.telegram_phone ? `<div style="font-size:14px;font-weight:500">${escapeHtmlSys(u.telegram_phone)}</div>` : ''}
                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
+               ${u.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${u.telegram_session.substring(0, 40)}…</div>` : ''}
              </div>
            </div>`
         : `<div style="display:flex;align-items:center;gap:10px">
@@ -130,6 +131,31 @@ function renderProfilePage(u) {
         </div>
         <div id="pf-tg-2fa-err" class="pf-err"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- ── Update Session String ── -->
+  <div class="card" style="margin-bottom:20px">
+    <h3 style="font-size:14px;font-weight:600;margin:0 0 14px">🔑 Telegram Session String</h3>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+      Paste a <code>StringSession</code> directly (e.g. from <code>get_ss.py</code>). This replaces the OTP flow and works for all accounts including admin.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
+      <div>
+        <label class="form-label">Phone number (optional)</label>
+        <input id="pf-ss-phone" type="tel" class="input" style="margin-top:4px"
+          placeholder="+1 234 567 8900" value="${escapeHtmlSys(u.telegram_phone || '')}">
+      </div>
+      <div>
+        <label class="form-label">Session string</label>
+        <textarea id="pf-ss-value" class="input" rows="4"
+          style="margin-top:4px;resize:vertical;font-family:monospace;font-size:11px"
+          placeholder="Paste your StringSession here…">${escapeHtmlSys(u.telegram_session || '')}</textarea>
+      </div>
+      <div id="pf-ss-msg" class="pf-err"></div>
+      <button class="btn btn-primary" style="align-self:flex-start" onclick="pfUpdateSession()">
+        Save Session
+      </button>
     </div>
   </div>
 
@@ -281,13 +307,14 @@ function pfTgSuccess() {
         <div>
           <div style="font-size:14px;font-weight:500">${escapeHtmlSys(_tgLinkPhone)}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
+          ${_profileUser?.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${_profileUser.telegram_session.substring(0, 40)}…</div>` : ''}
         </div>
       </div>`;
-
-    // Swap link/re-link button text
-    const relinkBtn = document.querySelector('#pf-tg-status + * .btn, .card .btn-primary, .card .btn-secondary');
-    // Reload to get fresh state
-    loadProfileData();
+    
+    // Clear form
+    document.getElementById('pf-tg-phone').value = '';
+    document.getElementById('pf-tg-code').value = '';
+    document.getElementById('pf-tg-2fa').value = '';
 }
 
 // ── Change password ───────────────────────────────────────────────────────────
@@ -323,6 +350,58 @@ async function pfChangePassword() {
     document.getElementById('pf-pw-current').value = '';
     document.getElementById('pf-pw-new').value     = '';
     document.getElementById('pf-pw-confirm').value = '';
+}
+
+// ── Update session string ─────────────────────────────────────────────────────
+
+async function pfUpdateSession() {
+    const ssVal  = (document.getElementById('pf-ss-value').value || '').trim();
+    const phone  = (document.getElementById('pf-ss-phone').value || '').trim();
+    const msgEl  = document.getElementById('pf-ss-msg');
+    msgEl.style.color = 'var(--danger)';
+    msgEl.textContent = '';
+
+    if (!ssVal) { msgEl.textContent = 'Session string cannot be empty.'; return; }
+
+    const btn = document.querySelector('#pf-ss-msg ~ button');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+    const token = localStorage.getItem('auth_token');
+    const r = await fetch('/api/auth/profile/update-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ session_string: ssVal, phone }),
+    });
+    const data = await r.json();
+    if (btn) { btn.disabled = false; btn.textContent = 'Save Session'; }
+
+    if (data.error) { msgEl.textContent = data.error; return; }
+
+    msgEl.style.color = 'var(--success, #10b981)';
+    msgEl.textContent = 'Session saved successfully!';
+    
+    // Update local user state
+    if (_profileUser) {
+        _profileUser.telegram_session = ssVal;
+        if (phone) _profileUser.telegram_phone = phone;
+        
+        // Update status display without full reload
+        const hasTelegram = !!_profileUser.telegram_phone || !!_profileUser.telegram_session;
+        if (hasTelegram) {
+            document.getElementById('pf-tg-status').innerHTML = `
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:22px">✅</span>
+                <div>
+                  ${_profileUser.telegram_phone ? `<div style="font-size:14px;font-weight:500">${escapeHtmlSys(_profileUser.telegram_phone)}</div>` : ''}
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
+                  ${_profileUser.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${_profileUser.telegram_session.substring(0, 40)}…</div>` : ''}
+                </div>
+              </div>`;
+        }
+    }
+    
+    // Clear form after 2 seconds
+    setTimeout(() => { document.getElementById('pf-ss-value').value = ''; }, 2000);
 }
 
 // ── Injected styles ───────────────────────────────────────────────────────────

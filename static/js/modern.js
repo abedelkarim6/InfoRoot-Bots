@@ -3098,6 +3098,11 @@ async function discardPending(botName, topicName) {
 }
 
 async function loadMonitorData() {
+    // Only load if monitor page is actually active
+    if (document.getElementById('page-monitor')?.classList.contains('active') === false) {
+        return;
+    }
+    
     const container = document.getElementById('monitor-bots-container');
     const isFirstLoad = !_monitorData;
     if (isFirstLoad) container.innerHTML = '<p class="mon-empty">Loading…</p>';

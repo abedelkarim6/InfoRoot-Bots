@@ -47,8 +47,17 @@ db.migrate_config_to_db(_cfg)  # Migrate bots and collections from config.yaml t
 _admin_cfg = _cfg.get("admin", {})
 if _admin_cfg.get("username"):
     try:
-        db.create_admin_user(_admin_cfg["username"], hash_password(_admin_cfg["password"]))
+        _admin_id = db.create_admin_user(_admin_cfg["username"], hash_password(_admin_cfg["password"]))
         logger.info(f"[AUTH] Admin user '{_admin_cfg['username']}' seeded/verified in DB")
+        # Seed telegram session from config if DB row has none yet
+        _tg_cfg = _cfg.get("telegram", {})
+        _ss = _tg_cfg.get("string_session", "")
+        if _ss and _admin_id:
+            _admin_row = db.get_user_by_id(_admin_id)
+            if _admin_row and not _admin_row.get("telegram_session"):
+                _phone = _tg_cfg.get("phone", "") or ""
+                db.update_user_telegram(_admin_id, _phone, _ss)
+                logger.info(f"[AUTH] Admin telegram session seeded from config.yaml")
     except Exception as _e:
         logger.warning(f"[AUTH] Admin seed failed: {_e}")
 
