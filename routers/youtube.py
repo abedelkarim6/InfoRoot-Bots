@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request, Query
 from fastapi.responses import PlainTextResponse
 
 from youtube_monitor.db import get_yt_db
+from routers.auth import is_admin_request, get_request_user_id
 from youtube_monitor.websub import (
     subscribe_channel,
     unsubscribe_channel,
@@ -94,11 +95,20 @@ async def youtube_overview():
 # ── Channels ─────────────────────────────────────────────────────
 
 @router.get("/channels")
-async def list_channels():
-    db = get_yt_db()
-    channels = db.get_channels()
+async def list_channels(request: Request):
+    yt_db = get_yt_db()
+    channels = yt_db.get_channels()
     for ch in channels:
-        ch['last_video'] = db.get_channel_last_video(ch['channel_id'])
+        ch['last_video'] = yt_db.get_channel_last_video(ch['channel_id'])
+
+    if not is_admin_request(request):
+        user_id = get_request_user_id(request)
+        if user_id:
+            from utils.database import get_db
+            inheritances = get_db().get_user_yt_inheritances(user_id)
+            allowed_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'channel'}
+            channels = [ch for ch in channels if ch['id'] in allowed_ids]
+
     return {"status": "ok", "channels": channels}
 
 
@@ -202,8 +212,18 @@ async def toggle_channel(request: Request):
 @router.post("/channels/delete")
 async def delete_channel(request: Request):
     data = await request.json()
+    channel_id = data.get("channel_id")
     db = get_yt_db()
-    db.delete_channel(data.get("channel_id"))
+    # Snapshot channel for recycle bin
+    ch = db.get_channel_by_yt_id(channel_id)
+    if ch:
+        from utils.database import get_db
+        # Convert datetime objects to ISO strings for JSON serialization
+        for k, v in ch.items():
+            if hasattr(v, 'isoformat'):
+                ch[k] = v.isoformat()
+        get_db().recycle_bin_add('yt_channel', ch.get('channel_name') or channel_id, ch)
+    db.delete_channel(channel_id)
     return {"status": "ok"}
 
 
@@ -222,9 +242,19 @@ async def trigger_subscribe(request: Request):
 # ── Keywords ─────────────────────────────────────────────────────
 
 @router.get("/keywords")
-async def list_keywords():
-    db = get_yt_db()
-    return {"status": "ok", "keywords": db.get_keywords()}
+async def list_keywords(request: Request):
+    yt_db = get_yt_db()
+    keywords = yt_db.get_keywords()
+
+    if not is_admin_request(request):
+        user_id = get_request_user_id(request)
+        if user_id:
+            from utils.database import get_db
+            inheritances = get_db().get_user_yt_inheritances(user_id)
+            allowed_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'keyword'}
+            keywords = [kw for kw in keywords if kw['id'] in allowed_ids]
+
+    return {"status": "ok", "keywords": keywords}
 
 
 @router.post("/keywords/add")
@@ -251,8 +281,18 @@ async def update_keyword(request: Request):
 @router.post("/keywords/delete")
 async def delete_keyword(request: Request):
     data = await request.json()
+    kw_id = data.get("id")
     db = get_yt_db()
-    db.delete_keyword(data.get("id"))
+    # Snapshot keyword tracker for recycle bin
+    kw = db.get_keyword_by_id(kw_id)
+    if kw:
+        from utils.database import get_db
+        # Convert datetime objects to ISO strings for JSON serialization
+        for k, v in kw.items():
+            if hasattr(v, 'isoformat'):
+                kw[k] = v.isoformat()
+        get_db().recycle_bin_add('yt_keyword', kw.get('keyword') or f'keyword-{kw_id}', kw)
+    db.delete_keyword(kw_id)
     return {"status": "ok"}
 
 

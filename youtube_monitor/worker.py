@@ -192,6 +192,11 @@ async def process_queue_item(queue_item: dict) -> bool:
     tags = meta.get('tags', [])
     description = meta.get('description', '')
 
+    # Replace placeholders in prompt so users can reference them in output formatting
+    video_link = f"https://www.youtube.com/watch?v={video_id}"
+    prompt = prompt.replace('{link}', video_link)
+    prompt = prompt.replace('{channel_name}', channel_name or 'N/A')
+
     # Apply channel-level duration/view filters (title filters already applied in WebSub)
     if source_channel_id:
         ch_filter = db.get_channel_by_yt_id(source_channel_id)

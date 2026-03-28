@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from routers import bot, telegram, prompts, rules, system, collection, topic, monitor, auth, chatbot
-from routers.auth import validate_token
+from routers import bot, telegram, prompts, rules, system, collection, topic, monitor, auth, chatbot, recycle_bin, accounts
+from routers.auth import validate_token, hash_password, get_request_user_id, is_admin_request
 from utils.database import Database, set_db_instance, get_db
 from utils.helpers import load_config as _load_cfg, start_bot_subprocess, stop_bot_subprocess
 
@@ -42,6 +42,15 @@ db = Database(_cfg["database"]["dsn"])
 set_db_instance(db)
 db.seed_keywords_from_config(_cfg)  # One-time seed; no-op if DB already has keywords
 db.migrate_config_to_db(_cfg)  # Migrate bots and collections from config.yaml to DB
+
+# Seed admin user from config.yaml into the DB (idempotent — safe to run every start)
+_admin_cfg = _cfg.get("admin", {})
+if _admin_cfg.get("username"):
+    try:
+        db.create_admin_user(_admin_cfg["username"], hash_password(_admin_cfg["password"]))
+        logger.info(f"[AUTH] Admin user '{_admin_cfg['username']}' seeded/verified in DB")
+    except Exception as _e:
+        logger.warning(f"[AUTH] Admin seed failed: {_e}")
 
 
 # Initialize YouTube DB (new tables only — never touches existing tables)
@@ -79,7 +88,7 @@ init_worker(
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    _OPEN = {"/login", "/api/auth/login", "/favicon.ico"}
+    _OPEN = {"/login", "/register", "/api/auth/login", "/api/auth/register", "/favicon.ico"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -138,6 +147,14 @@ async def lifespan(app):
     yt_scheduler.add_job(run_cleanup, IntervalTrigger(weeks=1),
                          id='yt_cleanup', replace_existing=True)
 
+    # Recycle bin auto-purge (items older than 5 days)
+    def _purge_recycle_bin():
+        count = db.recycle_bin_purge(days=5)
+        if count:
+            logger.info(f"[RECYCLE] Purged {count} items older than 5 days")
+    yt_scheduler.add_job(_purge_recycle_bin, IntervalTrigger(hours=12),
+                         id='recycle_bin_purge', replace_existing=True)
+
     yt_scheduler.start()
     logger.info("[YT-SCHEDULER] YouTube auto-processing scheduler started")
 
@@ -181,6 +198,8 @@ app.include_router(prompts.router, prefix="/api", tags=["prompts"])
 app.include_router(rules.router, prefix="/api", tags=["rules"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(recycle_bin.router, prefix="/api", tags=["recycle_bin"])
+app.include_router(accounts.router, prefix="/api", tags=["accounts"])
 
 # Agent chatbot
 app.include_router(chatbot.router, prefix="/api", tags=["chatbot"])
@@ -195,11 +214,26 @@ app.include_router(websub_router)
 def login_page():
     return FileResponse("static/login.html")
 
+@app.get("/register")
+def register_page():
+    return FileResponse("static/register.html")
+
 @app.get("/")
 def main_page():
     return FileResponse("static/index.html")
 
 @app.get("/api/config")
-def get_config():
+def get_config(request: Request):
     db = get_db()
-    return db.get_full_config()
+    if is_admin_request(request):
+        return db.get_full_config()
+    # Regular user: return only their inherited bots
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return db.get_full_config()
+    bots = db.get_filtered_bots_config(user_id)
+    return {
+        'system': {'enabled': db.get_system_enabled()},
+        'bots': bots,
+        'collections': db.get_all_collections(),
+    }

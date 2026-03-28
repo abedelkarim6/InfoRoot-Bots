@@ -161,19 +161,22 @@ def stop_bot_subprocess(app_state, bot_lock):
 def categorizer(text, bot_name, db=None):
     """
     Match message text against topics' keywords for a specific bot.
-    Keywords are read from the database when db is provided; falls back
-    to config.yaml otherwise.
+    Uses the database for bot/category/topic structure and keywords when
+    db is provided; falls back to config.yaml otherwise.
 
     Returns: (matched_topics, matched_categories, matched_keywords)
     """
-    config = load_config()
-
     found_topics = []
     found_categories = []
     found_keywords = []
 
-    # Get bot config (still needed for category/topic structure and enabled flags)
-    bots = config.get('bots', {})
+    # Get bot config from DB (primary) or config.yaml (fallback)
+    if db is not None:
+        bots = db.get_all_bots_config()
+    else:
+        config = load_config()
+        bots = config.get('bots', {})
+
     if bot_name not in bots:
         return None, None, None
 
@@ -190,9 +193,9 @@ def categorizer(text, bot_name, db=None):
             if not topic_data.get('enabled', True):
                 continue
 
-            # Keywords source: DB when available, config as fallback
+            # Keywords: from DB-loaded config (already includes keywords), or config.yaml
             if db is not None:
-                keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
+                keywords = topic_data.get('keywords', [])
             else:
                 keywords = topic_data.get('keywords', [])
 

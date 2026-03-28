@@ -3540,3 +3540,96 @@ body {
     .sc-layout { height: auto; }
     .sc-panel { max-width: 100%; min-height: 80vh; }
 }
+
+/* ==================== Recycle Bin ==================== */
+.rb-empty {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-muted);
+}
+.rb-empty-icon {
+    font-size: 48px;
+    margin-bottom: 12px;
+    opacity: 0.5;
+}
+.rb-empty h3 {
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+.rb-group {
+    margin-bottom: 24px;
+}
+.rb-group-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-color);
+}
+.rb-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    margin-bottom: 6px;
+    transition: var(--transition);
+}
+.rb-item:hover {
+    border-color: var(--accent-primary);
+}
+.rb-item-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+.rb-item-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+}
+.rb-item-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.rb-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.rb-item-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.rb-item-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.rb-item-age {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.rb-item-expiry {
+    font-size: 10px;
+    padding: 1px 8px;
+    border-radius: 20px;
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    font-weight: 600;
+}
+.rb-item-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}

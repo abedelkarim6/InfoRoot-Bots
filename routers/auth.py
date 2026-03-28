@@ -1,29 +1,40 @@
 """
-Authentication router — login/logout with in-memory token store.
+Authentication router — login / logout / register with in-memory token store.
 Tokens are 64-char hex strings that expire after 24 hours.
 Failed logins are rate-limited: 5 attempts → 15-minute lockout per IP.
 """
 
+import hashlib
 import hmac
 import time
 import secrets
+from typing import Optional
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import logging
+
 from utils.helpers import load_config
+from utils.database import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 # ── Token store ──────────────────────────────────
 # token -> expiry unix timestamp
 _tokens: dict[str, float] = {}
+# token -> user_id  (None for the admin account)
+_token_users: dict[str, Optional[int]] = {}
 TOKEN_TTL = 86400  # 24 hours
 
 
-def create_token() -> str:
+def create_token(user_id: Optional[int] = None) -> str:
     token = secrets.token_hex(32)
     _tokens[token] = time.time() + TOKEN_TTL
+    _token_users[token] = user_id
     _cleanup_expired()
     return token
 
@@ -36,25 +47,52 @@ def validate_token(token: str) -> bool:
         return False
     if time.time() > expiry:
         _tokens.pop(token, None)
+        _token_users.pop(token, None)
         return False
     return True
 
 
 def revoke_token(token: str):
     _tokens.pop(token, None)
+    _token_users.pop(token, None)
+
+
+def get_token_user_id(token: str) -> Optional[int]:
+    return _token_users.get(token)
 
 
 def _cleanup_expired():
     now = time.time()
     for t in [k for k, v in _tokens.items() if v < now]:
         _tokens.pop(t, None)
+        _token_users.pop(t, None)
+
+
+# ── Password hashing (PBKDF2-HMAC-SHA256, stdlib only) ───────────────────────
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000)
+    return f"pbkdf2:sha256:{salt}:{h.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        parts = stored.split(":")
+        if len(parts) != 4 or parts[0] != "pbkdf2":
+            return False
+        _, _, salt, expected = parts
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000)
+        return hmac.compare_digest(h.hex(), expected)
+    except Exception:
+        return False
 
 
 # ── Rate limiting ────────────────────────────────
 # ip -> {"count": int, "locked_until": float}
 _failed: dict[str, dict] = {}
-MAX_ATTEMPTS   = 5
-LOCKOUT_SECS   = 15 * 60  # 15 minutes
+MAX_ATTEMPTS = 5
+LOCKOUT_SECS = 15 * 60  # 15 minutes
 
 
 def _client_ip(request: Request) -> str:
@@ -62,6 +100,40 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _get_bearer(request: Request) -> Optional[str]:
+    auth = request.headers.get("Authorization", "")
+    return auth[7:] if auth.startswith("Bearer ") else None
+
+
+def get_request_user_id(request: Request) -> Optional[int]:
+    """Return DB user_id for the token, or None for legacy admin / unauthenticated."""
+    token = _get_bearer(request)
+    if not token or not validate_token(token):
+        return None
+    return get_token_user_id(token)
+
+
+def is_admin_request(request: Request) -> bool:
+    """Return True if the request belongs to an admin user (config admin or DB admin)."""
+    token = _get_bearer(request)
+    if not token or not validate_token(token):
+        return False
+    uid = get_token_user_id(token)
+    if uid is None:
+        return True  # legacy config-admin token
+    try:
+        from utils.database import get_db
+        user = get_db().get_user_by_id(uid)
+        return bool(user and user.get("role") == "admin")
+    except Exception:
+        return False
+
+
+# ── Pending Telegram OTP sessions ────────────────
+# phone -> {"client": TelegramClient, "hash": str, "user_id": int, "needs_2fa": bool}
+_pending_tg: dict[str, dict] = {}
 
 
 # ── Endpoints ────────────────────────────────────
@@ -86,15 +158,37 @@ def login(req: LoginRequest, request: Request):
             status_code=429,
         )
 
+    # Check admin account from config
     cfg           = load_config()
     admin         = cfg.get("admin", {})
     expected_user = admin.get("username", "admin")
     expected_pass = admin.get("password", "admin")
 
-    valid = (
+    valid   = (
         hmac.compare_digest(req.username, expected_user) and
         hmac.compare_digest(req.password, expected_pass)
     )
+    user_id: Optional[int] = None
+
+    # If config admin matched, resolve their DB user_id (seeded at startup)
+    if valid:
+        try:
+            db_user = get_db().get_user_by_username(req.username)
+            if db_user:
+                user_id = db_user["id"]
+        except Exception:
+            pass  # fall back to legacy None user_id
+
+    # Check registered users in DB if admin check failed
+    if not valid:
+        try:
+            db      = get_db()
+            db_user = db.get_user_by_username(req.username)
+            if db_user and verify_password(req.password, db_user["password_hash"]):
+                valid   = True
+                user_id = db_user["id"]
+        except Exception:
+            pass
 
     if not valid:
         info["count"] = info.get("count", 0) + 1
@@ -119,13 +213,223 @@ def login(req: LoginRequest, request: Request):
 
     # Success — clear fail record
     _failed.pop(ip, None)
-    token = create_token()
+    token = create_token(user_id=user_id)
     return {"token": token}
 
 
 @router.post("/auth/logout")
 def logout(request: Request):
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        revoke_token(auth[7:])
+    token = _get_bearer(request)
+    if token:
+        revoke_token(token)
     return {"ok": True}
+
+
+@router.get("/auth/me")
+def me(request: Request):
+    token = _get_bearer(request)
+    if not token or not validate_token(token):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    user_id = get_token_user_id(token)
+    if user_id is None:
+        # Legacy token issued before DB migration — treat as admin
+        cfg   = load_config()
+        admin = cfg.get("admin", {})
+        return {"user_id": None, "username": admin.get("username", "admin"), "role": "admin"}
+    db   = get_db()
+    user = db.get_user_by_id(user_id)
+    if not user:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    has_bot_access = bool(db.get_user_bot_inheritances(user["id"]) or db.get_owned_bots_config(user["id"]))
+    return {
+        "user_id":        user["id"],
+        "username":       user["username"],
+        "role":           user["role"],
+        "is_active":      user["is_active"],
+        "youtube_on":     user["youtube_on"],
+        "agents_on":      user["agents_on"],
+        "telegram_phone": user.get("telegram_phone"),
+        "created_at":     str(user["created_at"]) if user.get("created_at") else None,
+        "has_bot_access": has_bot_access,
+    }
+
+
+# ── Registration ─────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/auth/register")
+def register(req: RegisterRequest):
+    username = req.username.strip()
+    if len(username) < 3:
+        return JSONResponse({"error": "Username must be at least 3 characters."}, status_code=400)
+    if len(req.password) < 6:
+        return JSONResponse({"error": "Password must be at least 6 characters."}, status_code=400)
+
+    db = get_db()
+    if db.get_user_by_username(username):
+        return JSONResponse({"error": "Username already taken."}, status_code=409)
+
+    password_hash = hash_password(req.password)
+    user_id = db.create_user(username, password_hash)
+    token   = create_token(user_id=user_id)
+    return {"token": token, "user_id": user_id}
+
+
+# ── Telegram OTP linking ──────────────────────────
+
+class TelegramSendCodeRequest(BaseModel):
+    phone: str
+
+
+@router.post("/auth/telegram/send-code")
+async def telegram_send_code(req: TelegramSendCodeRequest, request: Request):
+    token   = _get_bearer(request)
+    user_id = get_token_user_id(token) if token else None
+    if not user_id:
+        return JSONResponse({"error": "Not authenticated as a registered user."}, status_code=401)
+
+    import re
+    # Normalise to E.164: keep leading + and digits only
+    phone = re.sub(r'[^\d+]', '', req.phone.strip())
+    if not phone.startswith('+'):
+        phone = '+' + phone
+
+    cfg    = load_config()
+    tg_cfg = cfg.get("telegram", {})
+
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(), int(tg_cfg["api_id"]), tg_cfg["api_hash"])
+    await client.connect()
+
+    try:
+        result = await client.send_code_request(phone)
+    except Exception as e:
+        logger.error(f"[TG-REG] send_code_request failed for {phone}: {e}")
+        await client.disconnect()
+        return JSONResponse({"error": f"Failed to send code: {e}"}, status_code=400)
+
+    # Disconnect any previous pending session for this phone
+    old = _pending_tg.get(phone)
+    if old:
+        try:
+            await old["client"].disconnect()
+        except Exception:
+            pass
+
+    _pending_tg[phone] = {
+        "client":   client,
+        "hash":     result.phone_code_hash,
+        "user_id":  user_id,
+        "needs_2fa": False,
+    }
+
+    return {"status": "ok", "message": "Verification code sent to your Telegram app."}
+
+
+class TelegramVerifyCodeRequest(BaseModel):
+    phone: str
+    code: str
+
+
+@router.post("/auth/telegram/verify-code")
+async def telegram_verify_code(req: TelegramVerifyCodeRequest):
+    pending = _pending_tg.get(req.phone)
+    if not pending:
+        return JSONResponse({"error": "No pending verification for this phone. Send a code first."}, status_code=400)
+
+    from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError
+
+    client = pending["client"]
+    try:
+        await client.sign_in(req.phone, req.code, phone_code_hash=pending["hash"])
+
+        session_str = client.session.save()
+        await client.disconnect()
+
+        db = get_db()
+        db.update_user_telegram(pending["user_id"], req.phone, session_str)
+        del _pending_tg[req.phone]
+
+        return {"status": "ok", "message": "Telegram account linked successfully."}
+
+    except SessionPasswordNeededError:
+        pending["needs_2fa"] = True
+        return {"status": "needs_2fa", "message": "Two-factor authentication required."}
+
+    except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+        return JSONResponse({"error": "Invalid or expired code. Please try again."}, status_code=400)
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+class Telegram2FARequest(BaseModel):
+    phone: str
+    password: str
+
+
+@router.post("/auth/telegram/verify-2fa")
+async def telegram_verify_2fa(req: Telegram2FARequest):
+    pending = _pending_tg.get(req.phone)
+    if not pending or not pending.get("needs_2fa"):
+        return JSONResponse({"error": "No pending 2FA verification."}, status_code=400)
+
+    from telethon.errors import PasswordHashInvalidError
+
+    client = pending["client"]
+    try:
+        await client.sign_in(password=req.password)
+
+        session_str = client.session.save()
+        await client.disconnect()
+
+        db = get_db()
+        db.update_user_telegram(pending["user_id"], req.phone, session_str)
+        del _pending_tg[req.phone]
+
+        return {"status": "ok", "message": "Telegram account linked successfully."}
+
+    except PasswordHashInvalidError:
+        return JSONResponse({"error": "Incorrect 2FA password. Please try again."}, status_code=400)
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ── Profile: change password ──────────────────────
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/auth/profile/change-password")
+def change_password(req: ChangePasswordRequest, request: Request):
+    token   = _get_bearer(request)
+    user_id = get_token_user_id(token) if token else None
+    if not user_id:
+        return JSONResponse({"error": "Not available for admin account."}, status_code=400)
+
+    db   = get_db()
+    user = db.get_user_by_id(user_id)
+    if not user:
+        return JSONResponse({"error": "User not found."}, status_code=404)
+
+    if not verify_password(req.current_password, user["password_hash"]):
+        return JSONResponse({"error": "Current password is incorrect."}, status_code=400)
+
+    if len(req.new_password) < 6:
+        return JSONResponse({"error": "New password must be at least 6 characters."}, status_code=400)
+
+    new_hash = hash_password(req.new_password)
+    db._get_cursor().execute(
+        "UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id)
+    )
+    db.connection.commit()
+    return {"status": "ok"}

@@ -366,9 +366,10 @@ async def generate_and_send_summary(job_data):
         summary_text = llm_client.generate_summary(prompt)
 
         # Get target channels: per-schedule override, or fall back to bot's collections
-        schedule_targets = job_data.get('telegram_targets', [])
+        schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
         if schedule_targets:
             target_channels = list(set(schedule_targets))
+            logger.info(f"[TARGETS] Using schedule targets for {bot_name}/{topic_name}: {target_channels}")
         else:
             bot_collections = bot_cfg.get('collections', [])
             collections_cfg = db.get_all_collections()

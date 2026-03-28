@@ -114,6 +114,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     _applyThemeButton(document.documentElement.getAttribute('data-theme') || 'dark');
     initNavigation();
     await loadAllData();
+    // Wait for auth/role check (accounts.js) before showing initial page
+    // so hidden nav sections are gated before the first render.
+    if (typeof authReady !== 'undefined') await authReady;
     const savedPage = localStorage.getItem('activePage') || 'system';
     showPage(savedPage);
 });
@@ -181,6 +184,9 @@ function showPage(pageName) {
     else if (pageName === 'yt-chat') ytChatInit();
     else if (pageName === 'agent-chat') agentChatInit();
     else if (pageName === 'system-chat') sysChatInit();
+    else if (pageName === 'recycle-bin') loadRecycleBinData();
+    else if (pageName === 'accounts') loadAccountsData();
+    else if (pageName === 'profile') loadProfileData();
 }
 
 // ==================== Data Loading ====================
@@ -210,58 +216,73 @@ async function toggleSystem(enabled) {
 }
 
 function updateSystemStatus() {
-    const enabled = globalConfig?.system?.enabled !== false;
+    const enabled  = globalConfig?.system?.enabled !== false;
+    const isAdmin  = !currentUser || currentUser.role === 'admin';
     const statusEl = document.getElementById('system-status');
-    const textEl = document.getElementById('status-text');
+    const textEl   = document.getElementById('status-text');
     const toggleEl = document.getElementById('system-toggle');
     const statusTextEl = document.getElementById('system-status-text');
-    
+
     if (statusEl) {
         statusEl.className = 'status-indicator';
         if (!enabled) statusEl.classList.add('offline');
     }
-    
-    if (textEl) {
-        textEl.textContent = enabled ? 'System Online' : 'System Offline';
-    }
-    
+    if (textEl) textEl.textContent = enabled ? 'System Online' : 'System Offline';
     if (toggleEl) {
-        toggleEl.checked = enabled;
+        toggleEl.checked  = enabled;
+        toggleEl.disabled = !isAdmin;
     }
-    
     if (statusTextEl) {
-        statusTextEl.textContent = enabled ?
-            '✅ System is online. All bots, collections, and YouTube monitors are operational.' :
-            '⛔ System is offline. All bot operations and YouTube processing are suspended.';
+        statusTextEl.textContent = enabled
+            ? '✅ System is online. All bots, collections, and YouTube monitors are operational.'
+            : '⛔ System is offline. All bot operations and YouTube processing are suspended.';
     }
 }
 
 function renderSystemPage() {
     const container = document.getElementById('system-bots-list');
     if (!container) return;
-    
+
+    const isAdmin     = !currentUser || currentUser.role === 'admin';
+    const hasBotAccess = isAdmin || !!currentUser?.has_bot_access;
+    const hasYt        = isAdmin || !!currentUser?.youtube_on;
+
+    // Show/hide admin-only controls
+    const hide = (id, hidden) => { const el = document.getElementById(id); if (el) el.style.display = hidden ? 'none' : ''; };
+    hide('sys-add-bot-btn',          !isAdmin);
+    hide('sys-control-toggle-wrap',  !isAdmin);
+    hide('sys-news-section-title',   !hasBotAccess);
+    hide('sys-yt-section-title',     !hasYt);
+    hide('system-yt-overview',       !hasYt);
+
+    hide('sys-news-stats', !hasBotAccess);
+
     const bots = globalConfig.bots || {};
-    
-    if (Object.keys(bots).length === 0) {
-        container.innerHTML = `
-            <div class="create-bot-card">
+
+    if (!hasBotAccess || Object.keys(bots).length === 0) {
+        container.innerHTML = hasBotAccess
+            ? `<div class="create-bot-card">
                 <h3>No bots configured yet</h3>
                 <p class="text-muted">Create your first bot to get started</p>
-                <button class="btn btn-primary mt-2" onclick="showPage('bots')">
-                    <span>➕</span> Create First Bot
-                </button>
-            </div>
-        `;
+                <button class="btn btn-primary mt-2" onclick="showPage('bots')"><span>➕</span> Create First Bot</button>
+               </div>`
+            : `<div class="card" style="text-align:center;padding:32px 20px">
+                <div style="font-size:32px;margin-bottom:10px">🔒</div>
+                <p class="text-muted">No bots have been shared with your account yet.</p>
+                <p class="text-muted" style="font-size:12px;margin-top:4px">Contact the admin to request access.</p>
+               </div>`;
+        updateSystemStatus();
+        if (hasYt) renderYoutubeOverview();
         return;
     }
-    
+
     container.innerHTML = Object.entries(bots)
         .map(([name, bot]) => createBotDetailCard(name, bot))
         .join('');
 
     updateStats();
     updateSystemStatus();
-    renderYoutubeOverview();
+    if (hasYt) renderYoutubeOverview();
 }
 
 async function renderYoutubeOverview() {
@@ -1523,12 +1544,42 @@ async function toggleBotEnabled(botName, enabled) {
     }
 }
 
-async function renameBot(oldName) {
-    const newName = prompt(`Rename "${oldName}" to:`, oldName);
-    if (!newName || newName === oldName) return;
-    
+function renameBot(oldName) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'rename-bot-modal';
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Rename Bot</h3>
+                <button class="btn-icon" onclick="closeModal('rename-bot-modal')">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">New Bot Name</label>
+                    <input type="text" class="input" id="rename-bot-input" value="${escapeHtml(oldName)}" placeholder="Enter new bot name">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('rename-bot-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="submitRenameBot('${jsAttr(oldName)}')">Rename</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const inp = document.getElementById('rename-bot-input');
+    inp.focus();
+    inp.select();
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') submitRenameBot(oldName); });
+}
+
+async function submitRenameBot(oldName) {
+    const newName = document.getElementById('rename-bot-input').value.trim();
+    if (!newName || newName === oldName) { closeModal('rename-bot-modal'); return; }
+
     const result = await api('/api/bot/rename', { old_name: oldName, new_name: newName });
     if (result.status === 'ok') {
+        closeModal('rename-bot-modal');
         await loadAllData();
         renderBotsPage();
         renderSystemPage();
@@ -1620,7 +1671,7 @@ function openDefaultScheduleModal(botName) {
                     <input type="text" class="input mt-1" id="ds-tg-input"
                            placeholder="@channel or chat ID — press Enter to add"
                            onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('ds');}">
-                    <small class="text-muted">Leave empty to use collection targets.</small>
+                    <small class="text-muted sch-tg-hint" id="ds-tg-hint">Leave empty to use collection targets.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2156,12 +2207,16 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
     if (keywordsToAdd.length === 0) return;
 
     let addedCount = 0;
+    const skipped = [];
     keywordsToAdd.forEach(kw => {
-        if (!topic.keywords.includes(kw)) {
-            topic.keywords.push(kw);
-            addedCount++;
-        }
+        if (topic.keywords.includes(kw)) { skipped.push(kw); return; }
+        topic.keywords.push(kw);
+        addedCount++;
     });
+
+    if (skipped.length > 0) {
+        showNotification(`Skipped ${skipped.length} duplicate(s): ${skipped.join(', ')}`, 'info');
+    }
 
     if (addedCount > 0) {
         const result = await api('/api/topic/update', {
@@ -2333,7 +2388,7 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                     <input type="text" class="input mt-1" id="topic-schedule-tg-input"
                            placeholder="@channel or chat ID — press Enter to add"
                            onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('topic-schedule');}">
-                    <small class="text-muted">Leave empty to use collection targets. Add specific channels to override.</small>
+                    <small class="text-muted sch-tg-hint" id="topic-schedule-tg-hint">Leave empty to use collection targets.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2477,7 +2532,10 @@ async function toggleTopicSchedule(botName, categoryName, topicName, scheduleId,
 async function deleteTopicSchedule(botName, categoryName, topicName, scheduleId) {
     showConfirm('Delete this schedule?', async () => {
         const result = await api('/api/topic/schedule/delete', {
-            schedule_id: scheduleId
+            schedule_id: scheduleId,
+            bot_name: botName,
+            category_name: categoryName,
+            topic_name: topicName
         });
 
         if (result.status === 'ok') {
@@ -2541,13 +2599,34 @@ function addSchTgTarget(prefix) {
     tag.innerHTML = `${escapeHtmlSys(val)}<span class="tag-remove" onclick="removeSchTgTarget('${prefix}', this)">×</span>`;
     container.appendChild(tag);
     input.value = '';
+    _updateSchTgHint(prefix);
 }
 
 function removeSchTgTarget(prefix, el) {
     el.closest('.tag').remove();
+    _updateSchTgHint(prefix);
+}
+
+function _updateSchTgHint(prefix) {
+    const hint = document.getElementById(`${prefix}-tg-hint`);
+    if (!hint) return;
+    const container = document.getElementById(`${prefix}-tg-targets`);
+    const hasTargets = container && container.querySelectorAll('.tag').length > 0;
+    if (hasTargets) {
+        hint.innerHTML = '⚠️ These targets <b>override</b> the collection target channels your bot is subscribed to.';
+        hint.style.color = 'var(--warning)';
+    } else {
+        hint.textContent = 'Leave empty to use collection targets.';
+        hint.style.color = '';
+    }
 }
 
 function getSchTgTargets(prefix) {
+    // Auto-add any text left in the input field (user typed but didn't press Enter)
+    const input = document.getElementById(`${prefix}-tg-input`);
+    if (input && input.value.trim()) {
+        addSchTgTarget(prefix);
+    }
     const container = document.getElementById(`${prefix}-tg-targets`);
     if (!container) return [];
     return [...container.querySelectorAll('.tag')].map(t => t.textContent.replace('×', '').trim()).filter(Boolean);
@@ -2640,7 +2719,7 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
                     <input type="text" class="input mt-1" id="edit-sch-tg-input"
                            placeholder="@channel or chat ID — press Enter to add"
                            onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('edit-sch');}">
-                    <small class="text-muted">Leave empty to use collection targets. Add specific channels to override.</small>
+                    <small class="text-muted sch-tg-hint" id="edit-sch-tg-hint">${(schedule.telegram_targets || []).length ? 'These targets override the collection target channels your bot is subscribed to.' : 'Leave empty to use collection targets.'}</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2902,7 +2981,7 @@ style.textContent = `
 
     /* bot card */
     .mon-bot-card { background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); margin-bottom:14px; overflow:hidden; }
-    .mon-bot-hdr { display:flex; align-items:center; gap:10px; padding:13px 18px; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); font-weight:700; font-size:14px; }
+    .mon-bot-hdr { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:13px 18px; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); font-weight:700; font-size:14px; }
     .mon-bot-dot-on  { font-size:10px; color:var(--success); }
     .mon-bot-dot-off { font-size:10px; color:var(--danger); }
 
@@ -2912,7 +2991,7 @@ style.textContent = `
     /* topic block */
     .mon-topic-block { border-bottom:1px solid var(--border-color); }
     .mon-topic-block:last-child { border-bottom:none; }
-    .mon-topic-title { display:flex; align-items:center; gap:8px; padding:9px 18px 4px; font-weight:600; font-size:13px; color:var(--text-primary); text-transform:capitalize; }
+    .mon-topic-title { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 18px 4px; font-weight:600; font-size:13px; color:var(--text-primary); text-transform:capitalize; }
     .mon-topic-off { opacity:0.45; }
 
     /* schedule row */
@@ -2929,6 +3008,8 @@ style.textContent = `
     .mon-pending { font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; white-space:nowrap; }
     .mon-pending.has  { background:rgba(16,185,129,0.15); color:#34d399; }
     .mon-pending.none { background:rgba(100,116,139,0.12); color:var(--text-muted); }
+    .mon-discard-btn { font-size:11px; padding:2px 8px; height:22px; line-height:18px; border-radius:4px; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; cursor:pointer; white-space:nowrap; }
+    .mon-discard-btn:hover { background:rgba(239,68,68,0.22); border-color:rgba(239,68,68,0.45); color:#fff; }
     .mon-next-label { font-size:10px; color:var(--text-muted); }
     .mon-countdown { font-size:12px; font-weight:700; color:var(--success); min-width:60px; text-align:right; }
     .mon-countdown.urgent { color:var(--warning); }
@@ -2996,6 +3077,25 @@ let _monitorRefreshInterval = null;
 let _monActiveTab = 'schedules';
 let _allSummaries = [];
 let _allMessages  = [];
+
+async function discardPending(botName, topicName) {
+    let msg = 'Discard ALL pending messages across all bots?';
+    if (botName && topicName) msg = `Discard all pending messages for topic "${topicName}" in bot "${botName}"?`;
+    else if (botName)         msg = `Discard all pending messages for bot "${botName}"?`;
+
+    showConfirm(msg, async () => {
+        const body = {};
+        if (botName)   body.bot_name   = botName;
+        if (topicName) body.topic_name = topicName;
+        const r = await api('/api/monitor/discard-pending', body);
+        if (r.status === 'ok') {
+            showAlert(`Discarded ${r.discarded} pending message entries. They will be skipped in the next summary run.`);
+            loadMonitorData();
+        } else {
+            showAlert('Error: ' + (r.message || 'Unknown error'));
+        }
+    }, { confirmLabel: 'Discard', confirmClass: 'btn-danger' });
+}
 
 async function loadMonitorData() {
     const container = document.getElementById('monitor-bots-container');
@@ -3196,22 +3296,43 @@ function applySchFilters() {
         container.innerHTML = Object.entries(grouped).map(([botName, bd]) => {
             const dotCls = bd.enabled ? 'mon-bot-dot-on' : 'mon-bot-dot-off';
             const dotTxt = bd.enabled ? '● ACTIVE' : '● OFF';
+            const botPending = _monSchFlat
+                .filter(r => r.botName === botName)
+                .reduce((s, r) => s + (r.pending || 0), 0);
             const catsHtml = Object.entries(bd.cats).map(([catName, topics]) => {
                 const topicsHtml = Object.entries(topics).map(([topicName, td]) => {
                     const offCls = td.enabled ? '' : ' mon-topic-off';
                     const schRows = td.rows.map(r => renderSchRow(r)).join('');
+                    const topicPending = td.rows.reduce((s, r) => s + (r.pending || 0), 0);
+                    const discardTopicBtn = topicPending > 0
+                        ? `<button class="btn mon-discard-btn"
+                             onclick="discardPending(${escapeHtml(JSON.stringify(botName))}, ${escapeHtml(JSON.stringify(topicName))})"
+                             title="Mark ${topicPending} pending messages as discarded">
+                             🗑 Discard ${topicPending}
+                           </button>`
+                        : '';
                     return `<div class="mon-topic-block">
                         <div class="mon-topic-title${offCls}">
-                            ${escapeHtml(topicName)}
-                            ${!td.enabled ? '<span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}
+                            <span>${escapeHtml(topicName)}${!td.enabled ? ' <span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}</span>
+                            ${discardTopicBtn}
                         </div>
                         ${schRows}
                     </div>`;
                 }).join('');
                 return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
             }).join('');
+            const discardBotBtn = botPending > 0
+                ? `<button class="btn mon-discard-btn"
+                     onclick="discardPending(${escapeHtml(JSON.stringify(botName))})"
+                     title="Discard all ${botPending} pending messages for this bot">
+                     🗑 Discard all (${botPending})
+                   </button>`
+                : '';
             return `<div class="mon-bot-card">
-                <div class="mon-bot-hdr">🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></div>
+                <div class="mon-bot-hdr">
+                    <span>🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></span>
+                    ${discardBotBtn}
+                </div>
                 ${catsHtml}
             </div>`;
         }).join('');
@@ -3825,3 +3946,169 @@ function escapeHtml(str) {
 }
 
 document.head.appendChild(style);
+
+// ==================== Recycle Bin ====================
+
+const _rbTypeIcons = {
+    bot: '🤖', category: '🗂️', topic: '📝', collection: '📦',
+    prompt: '📄', schedule: '⏰', yt_channel: '📺', yt_keyword: '🔍'
+};
+const _rbTypeLabels = {
+    bot: 'Bot', category: 'Category', topic: 'Topic', collection: 'Collection',
+    prompt: 'Prompt', schedule: 'Schedule', yt_channel: 'YouTube Channel', yt_keyword: 'YouTube Tracker'
+};
+
+async function loadRecycleBinData() {
+    const container = document.getElementById('recycle-bin-content');
+    if (!container) return;
+    const result = await api('/api/recycle-bin/list');
+    if (result.status !== 'ok') {
+        container.innerHTML = `<p class="text-muted">Failed to load recycle bin: ${escapeHtmlSys(result.message || 'unknown error')}</p>`;
+        return;
+    }
+    const items = result.items || [];
+    // Update badge
+    const badge = document.getElementById('recycle-bin-count');
+    if (badge) {
+        badge.textContent = items.length;
+        badge.style.display = items.length > 0 ? '' : 'none';
+    }
+    const emptyBtn = document.getElementById('rb-empty-btn');
+    if (emptyBtn) emptyBtn.style.display = items.length > 0 ? '' : 'none';
+
+    if (items.length === 0) {
+        container.innerHTML = `
+            <div class="rb-empty">
+                <div class="rb-empty-icon">🗑️</div>
+                <h3>Recycle Bin is Empty</h3>
+                <p class="text-muted">Deleted items will appear here for 5 days before permanent removal.</p>
+            </div>`;
+        return;
+    }
+
+    // Group by type
+    const grouped = {};
+    items.forEach(item => {
+        const t = item.entity_type;
+        if (!grouped[t]) grouped[t] = [];
+        grouped[t].push(item);
+    });
+
+    let html = '';
+    for (const [type, typeItems] of Object.entries(grouped)) {
+        const icon = _rbTypeIcons[type] || '📎';
+        const label = _rbTypeLabels[type] || type;
+        html += `<div class="rb-group">
+            <h3 class="rb-group-title">${icon} ${label}s (${typeItems.length})</h3>`;
+        typeItems.forEach(item => {
+            const age = _rbTimeAgo(item.deleted_at);
+            const daysLeft = _rbDaysLeft(item.deleted_at);
+            const detail = _rbDetail(item);
+            html += `
+            <div class="rb-item">
+                <div class="rb-item-info">
+                    <span class="rb-item-icon">${icon}</span>
+                    <div class="rb-item-text">
+                        <span class="rb-item-name">${escapeHtmlSys(item.entity_name)}</span>
+                        ${detail ? `<span class="rb-item-detail">${detail}</span>` : ''}
+                    </div>
+                </div>
+                <div class="rb-item-meta">
+                    <span class="rb-item-age" title="Deleted ${escapeHtmlSys(item.deleted_at)}">${age}</span>
+                    <span class="rb-item-expiry">${daysLeft}</span>
+                </div>
+                <div class="rb-item-actions">
+                    <button class="btn btn-primary btn-sm" onclick="restoreRecycleBinItem(${item.id})">Restore</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteRecycleBinItem(${item.id})">Delete</button>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+    }
+    container.innerHTML = html;
+}
+
+function _rbTimeAgo(isoStr) {
+    if (!isoStr) return '';
+    const diff = Date.now() - new Date(isoStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+}
+
+function _rbDaysLeft(isoStr) {
+    if (!isoStr) return '';
+    const deleted = new Date(isoStr).getTime();
+    const expiry = deleted + 5 * 24 * 60 * 60 * 1000;
+    const left = expiry - Date.now();
+    if (left <= 0) return 'Expiring soon';
+    const days = Math.ceil(left / (24 * 60 * 60 * 1000));
+    return `${days}d left`;
+}
+
+function _rbDetail(item) {
+    const d = item.entity_data;
+    if (!d) return '';
+    const type = item.entity_type;
+    if (type === 'bot') {
+        const cats = Object.keys(d.categories || {}).length;
+        return `${cats} categories`;
+    }
+    if (type === 'category') {
+        const topics = Object.keys(d.topics || {}).length;
+        return `${topics} topics`;
+    }
+    if (type === 'topic') {
+        const kws = (d.keywords || []).length;
+        const schs = (d.schedules || []).length;
+        return `${kws} keywords, ${schs} schedules`;
+    }
+    if (type === 'collection') {
+        const src = (d.source_channels || []).length;
+        const tgt = (d.target_channels || []).length;
+        return `${src} sources, ${tgt} targets`;
+    }
+    if (type === 'prompt') return d.bot_name || '';
+    if (type === 'schedule') return `${d.bot_name}/${d.topic_name}`;
+    if (type === 'yt_channel') return d.channel_name || d.channel_id || '';
+    if (type === 'yt_keyword') return d.keyword || '';
+    return '';
+}
+
+async function restoreRecycleBinItem(id) {
+    showConfirm('Restore this item?', async () => {
+        const result = await api('/api/recycle-bin/restore', { id });
+        if (result.status === 'ok') {
+            showNotification('Item restored', 'success');
+            await loadAllData();
+            loadRecycleBinData();
+        } else {
+            showNotification(result.message || 'Restore failed', 'error');
+        }
+    }, { title: 'Restore Item' });
+}
+
+async function deleteRecycleBinItem(id) {
+    showConfirm('Permanently delete this item? This cannot be undone.', async () => {
+        const result = await api('/api/recycle-bin/delete', { id });
+        if (result.status === 'ok') {
+            showNotification('Item permanently deleted', 'success');
+            loadRecycleBinData();
+        } else {
+            showNotification(result.message || 'Delete failed', 'error');
+        }
+    }, { title: 'Permanent Delete' });
+}
+
+async function emptyRecycleBin() {
+    showConfirm('Permanently delete ALL items in the recycle bin? This cannot be undone.', async () => {
+        const result = await api('/api/recycle-bin/empty', {});
+        if (result.status === 'ok') {
+            showNotification(`Recycle bin emptied (${result.deleted} items)`, 'success');
+            loadRecycleBinData();
+        }
+    }, { title: 'Empty Recycle Bin' });
+}

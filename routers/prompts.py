@@ -37,5 +37,12 @@ def delete_prompt(data: dict = Body(...)):
         return {"status": "error", "message": "bot_name is required"}
 
     db = get_db()
+    # Snapshot prompt for recycle bin
+    prompts = db.get_bot_prompts(bot_name)
+    if key in prompts:
+        db.recycle_bin_add('prompt', f"{bot_name}/{key}", {
+            'bot_name': bot_name, 'key': key, 'text': prompts[key].get('text', '')
+        })
+
     db.delete_prompt(bot_name, key)
     return {"status": "ok"}

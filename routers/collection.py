@@ -34,6 +34,12 @@ def delete_collection(data: dict = Body(...)):
         return {"status": "error", "message": "Missing collection_name"}
 
     db = get_db()
+    # Snapshot collection for recycle bin
+    all_colls = db.get_all_collections()
+    coll_data = all_colls.get(collection_name)
+    if coll_data:
+        db.recycle_bin_add('collection', collection_name, {**coll_data, 'name': collection_name})
+
     if db.delete_collection(collection_name):
         return {"status": "ok"}
     return {"status": "error", "message": "Collection not found"}

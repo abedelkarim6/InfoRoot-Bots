@@ -1,17 +1,24 @@
 from fastapi import APIRouter, Query
+from fastapi import Body
+from starlette.requests import Request
 from utils.database import get_db
+from routers.auth import is_admin_request, get_request_user_id
 
 router = APIRouter()
 
 
 @router.get("/monitor/data")
-def get_monitor_data():
+def get_monitor_data(request: Request):
     db = get_db()
     try:
         pending_counts = db.get_pending_counts()
         recent_summaries = db.get_recent_summaries(limit=100)
 
-        bots_cfg = db.get_all_bots_config()
+        if is_admin_request(request):
+            bots_cfg = db.get_all_bots_config()
+        else:
+            user_id = get_request_user_id(request)
+            bots_cfg = db.get_filtered_bots_config(user_id) if user_id else {}
 
         bots_data = {}
         for bot_name, bot in bots_cfg.items():
@@ -118,15 +125,45 @@ def get_unclassified_messages(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.post("/monitor/discard-pending")
+def discard_pending(data: dict = Body(default={})):
+    """Mark pending messages as already summarized so they won't appear in the next run.
+
+    Body (all optional):
+      bot_name   — scope to a specific bot
+      topic_name — scope to a specific topic (requires bot_name)
+    """
+    db         = get_db()
+    bot_name   = data.get('bot_name')   or None
+    topic_name = data.get('topic_name') or None
+    try:
+        count = db.discard_pending(bot_name=bot_name, topic_name=topic_name)
+        return {'status': 'ok', 'discarded': count}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
+    request: Request,
     days: int = Query(default=14, ge=1, le=365),
     filter_source: str = Query(default=None),
     filter_topic: str = Query(default=None),
 ):
     db = get_db()
     try:
-        data = db.get_dashboard_stats(days, filter_source=filter_source, filter_topic=filter_topic)
+        allowed_bots = None
+        if not is_admin_request(request):
+            user_id = get_request_user_id(request)
+            if user_id:
+                inherited = db.get_user_bot_inheritances(user_id)
+                allowed_bots = [i['bot_name'] for i in inherited]
+        data = db.get_dashboard_stats(
+            days,
+            filter_source=filter_source,
+            filter_topic=filter_topic,
+            filter_bot_names=allowed_bots,
+        )
         return {'status': 'ok', **data}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
