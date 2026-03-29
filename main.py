@@ -315,6 +315,84 @@ async def read_channel_messages(event):
         logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
 
 
+# ==================== Schedule Window Helper ====================
+def _compute_window_start(job_data) -> datetime.datetime:
+    """
+    Return the exact previous scheduled fire time so that only messages
+    received after that moment are included in the current summary.
+
+    Uses schedule anchor fields stored in job_data at scheduling time:
+      sch_start_hour, sch_start_minute  – anchor origin for interval schedules
+      sch_hours / sch_minutes           – interval length
+      sch_hour / sch_minute             – target hour/minute for daily/hourly
+    """
+    import math
+
+    schedule_type = job_data.get('schedule_type', '')
+    now = datetime.datetime.now()
+
+    try:
+        if schedule_type == 'interval':
+            # Interval in hours anchored to (start_hour, start_minute)
+            start_h = int(job_data.get('sch_start_hour') or 0)
+            start_m = int(job_data.get('sch_start_minute') or 0)
+            hours   = int(job_data.get('sch_hours') or 1)
+
+            # Build anchor as today's start time; if it's in the future, go back one day
+            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            if anchor > now:
+                anchor -= datetime.timedelta(days=1)
+
+            # How many complete intervals have elapsed since the anchor?
+            elapsed_seconds = (now - anchor).total_seconds()
+            n = math.floor(elapsed_seconds / (hours * 3600))
+            window_start = anchor + datetime.timedelta(hours=n * hours)
+            return window_start
+
+        elif schedule_type == 'interval_minutes':
+            start_h = int(job_data.get('sch_start_hour') or 0)
+            start_m = int(job_data.get('sch_start_minute') or 0)
+            minutes = int(job_data.get('sch_minutes') or 1)
+
+            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            if anchor > now:
+                anchor -= datetime.timedelta(days=1)
+
+            elapsed_seconds = (now - anchor).total_seconds()
+            n = math.floor(elapsed_seconds / (minutes * 60))
+            window_start = anchor + datetime.timedelta(minutes=n * minutes)
+            return window_start
+
+        elif schedule_type == 'hourly':
+            # Every hour at :MM
+            target_m = int(job_data.get('sch_minute') or 0)
+            candidate = now.replace(minute=target_m, second=0, microsecond=0)
+            if candidate > now:
+                candidate -= datetime.timedelta(hours=1)
+            return candidate
+
+        elif schedule_type == 'daily':
+            target_h = int(job_data.get('sch_hour') or 0)
+            target_m = int(job_data.get('sch_minute') or 0)
+            candidate = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
+            if candidate > now:
+                candidate -= datetime.timedelta(days=1)
+            return candidate
+
+        elif schedule_type == 'minute':
+            # Every N minutes — floor current minutes to nearest N
+            n = int(job_data.get('sch_minute') or 1)
+            floored_m = (now.minute // n) * n
+            window_start = now.replace(minute=floored_m, second=0, microsecond=0)
+            return window_start
+
+    except Exception as e:
+        logger.warning(f"[WINDOW] Could not compute window_start for {job_data}: {e}")
+
+    # Fallback: last 24 hours
+    return now - datetime.timedelta(hours=24)
+
+
 # ==================== Summary Handler ====================
 async def generate_and_send_summary(job_data):
     """
@@ -348,10 +426,9 @@ async def generate_and_send_summary(job_data):
 
         # ── Time-window enforcement ──────────────────────────────────────────
         # Only messages received within the schedule's interval window are eligible.
-        # Messages outside the window are permanently marked as 'missed' so they
-        # are never included in a future run (prevents stale backlog being sent).
-        window_secs = job_data.get('window_seconds', 86400)
-        window_start = datetime.datetime.now() - datetime.timedelta(seconds=window_secs)
+        # window_start is anchored to the PREVIOUS scheduled fire time so the window
+        # is always [prev_fire_time, now], not a rolling "last N seconds".
+        window_start = _compute_window_start(job_data)
 
         in_window = []
         expired   = []
@@ -374,7 +451,7 @@ async def generate_and_send_summary(job_data):
             expired_ids = [m['id'] for m in expired]
             db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
             logger.info(f"[MISSED] {len(expired_ids)} messages outside window marked as missed | "
-                        f"Bot: {bot_name} | Topic: {topic_name} | Window: {window_secs}s")
+                        f"Bot: {bot_name} | Topic: {topic_name} | window_start: {window_start}")
 
         topic_messages = in_window
         if not topic_messages:

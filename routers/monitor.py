@@ -30,7 +30,7 @@ def get_monitor_data(request: Request):
                 for topic_name, topic in cat.get('topics', {}).items():
                     topics_data[topic_name] = {
                         'enabled': topic.get('enabled', True),
-                        'pending': bot_pending.get(topic_name, {'hourly': 0, 'daily': 0, 'minute': 0}),
+                        'pending': bot_pending.get(topic_name, {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0}),
                         'schedules': topic.get('schedules', [])
                     }
                 categories_data[cat_name] = {

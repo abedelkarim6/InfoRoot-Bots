@@ -3605,6 +3605,31 @@ function computeNextRun(sch) {
         next.setHours(Math.floor(nextTotalMin / 60), nextTotalMin % 60, 0, 0);
         return next;
     }
+    if (sch.type === 'interval') {
+        // Anchor: today at start_hour:start_minute; find next fire after now
+        const startH = sch.start_hour ?? 0;
+        const startM = sch.start_minute ?? 0;
+        const hours  = sch.hours ?? 1;
+        const anchor = new Date(now);
+        anchor.setHours(startH, startM, 0, 0);
+        if (anchor > now) anchor.setDate(anchor.getDate() - 1);
+        const elapsed = (now - anchor) / 3600000; // hours
+        const n = Math.floor(elapsed / hours);
+        const next = new Date(anchor.getTime() + (n + 1) * hours * 3600000);
+        return next;
+    }
+    if (sch.type === 'interval_minutes') {
+        const startH   = sch.start_hour ?? 0;
+        const startM   = sch.start_minute ?? 0;
+        const minutes  = sch.minutes ?? 30;
+        const anchor   = new Date(now);
+        anchor.setHours(startH, startM, 0, 0);
+        if (anchor > now) anchor.setDate(anchor.getDate() - 1);
+        const elapsed = (now - anchor) / 60000; // minutes
+        const n = Math.floor(elapsed / minutes);
+        const next = new Date(anchor.getTime() + (n + 1) * minutes * 60000);
+        return next;
+    }
     return null;
 }
 

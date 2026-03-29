@@ -684,8 +684,8 @@ class Database:
 
             for topic in topics:
                 if topic not in counts[bn]:
-                    counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0}
-                for stype in ('hourly', 'daily', 'minute'):
+                    counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0}
+                for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes'):
                     if (row['id'], bn, topic, stype) not in done:
                         counts[bn][topic][stype] += 1
 
