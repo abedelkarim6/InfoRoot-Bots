@@ -456,10 +456,10 @@ def update_session(req: UpdateSessionRequest, request: Request):
     db = get_db()
 
     if user_id is None:
-        # Legacy config-admin token — resolve via DB
+        # Legacy config-admin token — resolve via DB (username match, fallback to role=admin)
         from utils.helpers import load_config
         admin_username = load_config().get("admin", {}).get("username", "")
-        user = db.get_user_by_username(admin_username)
+        user = db.get_user_by_username(admin_username) or db.get_admin_user()
         if not user:
             return JSONResponse({"error": "Admin not found in DB."}, status_code=404)
         user_id = user["id"]
