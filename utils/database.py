@@ -131,9 +131,15 @@ class Database:
                 topic_name TEXT NOT NULL,
                 schedule_type TEXT NOT NULL,
                 summarized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'summarized',
                 PRIMARY KEY (message_id, bot_name, topic_name, schedule_type)
             )
         """)
+        # Migrate: add status column if missing
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'message_summarizations'")
+        ms_cols = [r['column_name'] for r in cursor.fetchall()]
+        if ms_cols and 'status' not in ms_cols:
+            cursor.execute("ALTER TABLE message_summarizations ADD COLUMN status TEXT DEFAULT 'summarized'")
 
         # Safe column migrations using information_schema
         cursor.execute("""
@@ -269,8 +275,6 @@ class Database:
         bot_cols = [r['column_name'] for r in cursor.fetchall()]
         if bot_cols and 'default_schedules' not in bot_cols:
             cursor.execute("ALTER TABLE bots ADD COLUMN default_schedules JSONB DEFAULT '[]'")
-        if bot_cols and 'owner_id' not in bot_cols:
-            cursor.execute("ALTER TABLE bots ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS prompts (
@@ -342,6 +346,12 @@ class Database:
             cursor.execute("ALTER TABLE users ADD COLUMN agents_on BOOLEAN DEFAULT FALSE")
         if 'agents_limit' not in user_cols:
             cursor.execute("ALTER TABLE users ADD COLUMN agents_limit JSONB DEFAULT NULL")
+
+        # Migrate bots.owner_id — must run after users table exists
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'bots'")
+        bot_cols2 = [r['column_name'] for r in cursor.fetchall()]
+        if bot_cols2 and 'owner_id' not in bot_cols2:
+            cursor.execute("ALTER TABLE bots ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
 
         # Per-user bot inheritance configuration
         cursor.execute("""
@@ -608,20 +618,25 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def mark_as_summarized(self, message_ids: List[int], schedule_type: str,
-                           bot_name: str, topic_name: str):
-        """Mark messages as summarized for a specific (bot, topic, schedule_type)."""
+                           bot_name: str, topic_name: str, status: str = 'summarized'):
+        """Mark messages for a specific (bot, topic, schedule_type) with the given status."""
         if not message_ids:
             return
-
         cursor = self._get_cursor()
         for mid in message_ids:
             cursor.execute(
-                """INSERT INTO message_summarizations (message_id, bot_name, topic_name, schedule_type)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT DO NOTHING""",
-                (mid, bot_name, topic_name, schedule_type)
+                """INSERT INTO message_summarizations
+                       (message_id, bot_name, topic_name, schedule_type, status)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO NOTHING""",
+                (mid, bot_name, topic_name, schedule_type, status)
             )
         self.connection.commit()
+
+    def mark_as_missed(self, message_ids: List[int], schedule_type: str,
+                       bot_name: str, topic_name: str):
+        """Mark messages as missed (outside schedule window) so they are never re-processed."""
+        self.mark_as_summarized(message_ids, schedule_type, bot_name, topic_name, status='missed')
 
     def save_summary(self, summary_text: str, message_count: int,
                      summary_type: str, target_entity: str,
@@ -676,52 +691,6 @@ class Database:
 
         return counts
 
-    def discard_pending(self, bot_name: str = None, topic_name: str = None) -> int:
-        """Mark pending messages as already summarized so they are skipped in the next run.
-
-        Scope:
-          bot_name + topic_name  → discard for that specific topic only
-          bot_name only          → discard all topics under that bot
-          neither                → discard everything (all bots / all topics)
-
-        Returns the number of (message, topic, schedule_type) rows inserted.
-        """
-        cursor = self._get_cursor()
-
-        # Build the WHERE clause to find matching messages
-        clauses = ["m.bot_name IS NOT NULL", "m.topics IS NOT NULL", "m.topics != ''"]
-        params  = []
-        if bot_name:
-            clauses.append("m.bot_name = %s")
-            params.append(bot_name)
-        cursor.execute(
-            f"SELECT m.id, m.bot_name, m.topics FROM messages m WHERE {' AND '.join(clauses)}",
-            params
-        )
-        msg_rows = cursor.fetchall()
-
-        cursor.execute("SELECT message_id, bot_name, topic_name, schedule_type FROM message_summarizations")
-        done = set()
-        for r in cursor.fetchall():
-            done.add((r['message_id'], r['bot_name'], r['topic_name'], r['schedule_type']))
-
-        inserted = 0
-        for row in msg_rows:
-            mid = row['id']
-            bn  = row['bot_name']
-            for t in [t.strip() for t in (row['topics'] or '').split(',') if t.strip()]:
-                if topic_name and t != topic_name:
-                    continue
-                for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes'):
-                    if (mid, bn, t, stype) not in done:
-                        cursor.execute(
-                            "INSERT INTO message_summarizations (message_id, bot_name, topic_name, schedule_type) "
-                            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                            (mid, bn, t, stype)
-                        )
-                        inserted += 1
-        self.connection.commit()
-        return inserted
 
     def get_recent_summaries(self, limit: int = 100):
         """Returns recent summaries ordered newest first."""
@@ -857,26 +826,28 @@ class Database:
         # Build optional filter clauses
         src_clause   = " AND channel_username = %s" if filter_source else ""
         topic_clause = " AND TRIM(t.topic) = %s"    if filter_topic  else ""
-        bot_clause   = " AND bot_name = ANY(%s)"    if filter_bot_names else ""
+        bot_clause   = " AND bot_name = ANY(%s)"    if filter_bot_names is not None else ""
 
         def p(*base):
-            """Append filter params to a base param tuple."""
+            """Append filter params (source, topic, bot_names) for messages queries."""
             extra = []
-            if filter_source: extra.append(filter_source)
-            if filter_topic:  extra.append(filter_topic)
+            if filter_source:    extra.append(filter_source)
+            if filter_topic:     extra.append(filter_topic)
+            if filter_bot_names is not None: extra.append(filter_bot_names)
             return tuple(base) + tuple(extra)
 
         def p_sum(*base):
-            """Append filter params including bot_names for summaries queries."""
+            """Append filter params (bot_names) for summaries queries."""
             extra = []
-            if filter_bot_names: extra.append(filter_bot_names)
+            if filter_bot_names is not None: extra.append(filter_bot_names)
             return tuple(base) + tuple(extra)
 
         # Helper for queries that join on the topics lateral (need topic filter inline)
         def p_topic(*base):
             extra = []
-            if filter_source: extra.append(filter_source)
-            if filter_topic:  extra.append(filter_topic)
+            if filter_source:    extra.append(filter_source)
+            if filter_topic:     extra.append(filter_topic)
+            if filter_bot_names is not None: extra.append(filter_bot_names)
             return tuple(base) + tuple(extra)
 
         # --- Dropdown population: always return full unfiltered lists ---
@@ -900,10 +871,10 @@ class Database:
         all_topics = [r['topic'] for r in cursor.fetchall()]
 
         # 1. Totals
-        cursor.execute("SELECT COUNT(*) AS cnt FROM messages")
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE 1=1{bot_clause}", p_sum())
         total_messages = cursor.fetchone()['cnt']
 
-        cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}",
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}{bot_clause}",
                        p(days))
         period_messages = cursor.fetchone()['cnt']
 
@@ -913,7 +884,7 @@ class Database:
         cursor.execute(f"""
             SELECT COUNT(DISTINCT channel_username) AS cnt FROM messages
             WHERE channel_username IS NOT NULL AND channel_username != ''
-              AND timestamp >= NOW() - {iv}{src_clause}
+              AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
         """, p(days))
         active_sources = cursor.fetchone()['cnt']
 
@@ -924,13 +895,13 @@ class Database:
                 FROM messages,
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE topics IS NOT NULL AND topics != ''
-                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
+                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
                 GROUP BY day ORDER BY day
             """, p_topic(days))
         else:
             cursor.execute(f"""
                 SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
-                FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}
+                FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}{bot_clause}
                 GROUP BY day ORDER BY day
             """, p(days))
         messages_per_day = [{'day': str(r['day']), 'count': r['cnt']} for r in cursor.fetchall()]
@@ -941,7 +912,7 @@ class Database:
             FROM messages,
                  LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
             WHERE topics IS NOT NULL AND topics != ''
-              AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
+              AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
             GROUP BY topic ORDER BY cnt DESC LIMIT 20
         """, p_topic(days))
         messages_per_topic = [{'topic': r['topic'], 'count': r['cnt']} for r in cursor.fetchall()]
@@ -949,14 +920,16 @@ class Database:
         # 4. Topic trend — top 6 only
         top6 = [r['topic'] for r in messages_per_topic[:6]]
         if top6:
+            extra_trend = ((filter_source,) if filter_source else ()) + \
+                          ((filter_bot_names,) if filter_bot_names is not None else ())
             cursor.execute(f"""
                 SELECT DATE(timestamp) AS day, TRIM(t.topic) AS topic, COUNT(*) AS cnt
                 FROM messages,
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE topics IS NOT NULL AND topics != ''
-                  AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}{src_clause}
+                  AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
                 GROUP BY day, topic ORDER BY day, topic
-            """, (top6, days) + ((filter_source,) if filter_source else ()))
+            """, (top6, days) + extra_trend)
             topic_trend = [{'day': str(r['day']), 'topic': r['topic'], 'count': r['cnt']}
                            for r in cursor.fetchall()]
         else:
@@ -970,7 +943,7 @@ class Database:
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE channel_username IS NOT NULL AND channel_username != ''
                   AND topics IS NOT NULL AND topics != ''
-                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}
+                  AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
                 GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
             """, p_topic(days))
         else:
@@ -978,7 +951,7 @@ class Database:
                 SELECT channel_username AS source, COUNT(*) AS cnt
                 FROM messages
                 WHERE channel_username IS NOT NULL AND channel_username != ''
-                  AND timestamp >= NOW() - {iv}{src_clause}
+                  AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
                 GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
             """, p(days))
         messages_per_source = [{'source': r['source'], 'count': r['cnt']} for r in cursor.fetchall()]
@@ -987,6 +960,7 @@ class Database:
         top_sources = [r['source'] for r in messages_per_source[:15]]
         top_topics  = [r['topic']  for r in messages_per_topic[:10]]
         if top_sources and top_topics:
+            matrix_extra = ((filter_bot_names,) if filter_bot_names is not None else ())
             cursor.execute(f"""
                 SELECT channel_username AS source, TRIM(t.topic) AS topic, COUNT(*) AS cnt
                 FROM messages,
@@ -994,9 +968,9 @@ class Database:
                 WHERE channel_username IS NOT NULL AND channel_username != ''
                   AND topics IS NOT NULL AND topics != ''
                   AND channel_username = ANY(%s) AND TRIM(t.topic) = ANY(%s)
-                  AND timestamp >= NOW() - {iv}
+                  AND timestamp >= NOW() - {iv}{bot_clause}
                 GROUP BY source, topic ORDER BY source, cnt DESC
-            """, (top_sources, top_topics, days))
+            """, (top_sources, top_topics, days) + matrix_extra)
             source_topic = [{'source': r['source'], 'topic': r['topic'], 'count': r['cnt']}
                             for r in cursor.fetchall()]
         else:
@@ -1738,6 +1712,38 @@ class Database:
             self._bump_config_version()
         self.connection.commit()
         return deleted
+
+    def rename_topic(self, bot_name: str, category_name: str, old_name: str, new_name: str) -> bool:
+        cat_id = self._get_category_id(bot_name, category_name)
+        if not cat_id:
+            return False
+        cursor = self._get_cursor()
+        cursor.execute("UPDATE topics SET name = %s WHERE category_id = %s AND name = %s",
+                       (new_name, cat_id, old_name))
+        updated = cursor.rowcount > 0
+        if updated:
+            self._bump_config_version()
+        self.connection.commit()
+        return updated
+
+    def rename_prompt_key_in_schedules(self, bot_name: str, old_key: str, new_key: str) -> int:
+        """Update prompt_key in all schedules of a bot when a prompt is renamed."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            UPDATE schedules SET prompt_key = %s
+            WHERE prompt_key = %s
+              AND topic_id IN (
+                  SELECT s.id FROM topics s
+                  JOIN categories c ON s.category_id = c.id
+                  JOIN bots b ON c.bot_id = b.id
+                  WHERE b.name = %s
+              )
+        """, (new_key, old_key, bot_name))
+        count = cursor.rowcount
+        if count > 0:
+            self._bump_config_version()
+        self.connection.commit()
+        return count
 
     def toggle_topic(self, bot_name: str, category_name: str, topic_name: str, enabled: bool) -> bool:
         cat_id = self._get_category_id(bot_name, category_name)

@@ -92,6 +92,23 @@ def add_topic(request: Request, data: dict = Body(...)):
         return {"status": "ok", "topic_name": topic_name}
     return {"status": "error", "message": "Topic already exists or category not found"}
 
+@router.post("/topic/rename")
+def rename_topic(request: Request, data: dict = Body(...)):
+    bot_name      = data.get('bot_name')
+    category_name = data.get('category_name')
+    old_name      = (data.get('old_name') or '').strip()
+    new_name      = (data.get('new_name') or '').strip()
+
+    if not bot_name or not category_name or not old_name or not new_name:
+        return {"status": "error", "message": "Missing required fields"}
+    if not _can_modify_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+    db = get_db()
+    if db.rename_topic(bot_name, category_name, old_name, new_name):
+        return {"status": "ok"}
+    return {"status": "error", "message": "Topic not found or name already taken"}
+
 @router.post("/topic/delete")
 def delete_topic(request: Request, data: dict = Body(...)):
     bot_name = data.get('bot_name')

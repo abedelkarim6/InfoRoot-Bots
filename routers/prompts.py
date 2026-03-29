@@ -28,6 +28,20 @@ def update_prompt(data: dict = Body(...)):
     db.save_prompt(bot_name, key, text)
     return {"status": "ok", "key": key, "bot_name": bot_name}
 
+@router.post("/prompts/rename-cascade")
+def rename_prompt_cascade(data: dict = Body(...)):
+    """Update prompt_key in all schedules of the bot after a prompt is renamed."""
+    bot_name = data.get("bot_name")
+    old_key  = (data.get("old_key") or "").strip()
+    new_key  = (data.get("new_key") or "").strip()
+
+    if not bot_name or not old_key or not new_key:
+        return {"status": "error", "message": "bot_name, old_key and new_key are required"}
+
+    db = get_db()
+    count = db.rename_prompt_key_in_schedules(bot_name, old_key, new_key)
+    return {"status": "ok", "updated_schedules": count}
+
 @router.post("/prompts/delete")
 def delete_prompt(data: dict = Body(...)):
     bot_name = data.get("bot_name")

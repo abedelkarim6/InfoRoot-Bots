@@ -346,6 +346,40 @@ async def generate_and_send_summary(job_data):
         if not topic_messages:
             return
 
+        # ── Time-window enforcement ──────────────────────────────────────────
+        # Only messages received within the schedule's interval window are eligible.
+        # Messages outside the window are permanently marked as 'missed' so they
+        # are never included in a future run (prevents stale backlog being sent).
+        window_secs = job_data.get('window_seconds', 86400)
+        window_start = datetime.datetime.now() - datetime.timedelta(seconds=window_secs)
+
+        in_window = []
+        expired   = []
+        for msg in topic_messages:
+            ts = msg.get('timestamp')
+            if ts:
+                # timestamp may be a string (ISO) or datetime object
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.datetime.fromisoformat(ts)
+                    except ValueError:
+                        ts = None
+                if ts and ts < window_start:
+                    expired.append(msg)
+                    continue
+            in_window.append(msg)
+
+        # Permanently mark expired messages so they are never reconsidered
+        if expired:
+            expired_ids = [m['id'] for m in expired]
+            db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
+            logger.info(f"[MISSED] {len(expired_ids)} messages outside window marked as missed | "
+                        f"Bot: {bot_name} | Topic: {topic_name} | Window: {window_secs}s")
+
+        topic_messages = in_window
+        if not topic_messages:
+            return
+
         # Check minimum messages requirement
         bots_cfg = db.get_all_bots_config()
         bot_cfg = bots_cfg.get(bot_name, {})
@@ -508,6 +542,13 @@ async def schedule_summaries():
                         'header_date_arabic': schedule.get('header_date_arabic', False),
                         'header_time_arabic': schedule.get('header_time_arabic', False),
                         'telegram_targets': schedule.get('telegram_targets', []),
+                        # Schedule anchor fields — used to compute exact previous fire time at runtime
+                        'sch_minute':       schedule.get('minute'),
+                        'sch_hour':         schedule.get('hour'),
+                        'sch_hours':        schedule.get('hours'),
+                        'sch_minutes':      schedule.get('minutes'),
+                        'sch_start_hour':   schedule.get('start_hour', 0),
+                        'sch_start_minute': schedule.get('start_minute', 0),
                     }
 
                     try:

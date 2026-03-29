@@ -125,23 +125,6 @@ def get_unclassified_messages(
         return {'status': 'error', 'message': str(e)}
 
 
-@router.post("/monitor/discard-pending")
-def discard_pending(data: dict = Body(default={})):
-    """Mark pending messages as already summarized so they won't appear in the next run.
-
-    Body (all optional):
-      bot_name   — scope to a specific bot
-      topic_name — scope to a specific topic (requires bot_name)
-    """
-    db         = get_db()
-    bot_name   = data.get('bot_name')   or None
-    topic_name = data.get('topic_name') or None
-    try:
-        count = db.discard_pending(bot_name=bot_name, topic_name=topic_name)
-        return {'status': 'ok', 'discarded': count}
-    except Exception as e:
-        return {'status': 'error', 'message': str(e)}
-
 
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
@@ -156,8 +139,11 @@ def get_dashboard_stats(
         if not is_admin_request(request):
             user_id = get_request_user_id(request)
             if user_id:
-                inherited = db.get_user_bot_inheritances(user_id)
-                allowed_bots = [i['bot_name'] for i in inherited]
+                cfg = db.get_filtered_bots_config(user_id)
+                allowed_bots = list(cfg.keys())
+                # Empty list means user has no bots at all — pass sentinel so DB returns zeros
+                if not allowed_bots:
+                    allowed_bots = ["__no_access__"]
         data = db.get_dashboard_stats(
             days,
             filter_source=filter_source,

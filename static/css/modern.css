@@ -61,18 +61,105 @@ body {
 }
 
 /* ==================== Layout ==================== */
+:root { --sidebar-width: 260px; }
+
 .sidebar {
     position: fixed;
     left: 0;
     top: 0;
     bottom: 0;
-    width: 260px;
+    width: var(--sidebar-width);
     background: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
     z-index: 100;
+    transition: width 0.22s ease;
+    overflow: hidden;
 }
+
+/* Collapsed state — icon-only */
+.sidebar.collapsed {
+    width: 56px !important;
+}
+.sidebar.collapsed .sidebar-title-wrap,
+.sidebar.collapsed .nav-item span:not(.icon),
+.sidebar.collapsed .badge,
+.sidebar.collapsed .nav-section-label,
+.sidebar.collapsed .nav-separator,
+.sidebar.collapsed .sidebar-footer > a span:not(.icon),
+.sidebar.collapsed .version {
+    display: none;
+}
+.sidebar.collapsed .nav-item {
+    justify-content: center;
+    padding: 12px 0;
+}
+.sidebar.collapsed .nav-item.active {
+    padding-left: 0;
+    border-left-width: 3px;
+}
+.sidebar.collapsed .sidebar-collapse-btn {
+    margin: 0 auto;
+}
+.sidebar.collapsed .sidebar-footer {
+    padding: 10px 0;
+    align-items: center;
+    gap: 4px;
+}
+/* In collapsed mode hide the status row, logout text, theme toggle label */
+.sidebar.collapsed .footer-status-row,
+.sidebar.collapsed .logout-btn {
+    display: none;
+}
+/* Profile link in collapsed mode — icon only, centered */
+.sidebar.collapsed .sidebar-footer > a.nav-item {
+    justify-content: center;
+    padding: 10px 0;
+    margin-bottom: 0 !important;
+    width: 100%;
+}
+.sidebar.collapsed .sidebar-header {
+    padding: 16px 8px;
+    justify-content: center;
+}
+
+/* Collapse toggle button */
+.sidebar-collapse-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 4px 7px;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1;
+}
+.sidebar-collapse-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+/* Resize handle */
+.sidebar-resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 101;
+    background: transparent;
+    transition: background 0.15s;
+}
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.dragging {
+    background: var(--accent-primary);
+    opacity: 0.5;
+}
+.sidebar.collapsed .sidebar-resize-handle { display: none; }
 
 .sidebar-header {
     padding: 24px 20px;
@@ -222,9 +309,13 @@ body {
 }
 
 .main-content {
-    margin-left: 260px;
+    margin-left: var(--sidebar-width);
     padding: 32px;
     min-height: 100vh;
+    transition: margin-left 0.22s ease;
+}
+body.sidebar-collapsed .main-content {
+    margin-left: 56px;
 }
 
 /* ==================== Pages ==================== */
@@ -485,6 +576,7 @@ body {
     box-shadow: var(--shadow-lg);
 }
 
+
 .bot-config-header {
     padding: 24px;
     background: var(--bg-tertiary);
@@ -512,6 +604,100 @@ body {
 
 .bot-config-body {
     padding: 0;
+}
+
+/* ==================== Bot List Cards ==================== */
+.bot-list-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    margin-bottom: 10px;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+.bot-list-card:hover {
+    border-color: var(--accent-primary);
+    box-shadow: var(--shadow-lg);
+}
+.bot-list-main {
+    display: flex;
+    align-items: center;
+    padding: 16px 20px;
+    cursor: pointer;
+    gap: 14px;
+}
+.bot-list-info {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex: 1;
+    min-width: 0;
+}
+.bot-list-icon { font-size: 22px; flex-shrink: 0; }
+.bot-list-name { font-size: 15px; font-weight: 600; }
+.bot-list-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.bot-list-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+.bot-list-arrow {
+    font-size: 20px;
+    color: var(--text-muted);
+    line-height: 1;
+}
+
+/* Bot detail header */
+.bot-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 0 20px;
+    flex-wrap: wrap;
+}
+
+/* ==================== Bot Tabs ==================== */
+.bot-tab-bar {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.bot-tab-bar::-webkit-scrollbar { display: none; }
+
+.bot-tab-btn {
+    flex-shrink: 0;
+    padding: 10px 18px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+.bot-tab-btn:hover { color: var(--text-primary); }
+.bot-tab-btn.active {
+    color: var(--accent-primary);
+    border-bottom-color: var(--accent-primary);
+    font-weight: 600;
+}
+
+.bot-tab-pane { display: none; }
+.bot-tab-pane.active { display: block; }
+
+/* Inside a tab pane, hide the collapsible header (tab IS the toggle) and always show content */
+.bot-tab-pane > .collapsible-section > .collapsible-header { display: none; }
+.bot-tab-pane > .collapsible-section > .collapsible-content {
+    grid-template-rows: 1fr !important;
+}
+.bot-tab-pane > .collapsible-section:not(.open) > .collapsible-content > .collapsible-body {
+    padding-top: 24px;
+    padding-bottom: 24px;
 }
 
 /* ==================== Collapsible Sections ==================== */
@@ -1281,6 +1467,46 @@ body {
 }
 .mon-msgs-link:hover { text-decoration-style: solid; }
 
+/* ── Summary messages full-page view ── */
+.sum-msg-page { display: flex; flex-direction: column; gap: 14px; }
+.sum-msg-page-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+.smp-table { width: 100%; table-layout: fixed; }
+.smp-table th:nth-child(1) { width: 130px; }
+.smp-table th:nth-child(2) { width: 120px; }
+.smp-table th:nth-child(3) { width: 110px; }
+.smp-table th:nth-child(4) { width: 100px; }
+.smp-table th:nth-child(5) { width: 110px; }
+.smp-table th:nth-child(6) { width: 110px; }
+.smp-table th:nth-child(7) { width: auto; }
+.smp-msg-cell {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+    cursor: default;
+}
+.smp-msg-cell:hover {
+    white-space: normal;
+    overflow: visible;
+}
+.mon-ch-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-primary);
+    background: rgba(99,179,237,0.1);
+    padding: 2px 7px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
 .sum-msg-item {
     padding: 10px 14px;
     border-bottom: 1px solid var(--border-color);
@@ -1651,12 +1877,8 @@ body {
 
 /* ==================== Responsive ==================== */
 @media (max-width: 768px) {
-    .sidebar {
-        width: 200px;
-    }
-    
+    :root { --sidebar-width: 200px; }
     .main-content {
-        margin-left: 200px;
         padding: 20px;
     }
     

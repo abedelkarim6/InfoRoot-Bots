@@ -310,6 +310,15 @@ class TelegramSendCodeRequest(BaseModel):
 async def telegram_send_code(req: TelegramSendCodeRequest, request: Request):
     token   = _get_bearer(request)
     user_id = get_token_user_id(token) if token else None
+    # Legacy config-admin token has user_id=None — resolve from DB
+    if user_id is None and token and validate_token(token):
+        try:
+            admin_username = load_config().get("admin", {}).get("username", "")
+            admin_row = get_db().get_user_by_username(admin_username)
+            if admin_row:
+                user_id = admin_row["id"]
+        except Exception:
+            pass
     if not user_id:
         return JSONResponse({"error": "Not authenticated as a registered user."}, status_code=401)
 
@@ -360,7 +369,11 @@ class TelegramVerifyCodeRequest(BaseModel):
 
 @router.post("/auth/telegram/verify-code")
 async def telegram_verify_code(req: TelegramVerifyCodeRequest):
-    pending = _pending_tg.get(req.phone)
+    import re as _re
+    phone = _re.sub(r'[^\d+]', '', req.phone.strip())
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    pending = _pending_tg.get(phone)
     if not pending:
         return JSONResponse({"error": "No pending verification for this phone. Send a code first."}, status_code=400)
 
@@ -368,14 +381,14 @@ async def telegram_verify_code(req: TelegramVerifyCodeRequest):
 
     client = pending["client"]
     try:
-        await client.sign_in(req.phone, req.code, phone_code_hash=pending["hash"])
+        await client.sign_in(phone, req.code, phone_code_hash=pending["hash"])
 
         session_str = client.session.save()
         await client.disconnect()
 
         db = get_db()
-        db.update_user_telegram(pending["user_id"], req.phone, session_str)
-        del _pending_tg[req.phone]
+        db.update_user_telegram(pending["user_id"], phone, session_str)
+        del _pending_tg[phone]
 
         return {"status": "ok", "message": "Telegram account linked successfully."}
 
@@ -397,7 +410,11 @@ class Telegram2FARequest(BaseModel):
 
 @router.post("/auth/telegram/verify-2fa")
 async def telegram_verify_2fa(req: Telegram2FARequest):
-    pending = _pending_tg.get(req.phone)
+    import re as _re
+    phone = _re.sub(r'[^\d+]', '', req.phone.strip())
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    pending = _pending_tg.get(phone)
     if not pending or not pending.get("needs_2fa"):
         return JSONResponse({"error": "No pending 2FA verification."}, status_code=400)
 
@@ -411,8 +428,8 @@ async def telegram_verify_2fa(req: Telegram2FARequest):
         await client.disconnect()
 
         db = get_db()
-        db.update_user_telegram(pending["user_id"], req.phone, session_str)
-        del _pending_tg[req.phone]
+        db.update_user_telegram(pending["user_id"], phone, session_str)
+        del _pending_tg[phone]
 
         return {"status": "ok", "message": "Telegram account linked successfully."}
 

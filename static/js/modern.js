@@ -109,9 +109,73 @@ let modalSources = [];
 let modalTargets = [];
 let _channelValidation = {}; // { '@channel': 'ok'|'warn'|'pending' }
 
+// ==================== Sidebar collapse & resize ====================
+function initSidebar() {
+    const sidebar = document.getElementById('main-sidebar');
+    const btn     = document.getElementById('sidebar-collapse-btn');
+    const handle  = document.getElementById('sidebar-resize-handle');
+    if (!sidebar) return;
+
+    // Restore collapsed state
+    if (localStorage.getItem('sidebar-collapsed') === 'true') {
+        sidebar.classList.add('collapsed');
+        document.body.classList.add('sidebar-collapsed');
+        if (btn) btn.textContent = '▶';
+    }
+
+    // Restore saved width
+    const savedW = parseInt(localStorage.getItem('sidebar-width'));
+    if (savedW && !sidebar.classList.contains('collapsed')) {
+        _applySidebarWidth(savedW);
+    }
+
+    // Resize drag
+    if (handle) {
+        let startX, startW;
+        handle.addEventListener('mousedown', e => {
+            if (sidebar.classList.contains('collapsed')) return;
+            e.preventDefault();
+            startX = e.clientX;
+            startW = sidebar.offsetWidth;
+            handle.classList.add('dragging');
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', onDragEnd);
+        });
+        function onDrag(e) {
+            const w = Math.max(180, Math.min(520, startW + e.clientX - startX));
+            _applySidebarWidth(w);
+        }
+        function onDragEnd() {
+            handle.classList.remove('dragging');
+            localStorage.setItem('sidebar-width', sidebar.offsetWidth);
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup', onDragEnd);
+        }
+    }
+}
+
+function _applySidebarWidth(w) {
+    document.documentElement.style.setProperty('--sidebar-width', w + 'px');
+}
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('main-sidebar');
+    const btn     = document.getElementById('sidebar-collapse-btn');
+    if (!sidebar) return;
+    const collapsed = sidebar.classList.toggle('collapsed');
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    if (btn) btn.textContent = collapsed ? '▶' : '◀';
+    localStorage.setItem('sidebar-collapsed', collapsed);
+    if (!collapsed) {
+        const savedW = parseInt(localStorage.getItem('sidebar-width'));
+        if (savedW) _applySidebarWidth(savedW);
+    }
+}
+
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', async () => {
     _applyThemeButton(document.documentElement.getAttribute('data-theme') || 'dark');
+    initSidebar();
     initNavigation();
     await loadAllData();
     // Wait for auth/role check (accounts.js) before showing initial page
@@ -172,8 +236,8 @@ function showPage(pageName) {
     if (pageName === 'system') renderSystemPage();
     else if (pageName === 'collections') renderCollectionsPage();
     else if (pageName === 'bots') {
-        renderBotsPage();
-        restoreBotsPageScrollPosition();
+        _currentBotDetail = null;
+        _showBotsListView();
     }
     else if (pageName === 'monitor') loadMonitorData();
     else if (pageName === 'dashboard') loadDashboardData();
@@ -946,73 +1010,170 @@ async function deleteCollection(collectionName) {
 }
 
 // ==================== Bots Page ====================
-function renderBotsPage(keepOpen = null) {
-    saveBotsPageScrollPosition(); // Save before re-render
+let _currentBotDetail = null; // name of bot currently shown in detail view
 
-    const container = document.getElementById('bots-container');
+function renderBotsPage(keepOpen = null) {
     const bots = globalConfig.bots || {};
 
-    container.innerHTML = '';
-
-    for (const [name, bot] of Object.entries(bots)) {
-        const card = createBotConfigCard(name, bot);
-        container.appendChild(card);
+    // If we're in detail view, refresh just that bot's detail
+    if (_currentBotDetail) {
+        if (bots[_currentBotDetail]) {
+            _renderBotDetailView(_currentBotDetail, bots[_currentBotDetail], keepOpen);
+        } else {
+            // Bot was deleted — back to list
+            _showBotsListView();
+        }
+        return;
     }
 
-    // Restore collapsible states and scroll after rendering
+    _renderBotsListView();
+}
+
+function _renderBotsListView() {
+    const bots = globalConfig.bots || {};
+    const container = document.getElementById('bots-container');
+    container.innerHTML = '';
+
+    if (Object.keys(bots).length === 0) {
+        container.innerHTML = `<p class="text-muted" style="padding:12px 0">No bots yet. Create one above.</p>`;
+        return;
+    }
+
+    for (const [name, bot] of Object.entries(bots)) {
+        container.appendChild(_createBotListCard(name, bot));
+    }
+}
+
+function _createBotListCard(name, bot) {
+    const categories = Object.keys(bot.categories || {});
+    const topicCount = categories.reduce((n, c) => n + Object.keys(bot.categories[c].topics || {}).length, 0);
+    const card = document.createElement('div');
+    card.className = 'bot-list-card';
+    card.innerHTML = `
+        <div class="bot-list-main" onclick="openBotDetail('${jsAttr(name)}')">
+            <div class="bot-list-info">
+                <span class="bot-list-icon">🤖</span>
+                <div>
+                    <div class="bot-list-name">${escapeHtmlSys(name)}</div>
+                    <div class="bot-list-meta">
+                        ${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} &middot;
+                        ${topicCount} topic${topicCount === 1 ? '' : 's'}
+                    </div>
+                </div>
+            </div>
+            <div class="bot-list-right" onclick="event.stopPropagation()">
+                <label class="toggle-switch toggle-sm">
+                    <input type="checkbox" ${bot.enabled ? 'checked' : ''}
+                           onchange="toggleBotEnabled('${jsAttr(name)}', this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="bot-list-arrow">›</span>
+            </div>
+        </div>
+    `;
+    return card;
+}
+
+function openBotDetail(name) {
+    const bots = globalConfig.bots || {};
+    if (!bots[name]) return;
+    _currentBotDetail = name;
+    _renderBotDetailView(name, bots[name]);
+    saveBotsPageScrollPosition();
+    window.scrollTo(0, 0);
+}
+
+function _showBotsListView() {
+    _currentBotDetail = null;
+    document.getElementById('bots-list-view').style.display = '';
+    document.getElementById('bots-detail-view').style.display = 'none';
+    document.getElementById('bots-list-header').style.display = '';
+    _renderBotsListView();
+}
+
+function _renderBotDetailView(name, bot, keepOpen = null) {
+    _currentBotDetail = name;
+    document.getElementById('bots-list-view').style.display = 'none';
+    document.getElementById('bots-list-header').style.display = 'none';
+    document.getElementById('bots-detail-view').style.display = '';
+
+    const container = document.getElementById('bot-detail-container');
+    container.innerHTML = '';
+
+    // Back button header
+    const header = document.createElement('div');
+    header.className = 'bot-detail-header';
+    header.innerHTML = `
+        <button class="btn btn-secondary btn-sm" onclick="_showBotsListView()">‹ All Bots</button>
+        <h2 style="margin:0;font-size:18px">🤖 ${escapeHtmlSys(name)}</h2>
+        <label class="toggle-switch" style="margin-left:auto">
+            <input type="checkbox" ${bot.enabled ? 'checked' : ''}
+                   onchange="toggleBotEnabled('${jsAttr(name)}', this.checked)">
+            <span class="toggle-slider"></span>
+        </label>
+        <button class="btn btn-secondary btn-sm" onclick="renameBot('${jsAttr(name)}')">✏️ Rename</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteBot('${jsAttr(name)}')">🗑️ Delete</button>
+    `;
+    container.appendChild(header);
+
+    // Bot card with tabs (no collapse needed — single bot view)
+    const card = createBotConfigCard(name, bot);
+    container.appendChild(card);
+
     setTimeout(() => {
         restoreCollapsibleStates();
         clearStaleCollapsibleStates();
-        restoreBotsPageScrollPosition();
-
-        // Keep specific sections open if requested
         if (keepOpen) {
-            if (Array.isArray(keepOpen)) {
-                keepOpen.forEach(id => {
-                    const element = document.getElementById(id);
-                    if (element) element.classList.add('open');
-                });
-            } else {
-                const element = document.getElementById(keepOpen);
-                if (element) element.classList.add('open');
-            }
+            (Array.isArray(keepOpen) ? keepOpen : [keepOpen]).forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.add('open');
+            });
         }
-    }, 50); // Reduced timeout for faster UI response
+    }, 50);
 }
 
 function createBotConfigCard(name, bot) {
     const card = document.createElement('div');
     card.className = 'bot-config-card';
     card.id = `bot-${name}`;
-    
+
+    const savedTab  = localStorage.getItem(`bot-tab-${name}`) || 'basic';
+    const tabs      = ['basic', 'rules', 'prompts', 'categories'];
+    const tabLabels = { basic: '⚙️ Basic', rules: '🔧 Rules', prompts: '📝 Prompts', categories: '📂 Categories & Topics' };
+
+    const tabHeaders = tabs.map(t => `
+        <button class="bot-tab-btn ${savedTab === t ? 'active' : ''}"
+                onclick="switchBotTab('${jsAttr(name)}', '${t}')"
+                data-tab="${t}">${tabLabels[t]}</button>
+    `).join('');
+
     card.innerHTML = `
-        <div class="bot-config-header">
-            <div class="bot-config-title">
-                <h3>🤖 ${name}</h3>
-                <label class="toggle-switch">
-                    <input type="checkbox" ${bot.enabled ? 'checked' : ''} 
-                           onchange="toggleBotEnabled('${name}', this.checked)">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-            <div class="bot-config-actions">
-                <button class="btn btn-secondary btn-sm" onclick="renameBot('${name}')">
-                    ✏️ Rename
-                </button>
-                <button class="btn btn-danger btn-sm" onclick="deleteBot('${name}')">
-                    🗑️ Delete
-                </button>
-            </div>
-        </div>
+        <div class="bot-tab-bar">${tabHeaders}</div>
         <div class="bot-config-body">
-            ${createBasicSettingsSection(name, bot)}
-            ${createRulesSection(name, bot)}
-            ${createPromptsSection(name)}
-            ${createCategoriesSection(name, bot)}
+            <div class="bot-tab-pane ${savedTab === 'basic'      ? 'active' : ''}" data-tab="basic">
+                ${createBasicSettingsSection(name, bot)}
+            </div>
+            <div class="bot-tab-pane ${savedTab === 'rules'      ? 'active' : ''}" data-tab="rules">
+                ${createRulesSection(name, bot)}
+            </div>
+            <div class="bot-tab-pane ${savedTab === 'prompts'    ? 'active' : ''}" data-tab="prompts">
+                ${createPromptsSection(name)}
+            </div>
+            <div class="bot-tab-pane ${savedTab === 'categories' ? 'active' : ''}" data-tab="categories">
+                ${createCategoriesSection(name, bot)}
+            </div>
         </div>
     `;
-    
+
     return card;
+}
+
+function switchBotTab(botName, tab) {
+    const card = document.getElementById(`bot-${botName}`);
+    if (!card) return;
+    card.querySelectorAll('.bot-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    card.querySelectorAll('.bot-tab-pane').forEach(p => p.classList.toggle('active', p.dataset.tab === tab));
+    localStorage.setItem(`bot-tab-${botName}`, tab);
 }
 
 function createBasicSettingsSection(botName, bot) {
@@ -1387,7 +1548,9 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                onchange="toggleTopic('${b}', '${c}', '${t}', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
-                    <button class="btn-icon btn-danger"
+                    <button class="btn-icon" title="Rename topic"
+                            onclick="renameTopic('${b}', '${c}', '${t}')">✏️</button>
+                    <button class="btn-icon btn-danger" title="Delete topic"
                             onclick="deleteTopic('${b}', '${c}', '${t}')">🗑️</button>
                     <span class="collapsible-toggle">▼</span>
                 </div>
@@ -1451,12 +1614,11 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                         </label>
                                         <strong>${escapeHtmlSys(schedule.name)}</strong>
                                     </div>
-                                    <div class="sch-menu-wrap">
-                                        <button class="sch-menu-btn" onclick="toggleSchMenu(event, this)" title="Options">⋮</button>
-                                        <div class="sch-menu-dropdown">
-                                            <button onclick="closeAllSchMenus(); openEditTopicScheduleModal('${b}', '${c}', '${t}', ${schedule.id})">✏️ Edit</button>
-                                            <button class="danger" onclick="closeAllSchMenus(); deleteTopicSchedule('${b}', '${c}', '${t}', ${schedule.id})">🗑️ Delete</button>
-                                        </div>
+                                    <div style="display:flex;align-items:center;gap:4px">
+                                        <button class="btn-icon" title="Edit schedule"
+                                                onclick="openEditTopicScheduleModal('${b}', '${c}', '${t}', ${schedule.id})">✏️</button>
+                                        <button class="btn-icon btn-danger" title="Delete schedule"
+                                                onclick="deleteTopicSchedule('${b}', '${c}', '${t}', ${schedule.id})">🗑️</button>
                                     </div>
                                 </div>
                                 <div class="summary-details">
@@ -1910,6 +2072,8 @@ async function renamePrompt(botName, oldKey, newKey) {
     if (addResult.status === 'ok') {
         // Delete old prompt
         await api('/api/prompts/delete', { bot_name: botName, key: oldKey });
+        // Cascade rename to all schedules that referenced the old prompt key
+        await api('/api/prompts/rename-cascade', { bot_name: botName, old_key: oldKey, new_key: newKey });
         await loadAllData();
         renderBotsPage();
         showNotification('Prompt renamed', 'success');
@@ -2057,6 +2221,24 @@ async function addTopic(botName, categoryName) {
     } else {
         showNotification(result.message || 'Failed to add topic', 'error');
     }
+}
+
+async function renameTopic(botName, categoryName, topicName) {
+    showPrompt('Rename Topic', topicName, async (newName) => {
+        newName = newName.trim();
+        if (!newName || newName === topicName) return;
+        const result = await api('/api/topic/rename', {
+            bot_name: botName, category_name: categoryName,
+            old_name: topicName, new_name: newName,
+        });
+        if (result.status === 'ok') {
+            await loadAllData();
+            renderBotsPage([`topic-${botName}-${categoryName}-${newName}`, `categories-${botName}`]);
+            showNotification('Topic renamed', 'success');
+        } else {
+            showAlert(result.message || 'Rename failed');
+        }
+    });
 }
 
 async function deleteTopic(botName, categoryName, topicName) {
@@ -3008,11 +3190,10 @@ style.textContent = `
     .mon-pending { font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; white-space:nowrap; }
     .mon-pending.has  { background:rgba(16,185,129,0.15); color:#34d399; }
     .mon-pending.none { background:rgba(100,116,139,0.12); color:var(--text-muted); }
-    .mon-discard-btn { font-size:11px; padding:2px 8px; height:22px; line-height:18px; border-radius:4px; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; cursor:pointer; white-space:nowrap; }
-    .mon-discard-btn:hover { background:rgba(239,68,68,0.22); border-color:rgba(239,68,68,0.45); color:#fff; }
-    .mon-next-label { font-size:10px; color:var(--text-muted); }
+.mon-next-label { font-size:10px; color:var(--text-muted); }
     .mon-countdown { font-size:12px; font-weight:700; color:var(--success); min-width:60px; text-align:right; }
     .mon-countdown.urgent { color:var(--warning); }
+    .mon-next-time { font-size:11px; color:var(--text-muted); min-width:38px; text-align:right; }
 
     /* shared table style */
     .mon-table { width:100%; border-collapse:collapse; font-size:12px; }
@@ -3078,24 +3259,6 @@ let _monActiveTab = 'schedules';
 let _allSummaries = [];
 let _allMessages  = [];
 
-async function discardPending(botName, topicName) {
-    let msg = 'Discard ALL pending messages across all bots?';
-    if (botName && topicName) msg = `Discard all pending messages for topic "${topicName}" in bot "${botName}"?`;
-    else if (botName)         msg = `Discard all pending messages for bot "${botName}"?`;
-
-    showConfirm(msg, async () => {
-        const body = {};
-        if (botName)   body.bot_name   = botName;
-        if (topicName) body.topic_name = topicName;
-        const r = await api('/api/monitor/discard-pending', body);
-        if (r.status === 'ok') {
-            showAlert(`Discarded ${r.discarded} pending message entries. They will be skipped in the next summary run.`);
-            loadMonitorData();
-        } else {
-            showAlert('Error: ' + (r.message || 'Unknown error'));
-        }
-    }, { confirmLabel: 'Discard', confirmClass: 'btn-danger' });
-}
 
 async function loadMonitorData() {
     // Only load if monitor page is actually active
@@ -3309,34 +3472,18 @@ function applySchFilters() {
                     const offCls = td.enabled ? '' : ' mon-topic-off';
                     const schRows = td.rows.map(r => renderSchRow(r)).join('');
                     const topicPending = td.rows.reduce((s, r) => s + (r.pending || 0), 0);
-                    const discardTopicBtn = topicPending > 0
-                        ? `<button class="btn mon-discard-btn"
-                             onclick="discardPending(${escapeHtml(JSON.stringify(botName))}, ${escapeHtml(JSON.stringify(topicName))})"
-                             title="Mark ${topicPending} pending messages as discarded">
-                             🗑 Discard ${topicPending}
-                           </button>`
-                        : '';
                     return `<div class="mon-topic-block">
                         <div class="mon-topic-title${offCls}">
                             <span>${escapeHtml(topicName)}${!td.enabled ? ' <span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}</span>
-                            ${discardTopicBtn}
                         </div>
                         ${schRows}
                     </div>`;
                 }).join('');
                 return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
             }).join('');
-            const discardBotBtn = botPending > 0
-                ? `<button class="btn mon-discard-btn"
-                     onclick="discardPending(${escapeHtml(JSON.stringify(botName))})"
-                     title="Discard all ${botPending} pending messages for this bot">
-                     🗑 Discard all (${botPending})
-                   </button>`
-                : '';
             return `<div class="mon-bot-card">
                 <div class="mon-bot-hdr">
                     <span>🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></span>
-                    ${discardBotBtn}
                 </div>
                 ${catsHtml}
             </div>`;
@@ -3365,6 +3512,7 @@ function renderSchRow(r) {
             <span class="mon-pending ${pendingCls}">${pendingTxt}</span>
             <span class="mon-next-label">next in</span>
             <span class="mon-countdown">${r.sch.enabled === false ? '—' : '…'}</span>
+            <span class="mon-next-time"></span>
         </div>
     </div>`;
 }
@@ -3402,18 +3550,36 @@ function startMonitorCountdowns() {
     tickCountdowns();
 }
 
+const _BEIRUT_TZ = 'Asia/Beirut';
+
 function tickCountdowns() {
     document.querySelectorAll('[data-schedule]').forEach(row => {
-        const cdEl = row.querySelector('.mon-countdown');
+        const cdEl   = row.querySelector('.mon-countdown');
+        const timeEl = row.querySelector('.mon-next-time');
         if (!cdEl) return;
         let sch;
         try { sch = JSON.parse(row.dataset.schedule); } catch { return; }
-        if (sch.enabled === false) { cdEl.textContent = '—'; return; }
+        if (sch.enabled === false) {
+            cdEl.textContent = '—';
+            if (timeEl) timeEl.textContent = '';
+            return;
+        }
         const next = computeNextRun(sch);
-        if (!next) { cdEl.textContent = '—'; return; }
+        if (!next) {
+            cdEl.textContent = '—';
+            if (timeEl) timeEl.textContent = '';
+            return;
+        }
         const diff = Math.max(0, next - Date.now());
         cdEl.textContent = formatDuration(diff);
         cdEl.classList.toggle('urgent', diff < 60000);
+        if (timeEl) {
+            timeEl.textContent = next.toLocaleTimeString('en-GB', {
+                timeZone: _BEIRUT_TZ,
+                hour: '2-digit',
+                minute: '2-digit',
+            });
+        }
     });
 }
 
@@ -3504,40 +3670,131 @@ function applyMonSummaryFilters() {
         </table></div>`;
 }
 
-// ---------- Summary Source Messages Modal ----------
-async function showSummaryMessages(summaryId) {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-        <div class="modal-dialog" style="max-width:720px;" role="dialog" aria-modal="true">
-            <div class="modal-header">
-                <h3>Source Messages</h3>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
-            </div>
-            <div class="modal-body" style="max-height:65vh;overflow-y:auto;">
-                <p class="mon-empty">Loading…</p>
-            </div>
-        </div>`;
-    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-    document.body.appendChild(overlay);
+// ---------- Summary Source Messages — full inline view ----------
+let _sumMsgData = [];   // all messages for current summary
+let _sumMsgId   = null;
 
-    const body = overlay.querySelector('.modal-body');
+async function showSummaryMessages(summaryId) {
+    _sumMsgId   = summaryId;
+    _sumMsgData = [];
+
+    const panel = document.getElementById('mon-tab-summaries');
+    panel.innerHTML = `
+        <div class="sum-msg-page">
+            <div class="sum-msg-page-header">
+                <button class="btn btn-secondary btn-sm" onclick="_closeSummaryMessages()">‹ Back to Summaries</button>
+                <h3 style="margin:0;font-size:15px">Source Messages</h3>
+            </div>
+            <div class="mon-filter-bar" style="flex-wrap:wrap;gap:8px">
+                <input type="text" class="input mon-filter-search" id="smp-search"
+                       placeholder="🔍 Search message text…" oninput="_renderSumMsgTable()">
+                <select class="select mon-filter-sel" id="smp-filter-source" onchange="_renderSumMsgTable()">
+                    <option value="">All Sources</option>
+                </select>
+                <input type="date" class="input" id="smp-filter-date-from" style="max-width:150px"
+                       onchange="_renderSumMsgTable()">
+                <input type="date" class="input" id="smp-filter-date-to"   style="max-width:150px"
+                       onchange="_renderSumMsgTable()">
+                <button class="btn btn-secondary btn-sm" onclick="_clearSumMsgFilters()">✕ Clear</button>
+            </div>
+            <div id="smp-table-wrap"><p class="mon-empty">Loading…</p></div>
+        </div>`;
+
     const data = await api(`/api/monitor/summary-messages?id=${summaryId}`);
+    const wrap = document.getElementById('smp-table-wrap');
+    if (!wrap) return;
+
     if (data.status !== 'ok' || !data.messages?.length) {
-        body.innerHTML = `<p class="mon-empty">${data.message ? 'Error: ' + escapeHtml(data.message) : 'No linked messages found.'}</p>`;
+        wrap.innerHTML = `<p class="mon-empty">No linked messages found.</p>`;
         return;
     }
-    body.innerHTML = data.messages.map(m => {
-        const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
-        const ch = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '';
-        return `<div class="sum-msg-item">
-            <div class="sum-msg-meta">
-                <span class="sum-msg-ch">${ch}</span>
-                <span class="sum-msg-ts">${ts}</span>
-            </div>
-            <div class="sum-msg-text">${escapeHtml(m.preview || '')}</div>
-        </div>`;
+    _sumMsgData = data.messages;
+
+    // Populate source dropdown
+    const sources = [...new Set(_sumMsgData.map(m => m.channel_username).filter(Boolean))].sort();
+    const sel = document.getElementById('smp-filter-source');
+    if (sel) sources.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = '@' + s; sel.appendChild(o); });
+
+    _renderSumMsgTable();
+}
+
+function _renderSumMsgTable() {
+    const wrap = document.getElementById('smp-table-wrap');
+    if (!wrap) return;
+
+    const search   = (document.getElementById('smp-search')?.value || '').toLowerCase();
+    const source   = document.getElementById('smp-filter-source')?.value || '';
+    const dateFrom = document.getElementById('smp-filter-date-from')?.value || '';
+    const dateTo   = document.getElementById('smp-filter-date-to')?.value   || '';
+
+    let filtered = _sumMsgData;
+    if (search) filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+    if (source) filtered = filtered.filter(m => m.channel_username === source);
+    if (dateFrom) filtered = filtered.filter(m => m.timestamp && m.timestamp >= dateFrom);
+    if (dateTo)   filtered = filtered.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
+
+    if (!filtered.length) {
+        wrap.innerHTML = `<p class="mon-empty">No messages match filters.</p>`;
+        return;
+    }
+
+    const rows = filtered.map(m => {
+        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const src = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '—';
+        const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
+        const bot = m.bot_name         ? escapeHtml(m.bot_name)         : '—';
+        const top = m.topics           ? escapeHtml(m.topics)           : '—';
+        const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
+        const txt = escapeHtml(m.preview || '');
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px">${ts}</td>
+            <td><span class="mon-ch-badge">${src}</span></td>
+            <td style="font-size:11px">${col}</td>
+            <td style="font-size:11px">${bot}</td>
+            <td style="font-size:11px">${top}</td>
+            <td style="font-size:11px">${kw}</td>
+            <td class="smp-msg-cell" title="${txt}">${txt}</td>
+        </tr>`;
     }).join('');
+
+    wrap.innerHTML = `
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${filtered.length} message${filtered.length===1?'':'s'}</div>
+        <div style="overflow-x:auto">
+            <table class="mon-table smp-table">
+                <thead><tr>
+                    <th>Date / Time</th><th>Source</th><th>Collection</th>
+                    <th>Bot</th><th>Topics</th><th>Keywords</th><th>Message</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+function _clearSumMsgFilters() {
+    ['smp-search','smp-filter-source','smp-filter-date-from','smp-filter-date-to']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    _renderSumMsgTable();
+}
+
+function _closeSummaryMessages() {
+    _sumMsgData = [];
+    _sumMsgId   = null;
+    // Rebuild the summaries tab HTML
+    const panel = document.getElementById('mon-tab-summaries');
+    panel.innerHTML = `
+        <div class="mon-filter-bar">
+            <select class="select mon-filter-sel" id="sum-filter-bot"   onchange="applyMonSummaryFilters()"><option value="">All Bots</option></select>
+            <select class="select mon-filter-sel" id="sum-filter-topic" onchange="applyMonSummaryFilters()"><option value="">All Topics</option></select>
+            <select class="select mon-filter-sel" id="sum-filter-type"  onchange="applyMonSummaryFilters()">
+                <option value="">All Types</option>
+                <option value="hourly">Hourly</option>
+                <option value="daily">Daily</option>
+                <option value="minute">Minute</option>
+            </select>
+            <input type="text" class="input mon-filter-search" id="sum-search" placeholder="🔍 Search preview…" oninput="applyMonSummaryFilters()">
+        </div>
+        <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>`;
+    renderMonSummaries(_allSummaries || []);
 }
 
 // ---------- Received Messages ----------
