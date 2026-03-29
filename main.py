@@ -65,9 +65,7 @@ else:
 # Telegram userbot settings
 API_ID = config["telegram"]["api_id"]
 API_HASH = config["telegram"]["api_hash"]
-STRING_SESSION = config["telegram"].get("string_session")
-if not STRING_SESSION:
-    raise ValueError("telegram.string_session is required in config.yaml but was not found or is empty.")
+STRING_SESSION = config["telegram"].get("string_session")  # fallback; DB value preferred at runtime
 
 SCHEDULER = None
 client: TelegramClient = None  # Set in main()
@@ -731,8 +729,22 @@ async def main():
 
     # logger.info("="*60)
 
-    # Create Telethon userbot client using the string session from config
-    client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+    # Prefer session string from DB (admin user), fall back to config.yaml
+    _db_session = None
+    try:
+        _admin_user = get_db().get_admin_user()
+        if _admin_user and _admin_user.get('telegram_session'):
+            _db_session = _admin_user['telegram_session']
+    except Exception as _e:
+        logger.warning(f"[SESSION] Could not load session from DB: {_e}")
+    active_session = _db_session or STRING_SESSION
+    if not active_session:
+        raise ValueError("No telegram session string found in DB or config.yaml.")
+    if _db_session:
+        logger.info("[SESSION] Using session string from DB")
+    else:
+        logger.info("[SESSION] Using session string from config.yaml (no DB session found)")
+    client = TelegramClient(StringSession(active_session), API_ID, API_HASH)
 
     # Register message handler for all new messages
     @client.on(events.NewMessage)
