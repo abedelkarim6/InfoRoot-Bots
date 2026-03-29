@@ -390,7 +390,7 @@ async def telegram_verify_code(req: TelegramVerifyCodeRequest):
         db.update_user_telegram(pending["user_id"], phone, session_str)
         del _pending_tg[phone]
 
-        return {"status": "ok", "message": "Telegram account linked successfully."}
+        return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
 
     except SessionPasswordNeededError:
         pending["needs_2fa"] = True
@@ -431,7 +431,7 @@ async def telegram_verify_2fa(req: Telegram2FARequest):
         db.update_user_telegram(pending["user_id"], phone, session_str)
         del _pending_tg[phone]
 
-        return {"status": "ok", "message": "Telegram account linked successfully."}
+        return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
 
     except PasswordHashInvalidError:
         return JSONResponse({"error": "Incorrect 2FA password. Please try again."}, status_code=400)

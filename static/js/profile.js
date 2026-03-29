@@ -263,7 +263,7 @@ async function pfVerifyCode() {
 
     if (data.error) { errEl.textContent = data.error; return; }
 
-    pfTgSuccess();
+    pfTgSuccess(data.session_string);
 }
 
 async function pfVerify2FA() {
@@ -286,7 +286,7 @@ async function pfVerify2FA() {
 
     if (data.error) { errEl.textContent = data.error; return; }
 
-    pfTgSuccess();
+    pfTgSuccess(data.session_string);
 }
 
 function pfBackToPhone() {
@@ -296,9 +296,17 @@ function pfBackToPhone() {
     _tgLinkPhone = null;
 }
 
-function pfTgSuccess() {
+function pfTgSuccess(sessionString) {
     // Update local user state and re-render status
-    if (_profileUser) _profileUser.telegram_phone = _tgLinkPhone;
+    if (_profileUser) {
+        _profileUser.telegram_phone = _tgLinkPhone;
+        if (sessionString) _profileUser.telegram_session = sessionString;
+    }
+    // Update the session string textarea if visible
+    if (sessionString) {
+        const ssEl = document.getElementById('pf-ss-value');
+        if (ssEl) ssEl.value = sessionString;
+    }
 
     document.getElementById('pf-tg-form').style.display = 'none';
     document.getElementById('pf-tg-status').innerHTML = `
