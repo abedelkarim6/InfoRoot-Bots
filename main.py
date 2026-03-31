@@ -732,14 +732,16 @@ async def main():
     # Prefer session string from DB (admin user), fall back to config.yaml
     _db_session = None
     try:
-        _admin_user = get_db().get_admin_user()
+        from utils.database import get_db as _get_db
+        _admin_user = _get_db().get_admin_user()
         if _admin_user and _admin_user.get('telegram_session'):
             _db_session = _admin_user['telegram_session']
     except Exception as _e:
-        logger.warning(f"[SESSION] Could not load session from DB: {_e}")
+        logger.debug(f"[SESSION] Could not load session from DB: {_e}")
     active_session = _db_session or STRING_SESSION
     if not active_session:
-        raise ValueError("No telegram session string found in DB or config.yaml.")
+        logger.warning("[SESSION] No Telegram session configured. Set one via the System page → Session Setup.")
+        return
     if _db_session:
         logger.info("[SESSION] Using session string from DB")
     else:

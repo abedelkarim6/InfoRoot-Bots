@@ -1,6 +1,11 @@
-from fastapi import APIRouter, Body
+import asyncio
+import logging
+
+from fastapi import APIRouter, Body, Request
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _get_dialogs():
@@ -91,3 +96,86 @@ def get_userbot_dialogs():
     if err:
         return err
     return {"status": "ok", **result}
+
+
+# ── Session status & test ─────────────────────────────────────────────────────
+
+@router.get("/telegram/session/status")
+def get_session_status(request: Request):
+    """Return whether the admin has a session string stored in the DB."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    from utils.database import get_db
+    db = get_db()
+    admin = db.get_admin_user()
+    has_session = bool(admin and admin.get("telegram_session"))
+    phone = admin.get("telegram_phone") if admin else None
+    return {"status": "ok", "has_session": has_session, "phone": phone}
+
+
+@router.post("/telegram/session/test")
+async def test_session(request: Request):
+    """Try to connect with the stored session and return detailed logs."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    from utils.database import get_db
+    from utils.helpers import load_config
+
+    logs = []
+
+    db = get_db()
+    admin = db.get_admin_user()
+    session_str = admin.get("telegram_session") if admin else None
+    if not session_str:
+        cfg = load_config()
+        session_str = cfg.get("telegram", {}).get("string_session", "")
+
+    if not session_str:
+        return {"status": "error", "logs": ["[ERROR] No session string found in DB or config.yaml"]}
+
+    logs.append("[INFO] Session string found")
+    logs.append("[INFO] Connecting to Telegram...")
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        cfg = load_config()
+        tg_cfg = cfg.get("telegram", {})
+        api_id = int(tg_cfg["api_id"])
+        api_hash = tg_cfg["api_hash"]
+
+        client = TelegramClient(StringSession(session_str), api_id, api_hash)
+
+        try:
+            await asyncio.wait_for(client.connect(), timeout=15)
+            logs.append("[INFO] TCP connection established")
+        except asyncio.TimeoutError:
+            logs.append("[ERROR] Connection timed out (15s) — check network or session validity")
+            return {"status": "error", "logs": logs}
+
+        try:
+            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+        except asyncio.TimeoutError:
+            logs.append("[ERROR] Authorization check timed out (15s) — session may be invalid or expired")
+            await client.disconnect()
+            return {"status": "error", "logs": logs}
+
+        if not authorized:
+            logs.append("[ERROR] Session is not authorized — needs re-login")
+            await client.disconnect()
+            return {"status": "error", "logs": logs}
+
+        me = await client.get_me()
+        await client.disconnect()
+
+        display = f"@{me.username}" if me.username else (me.first_name or "unknown")
+        logs.append(f"[SUCCESS] Authorized as {display}")
+        return {"status": "ok", "logs": logs, "me": display}
+
+    except Exception as e:
+        logs.append(f"[ERROR] {e}")
+        logger.error(f"[TG-TEST] {e}")
+        return {"status": "error", "logs": logs}

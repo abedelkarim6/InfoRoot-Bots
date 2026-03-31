@@ -1248,6 +1248,23 @@ class Database:
         return int(row['value']) if row else 0
 
     # --- System settings ---
+    def get_setting(self, key: str):
+        """Return the JSONB value for an arbitrary system_settings key, or None."""
+        cursor = self._get_cursor()
+        cursor.execute("SELECT value FROM system_settings WHERE key = %s", (key,))
+        row = cursor.fetchone()
+        return row['value'] if row else None
+
+    def set_setting(self, key: str, value):
+        """Upsert an arbitrary key into system_settings (no config-version bump)."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()
+        """, (key, json.dumps(value), json.dumps(value)))
+        self.connection.commit()
+
     def get_system_enabled(self) -> bool:
         cursor = self._get_cursor()
         cursor.execute("SELECT value FROM system_settings WHERE key = 'system_enabled'")

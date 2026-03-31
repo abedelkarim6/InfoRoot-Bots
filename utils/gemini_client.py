@@ -46,6 +46,20 @@ class GeminiClient:
 
             summary = response.text.strip()
             logger.info(f"Summary generated successfully (length: {len(summary)} chars)")
+
+            try:
+                from utils.gemini_usage import record_gemini_request
+                tokens = 0
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    um = response.usage_metadata
+                    tokens = (getattr(um, 'prompt_token_count', 0) or 0) + \
+                             (getattr(um, 'candidates_token_count', 0) or 0)
+                if not tokens:
+                    tokens = (len(full_prompt) + len(summary)) // 4
+                record_gemini_request(total_tokens=tokens)
+            except Exception:
+                pass
+
             return summary
 
         except Exception as e:

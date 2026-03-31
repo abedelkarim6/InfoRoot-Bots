@@ -45,3 +45,21 @@ def toggle_system(request: Request, enabled: bool = Body(..., embed=True)):
         "enabled": enabled,
         "message": f"System {'enabled' if enabled else 'disabled'}"
     }
+
+
+@router.get("/system/gemini-usage")
+def get_gemini_usage():
+    """Return current Gemini API usage counters (RPM, TPM, RPD)."""
+    from utils.gemini_usage import get_gemini_usage as _get
+    return {"status": "ok", **_get()}
+
+
+@router.post("/system/restart")
+def restart_bot(request: Request):
+    """Stop and restart the bot subprocess (used after session changes)."""
+    bot_lock = request.app.state.bot_lock
+    stop_bot_subprocess(request.app.state, bot_lock)
+    proc = start_bot_subprocess(request.app.state)
+    if proc is None:
+        return {"status": "error", "message": "Bot failed to start after restart"}
+    return {"status": "ok", "message": "Bot restarted successfully"}

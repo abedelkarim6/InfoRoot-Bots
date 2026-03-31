@@ -925,6 +925,7 @@ async function loadYtVideosData() {
                     <th>Channel</th>
                     <th>Status</th>
                     <th>Source</th>
+                    <th>Cost</th>
                     <th>Target</th>
                     <th>Sent</th>
                     <th>Created</th>
@@ -945,8 +946,25 @@ async function loadYtVideosData() {
         const truncTitle = title.length > 50 ? title.substring(0, 50) + '…' : title;
 
         const sourceLabel = item.transcript_source
-            ? ({ 'transcript_api': 'Transcript', 'metadata': 'Metadata' }[item.transcript_source] || item.transcript_source)
+            ? ({ 'gemini_video': 'Video', 'transcript_api': 'Transcript', 'metadata': 'Metadata' }[item.transcript_source] || item.transcript_source)
             : '';
+
+        // Cost estimate — Gemini 2.5 Flash Lite: $0.10/1M input, $0.40/1M output
+        // Token estimation for gemini_video (1 FPS native video): ~299 tokens/sec
+        let costCell = '<span class="text-muted">—</span>';
+        if (item.status === 'done') {
+            let inp = item.input_tokens || 0;
+            let out = item.output_tokens || 0;
+            if (!inp && item.transcript_source === 'gemini_video' && item.duration_secs) {
+                inp = Math.round(item.duration_secs * 299);
+            }
+            if (inp || out) {
+                const cost = (inp / 1_000_000) * 0.10 + (out / 1_000_000) * 0.40;
+                const costStr = cost < 0.000001 ? '<$0.000001' : '$' + cost.toFixed(6);
+                const tip = `In: ${inp.toLocaleString()} · Out: ${out.toLocaleString()} tokens`;
+                costCell = `<span class="yt-cost-badge" title="${tip}">${costStr}</span>`;
+            }
+        }
 
         const sentBadge = item.status === 'done'
             ? (item.telegram_sent
@@ -984,6 +1002,7 @@ async function loadYtVideosData() {
                 <td>${escapeHtml(item.channel_name || '—')}</td>
                 <td><span class="yt-status-badge ${statusClass}">${item.status}</span></td>
                 <td>${sourceLabel ? `<span class="yt-filter-tag">${sourceLabel}</span>` : '<span class="text-muted">—</span>'}</td>
+                <td>${costCell}</td>
                 <td>${target}</td>
                 <td>${sentBadge}</td>
                 <td class="text-muted">${timeAgo(item.created_at)}</td>

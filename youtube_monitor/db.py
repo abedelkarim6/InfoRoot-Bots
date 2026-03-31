@@ -164,6 +164,9 @@ class YouTubeDB:
         _ensure_col('yt_video_queue', 'telegram_target', 'TEXT')
         _ensure_col('yt_video_queue', 'prompt', 'TEXT')
         _ensure_col('yt_summaries', 'telegram_target', 'TEXT')
+        _ensure_col('yt_summaries', 'duration_secs',  'INTEGER')
+        _ensure_col('yt_summaries', 'input_tokens',   'INTEGER')
+        _ensure_col('yt_summaries', 'output_tokens',  'INTEGER')
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
 
@@ -770,7 +773,7 @@ class YouTubeDB:
                    COALESCE(sv.title, s.title, q.video_id) AS title,
                    COALESCE(ch.channel_name, s.channel_name, sv.channel_id) AS channel_name,
                    s.id AS summary_id, s.transcript_source, s.summary_text,
-                   s.telegram_sent
+                   s.telegram_sent, s.duration_secs, s.input_tokens, s.output_tokens
             {base_query}
             ORDER BY q.created_at DESC
             LIMIT %s OFFSET %s
@@ -787,14 +790,17 @@ class YouTubeDB:
 
     def save_summary(self, video_id: str, title: str, channel_name: str,
                      published_at, transcript_source: str, summary_text: str,
-                     telegram_target: str = None):
+                     telegram_target: str = None,
+                     duration_secs: int = None, input_tokens: int = None, output_tokens: int = None):
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
-                (video_id, title, channel_name, published_at, transcript_source, summary_text, telegram_target)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (video_id, title, channel_name, published_at, transcript_source, summary_text,
+                 telegram_target, duration_secs, input_tokens, output_tokens)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (video_id, title, channel_name, published_at, transcript_source, summary_text, telegram_target))
+        """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
+              telegram_target, duration_secs, input_tokens, output_tokens))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']

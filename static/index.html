@@ -267,6 +267,9 @@
                 </p>
             </div>
 
+            <!-- Telegram Session Card (admin only, rendered by JS) -->
+            <div id="tg-session-card"></div>
+
             <h3 class="section-title mt-4" id="sys-news-section-title">📰 News Summarizer Bots</h3>
             <div class="stats-grid" id="sys-news-stats" style="margin-bottom:16px">
                 <div class="stat-card">
@@ -897,6 +900,58 @@
         </div>
 
     </main>
+
+    <!-- Telegram Session Setup Modal -->
+    <div id="tg-session-modal" class="dialog-overlay" style="display:none" onclick="if(event.target===this)closeTgSessionModal()">
+        <div class="dialog-box" style="max-width:500px;width:100%;padding:0;overflow:hidden" role="dialog" aria-modal="true">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid var(--border)">
+                <h3 style="margin:0;font-size:16px">📡 Telegram Session Setup</h3>
+                <button class="btn btn-sm btn-secondary" onclick="closeTgSessionModal()" style="padding:2px 8px;font-size:18px;line-height:1">&times;</button>
+            </div>
+            <div style="padding:20px">
+                <!-- Tabs -->
+                <div class="tg-modal-tabs">
+                    <button class="tg-tab active" id="tg-tab-btn-paste" onclick="switchTgTab('paste')">📋 Paste Session</button>
+                    <button class="tg-tab" id="tg-tab-btn-link" onclick="switchTgTab('link')">📱 Link Telegram</button>
+                </div>
+
+                <!-- Tab: Paste -->
+                <div id="tg-tab-paste">
+                    <p class="text-muted" style="font-size:13px;margin-bottom:10px">Paste an existing StringSession string. Generate one with <code>get_ss.py</code>.</p>
+                    <textarea id="tg-paste-input" class="form-control" rows="4" placeholder="1BVtsU… (session string)"></textarea>
+                    <input id="tg-paste-phone" class="form-control mt-2" type="tel" placeholder="Phone (optional, e.g. +1234567890)">
+                    <button class="btn btn-primary mt-3" onclick="tgSaveSession()">💾 Save Session</button>
+                </div>
+
+                <!-- Tab: Link via OTP -->
+                <div id="tg-tab-link" style="display:none">
+                    <div id="tg-link-step-phone">
+                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Enter your phone number to receive a code via Telegram.</p>
+                        <input id="tg-link-phone" class="form-control" type="tel" placeholder="+1234567890">
+                        <button class="btn btn-primary mt-3" id="tg-send-code-btn" onclick="tgSendCode()">📨 Send Code</button>
+                    </div>
+                    <div id="tg-link-step-code" style="display:none">
+                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Enter the code sent to your Telegram app.</p>
+                        <input id="tg-link-code" class="form-control" type="text" placeholder="12345" maxlength="10">
+                        <div style="display:flex;gap:8px;margin-top:12px">
+                            <button class="btn btn-secondary" onclick="tgResetLinkFlow()">← Back</button>
+                            <button class="btn btn-primary" id="tg-verify-code-btn" onclick="tgVerifyCode()">✅ Verify Code</button>
+                        </div>
+                    </div>
+                    <div id="tg-link-step-2fa" style="display:none">
+                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Two-factor authentication required. Enter your Telegram password.</p>
+                        <input id="tg-link-2fa" class="form-control" type="password" placeholder="2FA Password">
+                        <button class="btn btn-primary mt-3" id="tg-verify-2fa-btn" onclick="tgVerify2FA()">🔓 Confirm</button>
+                    </div>
+                </div>
+
+                <!-- Connection logs -->
+                <div id="tg-modal-logs" style="display:none;margin-top:14px">
+                    <div class="tg-logs-panel" id="tg-modal-logs-content"></div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Scripts -->
     <script src="/static/js/auth.js"></script>

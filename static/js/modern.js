@@ -346,7 +346,195 @@ function renderSystemPage() {
 
     updateStats();
     updateSystemStatus();
+    if (isAdmin) checkTelegramSessionStatus();
     if (hasYt) renderYoutubeOverview();
+}
+
+// ── Telegram Session Card ─────────────────────────────────────────────────────
+
+async function checkTelegramSessionStatus() {
+    const card = document.getElementById('tg-session-card');
+    if (!card) return;
+    const isAdmin = !currentUser || currentUser.role === 'admin';
+    if (!isAdmin) return;
+    const data = await api('/api/telegram/session/status');
+    if (data.status !== 'ok') return;
+    card.innerHTML = _renderTgSessionCardHtml(data);
+}
+
+function _renderTgSessionCardHtml(data) {
+    const hasSession = data.has_session;
+    const phone = data.phone ? escapeHtmlSys(data.phone) : '';
+    const badge = hasSession
+        ? `<span class="tg-status-badge tg-status-ok">● Session on file</span>${phone ? `<span class="tg-status-phone">${phone}</span>` : ''}`
+        : `<span class="tg-status-badge tg-status-warn">⚠ No session configured</span>`;
+    return `
+        <div class="card tg-session-card">
+            <div class="tg-session-card-header">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:20px">📡</span>
+                    <div>
+                        <strong>Telegram Userbot</strong>
+                        <div style="margin-top:3px">${badge}</div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-sm btn-secondary" id="tg-test-btn" onclick="tgTestConnection()">🔌 Test</button>
+                    <button class="btn btn-sm btn-primary" onclick="openTgSessionModal()">${hasSession ? '✏️ Update' : '⚙️ Setup'} Session</button>
+                </div>
+            </div>
+            <div id="tg-test-logs" class="tg-logs-panel" style="display:none;margin-top:12px"></div>
+        </div>`;
+}
+
+async function tgTestConnection() {
+    const logsEl = document.getElementById('tg-test-logs');
+    const btn = document.getElementById('tg-test-btn');
+    if (!logsEl || !btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ Testing…';
+    logsEl.style.display = '';
+    logsEl.innerHTML = '<div class="tg-log-line tg-log-info">Connecting…</div>';
+    const data = await api('/api/telegram/session/test', {});
+    const logs = data.logs || [];
+    logsEl.innerHTML = logs.map(l => {
+        const cls = l.includes('[ERROR]') ? 'tg-log-error' : l.includes('[SUCCESS]') ? 'tg-log-success' : 'tg-log-info';
+        return `<div class="tg-log-line ${cls}">${escapeHtmlSys(l)}</div>`;
+    }).join('');
+    if (data.status === 'ok') {
+        logsEl.innerHTML += `<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this)">🔄 Restart Bot to Apply</button></div>`;
+    }
+    btn.disabled = false;
+    btn.textContent = '🔌 Test';
+}
+
+function openTgSessionModal() {
+    switchTgTab('paste');
+    tgResetLinkFlow();
+    const pi = document.getElementById('tg-paste-input');
+    const pp = document.getElementById('tg-paste-phone');
+    if (pi) pi.value = '';
+    if (pp) pp.value = '';
+    const logs = document.getElementById('tg-modal-logs');
+    if (logs) logs.style.display = 'none';
+    document.getElementById('tg-session-modal').style.display = 'flex';
+}
+
+function closeTgSessionModal() {
+    document.getElementById('tg-session-modal').style.display = 'none';
+}
+
+function switchTgTab(tab) {
+    document.getElementById('tg-tab-paste').style.display = tab === 'paste' ? '' : 'none';
+    document.getElementById('tg-tab-link').style.display  = tab === 'link'  ? '' : 'none';
+    document.getElementById('tg-tab-btn-paste').classList.toggle('active', tab === 'paste');
+    document.getElementById('tg-tab-btn-link').classList.toggle('active',  tab === 'link');
+}
+
+function tgResetLinkFlow() {
+    const s = (id, show) => { const el = document.getElementById(id); if (el) el.style.display = show ? '' : 'none'; };
+    s('tg-link-step-phone', true);
+    s('tg-link-step-code',  false);
+    s('tg-link-step-2fa',   false);
+    ['tg-link-phone','tg-link-code','tg-link-2fa'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+}
+
+function _tgShowModalLogs(logs) {
+    const wrap = document.getElementById('tg-modal-logs');
+    const content = document.getElementById('tg-modal-logs-content');
+    if (!wrap || !content) return;
+    wrap.style.display = '';
+    content.innerHTML = logs.map(l => {
+        const cls = l.includes('[ERROR]') ? 'tg-log-error' : l.includes('[SUCCESS]') ? 'tg-log-success' : 'tg-log-info';
+        return `<div class="tg-log-line ${cls}">${escapeHtmlSys(l)}</div>`;
+    }).join('');
+}
+
+async function tgSaveSession() {
+    const sessionStr = (document.getElementById('tg-paste-input').value || '').trim();
+    const phone = (document.getElementById('tg-paste-phone').value || '').trim();
+    if (!sessionStr) { showAlert('Please enter a session string.'); return; }
+    const r = await api('/api/auth/profile/update-session', { session_string: sessionStr, phone });
+    if (r.status === 'ok') {
+        _tgShowModalLogs(['[INFO] Session saved — testing connection…']);
+        const test = await api('/api/telegram/session/test', {});
+        _tgShowModalLogs(test.logs || []);
+        if (test.status === 'ok') {
+            await checkTelegramSessionStatus();
+            document.getElementById('tg-modal-logs-content').innerHTML +=
+                '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
+        }
+    } else {
+        _tgShowModalLogs([`[ERROR] ${r.error || 'Failed to save session'}`]);
+    }
+}
+
+let _tgPendingPhone = '';
+
+async function tgSendCode() {
+    const phone = (document.getElementById('tg-link-phone').value || '').trim();
+    if (!phone) { showAlert('Please enter your phone number.'); return; }
+    const btn = document.getElementById('tg-send-code-btn');
+    btn.disabled = true; btn.textContent = '⏳ Sending…';
+    const r = await api('/api/auth/telegram/send-code', { phone });
+    btn.disabled = false; btn.textContent = '📨 Send Code';
+    if (r.status === 'ok') {
+        _tgPendingPhone = phone;
+        document.getElementById('tg-link-step-phone').style.display = 'none';
+        document.getElementById('tg-link-step-code').style.display  = '';
+        showNotification('Code sent to your Telegram app', 'success');
+    } else {
+        showAlert(r.error || 'Failed to send code');
+    }
+}
+
+async function tgVerifyCode() {
+    const code = (document.getElementById('tg-link-code').value || '').trim();
+    if (!code) { showAlert('Please enter the code.'); return; }
+    const btn = document.getElementById('tg-verify-code-btn');
+    btn.disabled = true; btn.textContent = '⏳ Verifying…';
+    const r = await api('/api/auth/telegram/verify-code', { phone: _tgPendingPhone, code });
+    btn.disabled = false; btn.textContent = '✅ Verify Code';
+    if (r.status === 'ok') {
+        _tgShowModalLogs(['[SUCCESS] Telegram account linked successfully']);
+        await checkTelegramSessionStatus();
+        document.getElementById('tg-modal-logs-content').innerHTML +=
+            '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
+    } else if (r.status === 'needs_2fa') {
+        document.getElementById('tg-link-step-code').style.display = 'none';
+        document.getElementById('tg-link-step-2fa').style.display  = '';
+    } else {
+        showAlert(r.error || 'Verification failed');
+    }
+}
+
+async function tgVerify2FA() {
+    const pwd = document.getElementById('tg-link-2fa').value || '';
+    if (!pwd) { showAlert('Please enter your 2FA password.'); return; }
+    const btn = document.getElementById('tg-verify-2fa-btn');
+    btn.disabled = true; btn.textContent = '⏳ Verifying…';
+    const r = await api('/api/auth/telegram/verify-2fa', { phone: _tgPendingPhone, password: pwd });
+    btn.disabled = false; btn.textContent = '🔓 Confirm';
+    if (r.status === 'ok') {
+        _tgShowModalLogs(['[SUCCESS] Telegram account linked successfully']);
+        await checkTelegramSessionStatus();
+        document.getElementById('tg-modal-logs-content').innerHTML +=
+            '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
+    } else {
+        showAlert(r.error || '2FA verification failed');
+    }
+}
+
+async function restartBotProcess(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Restarting…'; }
+    const r = await api('/api/system/restart', {});
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Restart Bot to Apply'; }
+    if (r.status === 'ok') {
+        showNotification('Bot restarted successfully', 'success');
+        await checkTelegramSessionStatus();
+    } else {
+        showAlert(r.message || 'Failed to restart bot');
+    }
 }
 
 async function renderYoutubeOverview() {

@@ -65,8 +65,18 @@ def _is_rate_limited(exc: Exception) -> float | None:
     return float(m.group(1)) if m else 40.0
 
 
-def _summarize_via_gemini_video(video_id: str, prompt: str) -> str:
-    """Tier 1: Send YouTube URL directly to Gemini for native video understanding."""
+def _extract_tokens(response) -> tuple[int, int]:
+    """Return (input_tokens, output_tokens) from a Gemini response."""
+    um = getattr(response, 'usage_metadata', None)
+    if um:
+        return (getattr(um, 'prompt_token_count', 0) or 0,
+                getattr(um, 'candidates_token_count', 0) or 0)
+    return 0, 0
+
+
+def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int]:
+    """Strategy 1: Send YouTube URL directly to Gemini for native video understanding.
+    Returns (summary_text, input_tokens, output_tokens)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
@@ -77,19 +87,19 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> str:
             ]
         )
     )
-    return response.text.strip()
+    inp, out = _extract_tokens(response)
+    return response.text.strip(), inp, out
 
 
-def _summarize_via_transcript(video_id: str, prompt: str) -> str:
-    """Tier 2: Fetch transcript via youtube-transcript-api, send text to Gemini."""
+def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int]:
+    """Strategy 2: Fetch transcript via youtube-transcript-api, send text to Gemini.
+    Returns (summary_text, input_tokens, output_tokens)."""
     from youtube_transcript_api import YouTubeTranscriptApi
 
     ytt_api = YouTubeTranscriptApi()
-    # Try fetching transcript in any available language
     try:
         transcript_list = ytt_api.fetch(video_id)
     except Exception:
-        # If default (English) fails, list available and pick the first one
         transcript_map = ytt_api.list(video_id)
         available = list(transcript_map)
         if not available:
@@ -104,17 +114,20 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> str:
         model='gemini-2.5-flash',
         contents={'text': prompt + f"\n\nVideo transcript:\n\n{full_text}"}
     )
-    return response.text.strip()
+    inp, out = _extract_tokens(response)
+    return response.text.strip(), inp, out
 
 
-def _summarize_via_metadata(video_id: str, title: str, description: str, tags: list, prompt: str) -> str:
-    """Tier 2: Summarize from metadata only (fallback when no transcript available)."""
+def _summarize_via_metadata(video_id: str, title: str, description: str, tags: list, prompt: str) -> tuple[str, int, int]:
+    """Strategy 3: Summarize from metadata only (fallback when no transcript available).
+    Returns (summary_text, input_tokens, output_tokens)."""
     meta = f"Title: {title}\n\nDescription: {description or 'N/A'}\n\nTags: {', '.join(tags or [])}"
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
         contents={'text': prompt + f"\n\nVideo metadata (no transcript available):\n\n{meta}"}
     )
-    return response.text.strip()
+    inp, out = _extract_tokens(response)
+    return response.text.strip(), inp, out
 
 
 def _fetch_video_metadata(video_id: str) -> dict:
@@ -197,12 +210,14 @@ async def process_queue_item(queue_item: dict) -> bool:
     prompt = prompt.replace('{link}', video_link)
     prompt = prompt.replace('{channel_name}', channel_name or 'N/A')
 
+    # Compute duration_secs unconditionally (needed for video-hour tracking)
+    duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
+
     # Apply channel-level duration/view filters (title filters already applied in WebSub)
     if source_channel_id:
         ch_filter = db.get_channel_by_yt_id(source_channel_id)
         if ch_filter:
             # Duration filter
-            duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
             min_dur = ch_filter.get('min_duration_seconds')
             max_dur = ch_filter.get('max_duration_seconds')
             if min_dur and duration_secs and duration_secs < min_dur:
@@ -226,47 +241,77 @@ async def process_queue_item(queue_item: dict) -> bool:
 
     summary_text = None
     transcript_source = None
+    inp_tokens = 0
+    out_tokens = 0
 
-    # Tier 1: Gemini native video understanding (best quality — sees actual video)
+    # Strategy 1: Gemini native video (URL) — best quality, sees/hears actual content
+    # Guard: skip if daily 8-hour video quota is exhausted
+    _video_allowed = True
     try:
-        summary_text = _summarize_via_gemini_video(video_id, prompt)
+        from utils.gemini_usage import get_gemini_video_seconds_used, VIDEO_SECS_LIMIT
+        if get_gemini_video_seconds_used() + duration_secs > VIDEO_SECS_LIMIT:
+            logger.warning(f"[YT-WORKER] Daily video-hour quota reached — skipping native video for {video_id}")
+            _video_allowed = False
+    except Exception:
+        pass
+
+    try:
+        if not _video_allowed:
+            raise RuntimeError("Daily video-hour quota reached")
+        summary_text, inp_tokens, out_tokens = _summarize_via_gemini_video(video_id, prompt)
         transcript_source = 'gemini_video'
-        logger.info(f"[YT-WORKER] Tier 1 (gemini video) success for {video_id}")
+        logger.info(f"[YT-WORKER] Strategy 1 (gemini video) success for {video_id}")
+        try:
+            from utils.gemini_usage import record_gemini_request, record_gemini_video_seconds
+            record_gemini_video_seconds(duration_secs)
+            record_gemini_request(total_tokens=inp_tokens + out_tokens)
+        except Exception:
+            pass
     except Exception as e:
         delay = _is_rate_limited(e)
         if delay:
-            logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next tier…")
+            logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
             await asyncio.sleep(delay)
-        logger.warning(f"[YT-WORKER] Tier 1 (gemini video) failed for {video_id}: {e}")
+        logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) failed for {video_id}: {e}")
 
-    # Tier 2: Transcript API text → Gemini
+    # Strategy 2: Transcript text → Gemini (fallback — no video quota used)
     if not summary_text:
         try:
-            summary_text = _summarize_via_transcript(video_id, prompt)
+            summary_text, inp_tokens, out_tokens = _summarize_via_transcript(video_id, prompt)
             transcript_source = 'transcript_api'
-            logger.info(f"[YT-WORKER] Tier 2 (transcript) success for {video_id}")
+            logger.info(f"[YT-WORKER] Strategy 2 (transcript) success for {video_id}")
+            try:
+                from utils.gemini_usage import record_gemini_request
+                record_gemini_request(total_tokens=inp_tokens + out_tokens)
+            except Exception:
+                pass
         except Exception as e:
             delay = _is_rate_limited(e)
             if delay:
-                logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next tier…")
+                logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
                 await asyncio.sleep(delay)
-            logger.warning(f"[YT-WORKER] Tier 2 (transcript) failed for {video_id}: {e}")
+            logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id}: {e}")
 
-    # Tier 3: Metadata only — only if description is substantial (>100 chars)
+    # Strategy 3: Metadata only — only if description is substantial (>100 chars)
     if not summary_text and description and len(description.strip()) > 100:
         try:
-            summary_text = _summarize_via_metadata(video_id, title, description, tags, prompt)
+            summary_text, inp_tokens, out_tokens = _summarize_via_metadata(video_id, title, description, tags, prompt)
             transcript_source = 'metadata'
-            logger.info(f"[YT-WORKER] Tier 3 (metadata) success for {video_id}")
+            logger.info(f"[YT-WORKER] Strategy 3 (metadata) success for {video_id}")
+            try:
+                from utils.gemini_usage import record_gemini_request
+                record_gemini_request(total_tokens=inp_tokens + out_tokens)
+            except Exception:
+                pass
         except Exception as e:
-            logger.error(f"[YT-WORKER] All tiers failed for {video_id}: {e}")
+            logger.error(f"[YT-WORKER] All strategies failed for {video_id}: {e}")
             db.update_queue_status(queue_id, 'failed', error_log=str(e))
             return False
 
-    # All tiers exhausted — mark as failed so user can retry
+    # All strategies exhausted — mark as failed so user can retry
     if not summary_text:
         reason = 'No transcript or meaningful metadata available'
-        logger.warning(f"[YT-WORKER] All tiers failed for {video_id}: {reason}")
+        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}: {reason}")
         db.update_queue_status(queue_id, 'failed', error_log=reason)
         return False
 
@@ -279,6 +324,9 @@ async def process_queue_item(queue_item: dict) -> bool:
         transcript_source=transcript_source,
         summary_text=summary_text,
         telegram_target=telegram_target,
+        duration_secs=int(duration_secs) if duration_secs else None,
+        input_tokens=inp_tokens or None,
+        output_tokens=out_tokens or None,
     )
 
     # Send via Telegram if target is set and sender is available

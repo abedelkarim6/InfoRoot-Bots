@@ -24,6 +24,7 @@ async function loadProfileData() {
     if (navLbl) navLbl.textContent = _profileUser.username;
 
     el.innerHTML = renderProfilePage(_profileUser);
+    if (_profileUser.role === 'admin') loadGeminiUsage();
 }
 
 function renderProfilePage(u) {
@@ -159,6 +160,15 @@ function renderProfilePage(u) {
     </div>
   </div>
 
+  <!-- ── Gemini API usage (admin only) ── -->
+  ${isAdmin ? `<div class="card" style="margin-bottom:20px" id="pf-gemini-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 style="font-size:14px;font-weight:600;margin:0">✨ Gemini API Usage</h3>
+      <button class="btn btn-secondary btn-sm" onclick="loadGeminiUsage()">↺ Refresh</button>
+    </div>
+    <div id="pf-gemini-usage"><p class="text-muted" style="font-size:13px">Loading…</p></div>
+  </div>` : ''}
+
   <!-- ── Change password (DB users only) ── -->
   ${!isAdmin ? `
   <div class="card">
@@ -187,6 +197,55 @@ function renderProfilePage(u) {
   </div>` : ''}
 
 </div>`;
+}
+
+// ── Gemini usage ──────────────────────────────────────────────────────────────
+
+async function loadGeminiUsage() {
+    const el = document.getElementById('pf-gemini-usage');
+    if (!el) return;
+    const token = localStorage.getItem('auth_token');
+    const r = await fetch('/api/system/gemini-usage', {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    if (!r.ok) { el.innerHTML = '<p style="color:var(--danger);font-size:13px">Failed to load usage.</p>'; return; }
+    const data = await r.json();
+
+    function meter(label, desc, used, limit, usedOverride, limOverride) {
+        const pct = limit > 0 ? Math.min(100, Math.round(used / limit * 100)) : 0;
+        const color = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--success)';
+        const usedFmt = usedOverride ?? (used >= 1_000_000 ? (used / 1_000_000).toFixed(2) + 'M' : used.toLocaleString());
+        const limFmt  = limOverride  ?? (limit >= 1_000_000 ? (limit / 1_000_000).toFixed(0) + 'M' : limit.toLocaleString());
+        return `
+          <div style="margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+              <span style="font-size:13px;font-weight:500">${label}</span>
+              <span style="font-size:12px;color:var(--text-muted)">${desc}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="flex:1;background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+                <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:width .4s"></div>
+              </div>
+              <span style="font-size:12px;min-width:90px;text-align:right;color:var(--text-muted)">
+                <strong style="color:var(--text-primary)">${usedFmt}</strong> / ${limFmt}
+              </span>
+            </div>
+          </div>`;
+    }
+
+    // Format video hours
+    const vidUsedH  = (data.video.used  / 3600).toFixed(2);
+    const vidLimH   = (data.video.limit / 3600).toFixed(0);
+
+    el.innerHTML =
+        meter('RPM',   'Requests per minute',            data.rpm.used,   data.rpm.limit) +
+        meter('TPM',   'Total tokens per minute (in+out)', data.tpm.used, data.tpm.limit) +
+        meter('RPD',   'Requests per day',               data.rpd.used,   data.rpd.limit) +
+        meter('Video', 'Native video hours per day',     data.video.used, data.video.limit,
+              `${vidUsedH}h`, `${vidLimH}h`) +
+        `<p style="font-size:11px;color:var(--text-muted);margin-top:4px">
+           RPM &amp; TPM reset every 60 s · RPD &amp; Video reset at midnight
+         </p>`;
 }
 
 // ── Telegram re-link flow ─────────────────────────────────────────────────────
