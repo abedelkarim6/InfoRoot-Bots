@@ -144,13 +144,16 @@ class YouTubeDB:
 
         # ── Safe column migrations ──────────────────────────────────
         def _ensure_col(table, col, col_type, default=None):
-            cursor.execute("""
+            self.connection.commit()  # flush any prior state before each migration
+            cur = self.connection.cursor()
+            cur.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = %s AND column_name = %s
             """, (table, col))
-            if not cursor.fetchone():
+            if not cur.fetchone():
                 defstr = f" DEFAULT {default}" if default is not None else ""
-                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}{defstr}")
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}{defstr}")
+            self.connection.commit()
 
         _ensure_col('yt_channels', 'telegram_target', 'TEXT')
         _ensure_col('yt_channels', 'prompt', 'TEXT')
