@@ -754,7 +754,8 @@ class YouTubeDB:
             LEFT JOIN yt_seen_videos sv ON q.video_id = sv.video_id
             LEFT JOIN yt_channels ch ON sv.channel_id = ch.channel_id
             LEFT JOIN LATERAL (
-                SELECT id, title, channel_name, transcript_source, summary_text, telegram_sent
+                SELECT id, title, channel_name, transcript_source, summary_text,
+                       telegram_sent, duration_secs, input_tokens, output_tokens
                 FROM yt_summaries
                 WHERE video_id = q.video_id
                 ORDER BY created_at DESC LIMIT 1
