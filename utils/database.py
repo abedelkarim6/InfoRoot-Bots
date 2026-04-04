@@ -318,18 +318,7 @@ class Database:
             except Exception as e:
                 logger.warning(f"[DB] Could not auto-migrate prompts: {e}")
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS recycle_bin (
-                id SERIAL PRIMARY KEY,
-                entity_type TEXT NOT NULL,
-                entity_name TEXT NOT NULL,
-                entity_data JSONB NOT NULL DEFAULT '{}',
-                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                deleted_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-
-        # Registered users (multi-user support)
+        # Registered users (multi-user support) — must exist before recycle_bin (FK dependency)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -373,6 +362,17 @@ class Database:
             cursor.execute("ALTER TABLE users ADD COLUMN gemini_project_agents TEXT DEFAULT NULL")
             if 'gemini_api_key_3' in user_cols:
                 cursor.execute("UPDATE users SET gemini_project_agents = gemini_api_key_3 WHERE gemini_api_key_3 IS NOT NULL")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recycle_bin (
+                id SERIAL PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_name TEXT NOT NULL,
+                entity_data JSONB NOT NULL DEFAULT '{}',
+                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                deleted_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
 
         # Migrate bots.owner_id — must run after users table exists
         cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'bots'")
