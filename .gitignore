@@ -9,3 +9,4 @@ get_ss.py
 .env
 config.yaml
 userbot.session
+venv/
