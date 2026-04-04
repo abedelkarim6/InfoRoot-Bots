@@ -44,12 +44,14 @@ def list_accounts(request: Request):
 
     # Attach inheritance data to each user
     for user in users:
-        user["bot_inheritances"] = db.get_user_bot_inheritances(user["id"])
-        user["yt_inheritances"]  = db.get_user_yt_inheritances(user["id"])
+        user["bot_inheritances"]        = db.get_user_bot_inheritances(user["id"])
+        user["yt_inheritances"]         = db.get_user_yt_inheritances(user["id"])
+        user["collection_inheritances"] = db.get_user_collection_inheritances(user["id"])
 
     # Available resources for the admin to assign
-    bots       = db.get_bots_flat()
-    categories = db.get_categories_topics_flat()
+    bots        = db.get_bots_flat()
+    categories  = db.get_categories_topics_flat()
+    collections = list(db.get_all_collections().keys())
 
     # YouTube resources (from yt_db)
     yt_channels, yt_keywords = [], []
@@ -62,20 +64,24 @@ def list_accounts(request: Request):
         pass
 
     return {
-        "users":          users,
-        "available_bots": bots,
-        "categories":     categories,
-        "yt_channels":    yt_channels,
-        "yt_keywords":    yt_keywords,
+        "users":                users,
+        "available_bots":       bots,
+        "categories":           categories,
+        "available_collections": collections,
+        "yt_channels":          yt_channels,
+        "yt_keywords":          yt_keywords,
     }
 
 
 # ── Update user settings ──────────────────────────────────────────────────────
 
 class UpdateUserRequest(BaseModel):
-    is_active:   Optional[bool] = None
-    youtube_on:  Optional[bool] = None
-    agents_on:   Optional[bool] = None
+    is_active:    Optional[bool] = None
+    bots_on:      Optional[bool] = None
+    youtube_on:   Optional[bool] = None
+    yt_chat_on:   Optional[bool] = None
+    agents_on:    Optional[bool] = None
+    sys_bot_on:   Optional[bool] = None
     agents_limit: Optional[dict] = None   # {"type": "money"|"calls", "value": 10.0}
 
 
@@ -90,7 +96,12 @@ def update_user(user_id: int, req: UpdateUserRequest, request: Request):
     if not kwargs:
         return {"status": "ok"}
     db.update_user(user_id, **kwargs)
+    # Kick out active sessions immediately when deactivating
+    if kwargs.get("is_active") is False:
+        from routers.auth import revoke_all_tokens_for_user
+        revoke_all_tokens_for_user(user_id)
     return {"status": "ok"}
+
 
 
 # ── Delete user ───────────────────────────────────────────────────────────────
@@ -134,6 +145,58 @@ def revoke_bot(user_id: int, bot_id: int, request: Request):
     _require_admin(request)
     db = get_db()
     db.delete_user_bot_inheritance(user_id, bot_id)
+    return {"status": "ok"}
+
+
+# ── Per-topic inheritance settings ────────────────────────────────────────────
+
+class TopicSettingsRequest(BaseModel):
+    include_schedules: Optional[bool] = None
+    include_prompts:   Optional[bool] = None
+    keyword_pct:       Optional[int]  = None   # 0-100
+
+
+@router.post("/admin/accounts/{user_id}/bots/{bot_id}/topics/{topic_id}")
+def update_topic_settings(user_id: int, bot_id: int, topic_id: int,
+                           req: TopicSettingsRequest, request: Request):
+    _require_admin(request)
+    db = get_db()
+    inh_id = db.get_bot_inheritance_id(user_id, bot_id)
+    if inh_id is None:
+        raise HTTPException(404, "Bot inheritance not found")
+    settings = {k: v for k, v in req.dict().items() if v is not None}
+    db.upsert_topic_settings(inh_id, topic_id, settings)
+    return {"status": "ok"}
+
+
+@router.post("/admin/accounts/{user_id}/bots/{bot_id}/topics/{topic_id}/delete")
+def delete_topic_settings(user_id: int, bot_id: int, topic_id: int, request: Request):
+    _require_admin(request)
+    db = get_db()
+    inh_id = db.get_bot_inheritance_id(user_id, bot_id)
+    if inh_id is None:
+        raise HTTPException(404, "Bot inheritance not found")
+    db.delete_topic_settings(inh_id, topic_id)
+    return {"status": "ok"}
+
+
+# ── Collection inheritance ────────────────────────────────────────────────────
+
+@router.post("/admin/accounts/{user_id}/collections/{collection_name}")
+def grant_collection(user_id: int, collection_name: str, request: Request):
+    _require_admin(request)
+    db = get_db()
+    if not db.get_user_by_id(user_id):
+        raise HTTPException(404, "User not found")
+    db.grant_collection_inheritance(user_id, collection_name)
+    return {"status": "ok"}
+
+
+@router.post("/admin/accounts/{user_id}/collections/{collection_name}/delete")
+def revoke_collection(user_id: int, collection_name: str, request: Request):
+    _require_admin(request)
+    db = get_db()
+    db.revoke_collection_inheritance(user_id, collection_name)
     return {"status": "ok"}
 
 

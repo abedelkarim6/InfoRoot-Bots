@@ -2,27 +2,58 @@
 
 let _sysChatSessionId = null;
 let _sysChatMessages = []; // {role, text, id, actions, loading, error}
+let _sysChatStreaming = false;
+let _sysChatAbortController = null;
 
 // ==================== Init & Session ====================
 
 async function sysChatInit() {
-    _sysChatRenderMessages();
-
-    if (!_sysChatSessionId) {
-        _sysChatSetStatus('connecting', 'Connecting…');
-        const res = await api('/api/chatbot/system/start', {});
-        if (res.status === 'ok') {
-            _sysChatSessionId = res.session_id;
-            _sysChatSetStatus('ready', 'Ready');
-        } else {
-            _sysChatSetStatus('error', 'Connection failed');
-            ytToast('Failed to start system chat: ' + (res.message || ''), 'error');
+    // If already active (returning mid-stream or with messages), just re-render
+    if (_sysChatSessionId) {
+        _sysChatRenderMessages();
+        _sysChatSetCancelVisible(_sysChatStreaming);
+        if (!_sysChatStreaming) {
+            document.getElementById('sc-input')?.focus();
         }
+        return;
+    }
+
+    // Fresh start
+    _sysChatRenderMessages();
+    _sysChatSetStatus('connecting', 'Connecting…');
+    const res = await api('/api/chatbot/system/start', {});
+    if (res.status === 'ok') {
+        _sysChatSessionId = res.session_id;
+        _sysChatSetStatus('ready', 'Ready');
+    } else {
+        _sysChatSetStatus('error', 'Connection failed');
+        ytToast('Failed to start system chat: ' + (res.message || ''), 'error');
     }
     document.getElementById('sc-input')?.focus();
 }
 
+function sysChatCancel() {
+    if (_sysChatAbortController) {
+        _sysChatAbortController.abort();
+        _sysChatAbortController = null;
+    }
+}
+
+function _sysChatSetCancelVisible(visible) {
+    const btn = document.getElementById('sc-cancel-btn');
+    const send = document.getElementById('sc-send-btn');
+    if (btn) btn.style.display = visible ? '' : 'none';
+    if (send) send.style.display = visible ? 'none' : '';
+}
+
 async function sysChatReset() {
+    if (_sysChatAbortController) {
+        _sysChatAbortController.abort();
+        _sysChatAbortController = null;
+    }
+    _sysChatStreaming = false;
+    _sysChatSetCancelVisible(false);
+
     if (_sysChatSessionId) {
         api('/api/chatbot/system/end', { session_id: _sysChatSessionId });
     }
@@ -70,7 +101,6 @@ async function sysChatSend(text) {
 
     if (!text && input) { input.value = ''; input.style.height = 'auto'; }
 
-    // Hide suggestions after first message
     const sug = document.getElementById('sc-suggestions');
     if (sug) sug.style.display = 'none';
 
@@ -78,40 +108,138 @@ async function sysChatSend(text) {
     _sysChatMessages.push({ role: 'user', text: message, id: msgId });
 
     const replyId = msgId + 1;
-    _sysChatMessages.push({ role: 'assistant', text: '', id: replyId, loading: true, actions: [] });
+    _sysChatMessages.push({ role: 'assistant', text: '', steps: [], id: replyId, loading: true, streaming: false, actions: [] });
     _sysChatRenderMessages();
 
-    const sendBtn = document.getElementById('sc-send-btn');
     if (input) input.disabled = true;
-    if (sendBtn) sendBtn.disabled = true;
+    _sysChatStreaming = true;
+    _sysChatSetCancelVisible(true);
     _sysChatSetStatus('thinking', 'Working…');
+    _sysChatHideActions();
 
-    const res = await api('/api/chatbot/system/send', { session_id: _sysChatSessionId, message });
+    _sysChatAbortController = new AbortController();
 
-    if (input) input.disabled = false;
-    if (sendBtn) sendBtn.disabled = false;
-    if (input) input.focus();
-    _sysChatSetStatus('ready', 'Ready');
+    try {
+        const response = await fetch('/api/chatbot/system/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: _sysChatSessionId, message }),
+            signal: _sysChatAbortController.signal,
+        });
 
-    const placeholder = _sysChatMessages.find(m => m.id === replyId);
-    if (placeholder) {
-        placeholder.loading = false;
-        if (res.status === 'ok') {
-            placeholder.text = res.reply;
-            placeholder.actions = res.actions || [];
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let started = false;
+        let lastActions = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let evt;
+                try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+                const msg = _sysChatMessages.find(m => m.id === replyId);
+                if (!msg) continue;
+
+                if (!started) {
+                    started = true;
+                    msg.loading = false;
+                    msg.streaming = true;
+                }
+
+                if (evt.type === 'step') {
+                    msg.steps.push(evt);
+                    _sysChatUpdateBubble(replyId);
+                } else if (evt.type === 'delta') {
+                    msg.text += evt.content;
+                    _sysChatUpdateBubble(replyId);
+                } else if (evt.type === 'done') {
+                    msg.text = evt.content || msg.text;
+                    msg.streaming = false;
+                    msg.actions = evt.actions || [];
+                    lastActions = msg.actions;
+                    _sysChatUpdateBubble(replyId);
+                } else if (evt.type === 'error') {
+                    _sysChatMessages = _sysChatMessages.filter(m => m.id !== replyId);
+                    ytToast(evt.message || 'Agent error', 'error');
+                    _sysChatRenderMessages();
+                }
+            }
+        }
+
+        if (lastActions.length) _sysChatShowActions(lastActions);
+
+    } catch (e) {
+        if (e.name === 'AbortError') {
+            const msg = _sysChatMessages.find(m => m.id === replyId);
+            if (msg) {
+                msg.loading = false;
+                msg.streaming = false;
+                if (!msg.text) {
+                    _sysChatMessages = _sysChatMessages.filter(m => m.id !== replyId);
+                }
+            }
+            _sysChatRenderMessages();
         } else {
             _sysChatMessages = _sysChatMessages.filter(m => m.id !== replyId);
-            ytToast('Failed to get response. Please try again.', 'error');
+            ytToast('Connection error. Please try again.', 'error');
+            _sysChatRenderMessages();
         }
     }
-    _sysChatRenderMessages();
 
-    // Show action cards if any
-    if (res.status === 'ok' && res.actions && res.actions.length) {
-        _sysChatShowActions(res.actions);
-    } else {
-        _sysChatHideActions();
+    _sysChatStreaming = false;
+    _sysChatAbortController = null;
+    _sysChatSetCancelVisible(false);
+    if (input) input.disabled = false;
+    if (input) input.focus();
+    _sysChatSetStatus('ready', 'Ready');
+}
+
+function _sysChatUpdateBubble(msgId) {
+    const msg = _sysChatMessages.find(m => m.id === msgId);
+    if (!msg) return;
+    const el = document.querySelector(`[data-sc-msg-id="${msgId}"]`);
+    if (!el) { _sysChatRenderMessages(); return; }
+
+    const labelEl = el.querySelector('.sc-msg-label');
+    if (labelEl) {
+        labelEl.textContent = msg.loading || msg.streaming ? 'Working…' : 'System Agent';
     }
+
+    const bubble = el.querySelector('.sc-msg-bubble-ai');
+    if (bubble) bubble.innerHTML = _sysChatBubbleInner(msg);
+
+    const container = document.getElementById('sc-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+}
+
+function _sysChatBubbleInner(msg) {
+    if (msg.loading) return _sysChatSkeletonHTML();
+    let html = '';
+    if (msg.steps && msg.steps.length) {
+        html += '<div class="ac-steps">';
+        html += msg.steps.map(s =>
+            `<div class="ac-step"><span class="ac-step-icon">${s.icon}</span><span class="ac-step-label">${escapeHtml(s.label)}</span></div>`
+        ).join('');
+        html += '</div>';
+    }
+    if (msg.text) {
+        html += `<div class="ac-content${msg.streaming ? ' ac-content-streaming' : ''}">${_sysChatFormatText(msg.text)}</div>`;
+    } else if (msg.streaming && (!msg.steps || !msg.steps.length)) {
+        html += _sysChatSkeletonHTML();
+    }
+    if (!msg.loading && !msg.streaming && msg.actions && msg.actions.length) {
+        html += _sysChatInlineActions(msg.actions);
+    }
+    return html;
 }
 
 
@@ -133,14 +261,14 @@ function _sysChatRenderMessages() {
                 <div class="sc-msg-bubble sc-msg-bubble-user">${escapeHtml(msg.text)}</div>
             </div>`;
         } else {
-            html += `<div class="sc-msg sc-msg-ai">
+            const scLabel = msg.loading || msg.streaming ? 'Working…' : 'System Agent';
+            html += `<div class="sc-msg sc-msg-ai" data-sc-msg-id="${msg.id}">
                 <div class="sc-msg-avatar">SYS</div>
                 <div class="sc-msg-body">
-                    <div class="sc-msg-label">${msg.loading ? 'Working…' : 'System Agent'}</div>
+                    <div class="sc-msg-label">${scLabel}</div>
                     <div class="sc-msg-bubble sc-msg-bubble-ai">
-                        ${msg.loading ? _sysChatSkeletonHTML() : _sysChatFormatText(msg.text)}
+                        ${_sysChatBubbleInner(msg)}
                     </div>
-                    ${(!msg.loading && msg.actions && msg.actions.length) ? _sysChatInlineActions(msg.actions) : ''}
                 </div>
             </div>`;
         }
@@ -173,21 +301,7 @@ function _sysChatSkeletonHTML() {
 
 function _sysChatFormatText(text) {
     if (!text) return '';
-    let html = escapeHtml(text);
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="ac-code-block"><code>$2</code></pre>');
-    html = html.replace(/`([^`]+)`/g, '<code class="ac-inline-code">$1</code>');
-    html = html.replace(/^### (.+)$/gm, '<h4 class="ac-md-h">$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3 class="ac-md-h">$1</h3>');
-    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
-    html = html.replace(/^\d+\.\s+(.*)$/gm, '<li class="ac-ol-item">$1</li>');
-    html = html.replace(/^[\-•]\s+(.*)$/gm, '<li>$1</li>');
-    html = html.replace(/((?:<li[^>]*>.*?<\/li>\s*)+)/g, '<ul class="ac-list">$1</ul>');
-    html = html.replace(/\n/g, '<br>');
-    html = html.replace(/(<\/h[234]>)<br>/g, '$1');
-    html = html.replace(/(<\/pre>)<br>/g, '$1');
-    html = html.replace(/(<\/ul>)<br>/g, '$1');
-    return html;
+    return marked.parse(text, { gfm: true, breaks: true });
 }
 
 

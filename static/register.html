@@ -234,7 +234,7 @@
             <span id="reg-error-text">Error.</span>
           </div>
 
-          <button type="submit" id="reg-btn">
+          <button type="submit" id="reg-btn" class="auth-btn">
             <span id="reg-btn-label">Create Account</span>
             <svg id="reg-btn-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -318,7 +318,7 @@
             <span id="tg-error-text">Error.</span>
           </div>
 
-          <button type="button" id="tg-send-btn" onclick="sendTgCode()">
+          <button type="button" id="tg-send-btn" class="auth-btn" onclick="sendTgCode()">
             <span id="tg-send-label">Send Code</span>
             <svg id="tg-send-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -358,7 +358,7 @@
             <span id="otp-error-text">Invalid code.</span>
           </div>
 
-          <button type="button" id="tg-verify-btn" onclick="verifyTgCode()">
+          <button type="button" id="tg-verify-btn" class="auth-btn" onclick="verifyTgCode()">
             <span id="tg-verify-label">Verify</span>
             <svg id="tg-verify-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -408,7 +408,7 @@
             <span id="twofa-error-text">Incorrect password.</span>
           </div>
 
-          <button type="button" id="tg-2fa-btn" onclick="verify2FA()">
+          <button type="button" id="tg-2fa-btn" class="auth-btn" onclick="verify2FA()">
             <span id="tg-2fa-label">Confirm</span>
             <svg id="tg-2fa-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -429,7 +429,7 @@
         <h2 class="card-title">You're all set!</h2>
         <p class="card-sub" id="done-sub">Your account has been created.</p>
 
-        <button type="button" id="go-app-btn" onclick="goToApp()" style="margin-top:8px">
+        <button type="button" id="go-app-btn" class="auth-btn" onclick="goToApp()">
           <span>Go to Dashboard</span>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px">
             <line x1="5" y1="12" x2="19" y2="12"></line>

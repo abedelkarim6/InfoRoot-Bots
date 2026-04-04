@@ -219,6 +219,11 @@ def categorizer(text, bot_name, db=None):
                         if kw not in found_keywords:
                             found_keywords.append(kw)
 
+            # Catch-all: match every message regardless of keywords
+            if not topic_matched and topic_data.get('catch_all'):
+                found_topics.append(topic_name)
+                topic_matched = True
+
             if topic_matched and category_name not in found_categories:
                 found_categories.append(category_name)
 

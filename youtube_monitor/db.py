@@ -172,6 +172,7 @@ class YouTubeDB:
         _ensure_col('yt_summaries', 'output_tokens',  'INTEGER')
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
+        _ensure_col('yt_video_queue', 'updated_at', 'TIMESTAMP', 'NOW()')
 
         # Channel-level video filters (mirror of keyword filters)
         _ensure_col('yt_channels', 'min_duration_seconds', 'INTEGER')
@@ -596,16 +597,43 @@ class YouTubeDB:
         if status in ('done', 'failed'):
             cursor.execute("""
                 UPDATE yt_video_queue
-                SET status = %s, error_log = %s, attempts = attempts + 1, processed_at = %s
+                SET status = %s, error_log = %s, attempts = attempts + 1,
+                    processed_at = %s, updated_at = NOW()
                 WHERE id = %s
             """, (status, error_log, processed, queue_id))
         else:
             cursor.execute("""
                 UPDATE yt_video_queue
-                SET status = %s, error_log = %s
+                SET status = %s, error_log = %s, updated_at = NOW()
                 WHERE id = %s
             """, (status, error_log, queue_id))
         self.connection.commit()
+
+    def reset_stuck_processing_items(self, stuck_minutes: int = 10) -> int:
+        """Reset items stuck in 'processing' for longer than stuck_minutes back to 'pending'."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            UPDATE yt_video_queue
+            SET status = 'pending', error_log = 'Reset from stuck processing state'
+            WHERE status = 'processing'
+              AND updated_at < NOW() - INTERVAL '%s minutes'
+        """, (stuck_minutes,))
+        count = cursor.rowcount
+        self.connection.commit()
+        return count
+
+    def reset_all_processing_to_failed(self) -> int:
+        """Force all currently 'processing' items to 'failed' so they can be retried."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            UPDATE yt_video_queue
+            SET status = 'failed', error_log = 'Manually reset from stuck processing state',
+                updated_at = NOW()
+            WHERE status = 'processing'
+        """)
+        count = cursor.rowcount
+        self.connection.commit()
+        return count
 
     def retry_queue_item(self, queue_id: int):
         cursor = self._get_cursor()
@@ -616,34 +644,75 @@ class YouTubeDB:
         """, (queue_id,))
         self.connection.commit()
 
-    def get_queue_stats(self):
+    def get_queue_stats(self, yt_ch_ids=None, kw_ids=None):
+        """Queue and daily summary stats.
+
+        Pass yt_ch_ids (YouTube channel_id strings) and/or kw_ids (keyword DB IDs)
+        to scope counts to a specific user. None = no filter (global).
+        """
+        scoped = yt_ch_ids is not None or kw_ids is not None
+        ch_f = yt_ch_ids or []
+        kw_f = kw_ids or []
+        # Sentinel values that will never match real rows
+        ch_sentinel = ['__none__']
+        kw_sentinel = [-1]
+
         cursor = self._get_cursor()
-        cursor.execute("""
-            SELECT status, COUNT(*) AS cnt
-            FROM yt_video_queue
-            GROUP BY status
-        """)
+
+        if scoped:
+            cursor.execute("""
+                SELECT status, COUNT(*) AS cnt
+                FROM yt_video_queue
+                WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+                GROUP BY status
+            """, (ch_f or ch_sentinel, kw_f or kw_sentinel))
+        else:
+            cursor.execute("SELECT status, COUNT(*) AS cnt FROM yt_video_queue GROUP BY status")
         stats = {r['status']: r['cnt'] for r in cursor.fetchall()}
 
-        # Daily budget: summaries generated today, by source
-        cursor.execute("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE transcript_source = 'transcript_api') AS transcript,
-                COUNT(*) FILTER (WHERE transcript_source = 'metadata') AS metadata
-            FROM yt_summaries
-            WHERE created_at >= CURRENT_DATE
-        """)
+        # Daily summaries (scoped via EXISTS check through queue)
+        if scoped:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE s.transcript_source = 'transcript_api') AS transcript,
+                    COUNT(*) FILTER (WHERE s.transcript_source = 'metadata') AS metadata
+                FROM yt_summaries s
+                WHERE s.created_at >= CURRENT_DATE
+                  AND EXISTS (
+                      SELECT 1 FROM yt_video_queue q
+                      WHERE q.video_id = s.video_id
+                        AND (q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s))
+                  )
+            """, (ch_f or ch_sentinel, kw_f or kw_sentinel))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE transcript_source = 'transcript_api') AS transcript,
+                    COUNT(*) FILTER (WHERE transcript_source = 'metadata') AS metadata
+                FROM yt_summaries
+                WHERE created_at >= CURRENT_DATE
+            """)
         daily = dict(cursor.fetchone())
 
-        # Daily queue activity
-        cursor.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS processed_today,
-                COUNT(*) FILTER (WHERE status = 'failed' AND processed_at >= CURRENT_DATE) AS failed_today,
-                COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today
-            FROM yt_video_queue
-        """)
+        if scoped:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS processed_today,
+                    COUNT(*) FILTER (WHERE status = 'failed' AND processed_at >= CURRENT_DATE) AS failed_today,
+                    COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today
+                FROM yt_video_queue
+                WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+            """, (ch_f or ch_sentinel, kw_f or kw_sentinel))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS processed_today,
+                    COUNT(*) FILTER (WHERE status = 'failed' AND processed_at >= CURRENT_DATE) AS failed_today,
+                    COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today
+                FROM yt_video_queue
+            """)
         daily_queue = dict(cursor.fetchone())
 
         return {
@@ -661,36 +730,120 @@ class YouTubeDB:
             },
         }
 
-    def get_system_overview(self):
-        """Lightweight overview for the System page."""
+    def get_system_overview(self, allowed_channel_db_ids=None, allowed_keyword_db_ids=None):
+        """Lightweight overview for the System page.
+
+        allowed_channel_db_ids: set/list of yt_channels.id integers to restrict to (None = all).
+        allowed_keyword_db_ids: set/list of yt_keywords.id integers to restrict to (None = all).
+        """
         cursor = self._get_cursor()
-        # Channels
-        cursor.execute("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM yt_channels")
-        ch = dict(cursor.fetchone())
-        # Keywords
-        cursor.execute("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM yt_keywords")
-        kw = dict(cursor.fetchone())
-        # Queue stats
-        cursor.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'pending')    AS pending,
-                COUNT(*) FILTER (WHERE status = 'processing') AS processing,
-                COUNT(*) FILTER (WHERE status = 'done')       AS done,
-                COUNT(*) FILTER (WHERE status = 'failed')     AS failed
-            FROM yt_video_queue
-        """)
+        scoped = (allowed_channel_db_ids is not None or allowed_keyword_db_ids is not None)
+
+        # -- Channels ---------------------------------------------------------
+        if allowed_channel_db_ids is not None:
+            ids = list(allowed_channel_db_ids)
+            if ids:
+                cursor.execute(
+                    "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active "
+                    "FROM yt_channels WHERE id = ANY(%s)", (ids,)
+                )
+                ch = dict(cursor.fetchone())
+            else:
+                ch = {'total': 0, 'active': 0}
+        else:
+            cursor.execute(
+                "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM yt_channels"
+            )
+            ch = dict(cursor.fetchone())
+
+        # -- Keywords ---------------------------------------------------------
+        if allowed_keyword_db_ids is not None:
+            ids = list(allowed_keyword_db_ids)
+            if ids:
+                cursor.execute(
+                    "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active "
+                    "FROM yt_keywords WHERE id = ANY(%s)", (ids,)
+                )
+                kw = dict(cursor.fetchone())
+            else:
+                kw = {'total': 0, 'active': 0}
+        else:
+            cursor.execute(
+                "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM yt_keywords"
+            )
+            kw = dict(cursor.fetchone())
+
+        # -- Resolve channel YouTube IDs for queue filtering -------------------
+        yt_channel_ids = None  # TEXT channel_id strings used in yt_video_queue
+        if allowed_channel_db_ids is not None:
+            db_ids = list(allowed_channel_db_ids)
+            if db_ids:
+                cursor.execute(
+                    "SELECT channel_id FROM yt_channels WHERE id = ANY(%s)", (db_ids,)
+                )
+                yt_channel_ids = [r['channel_id'] for r in cursor.fetchall()]
+            else:
+                yt_channel_ids = []
+
+        kw_ids = list(allowed_keyword_db_ids) if allowed_keyword_db_ids is not None else None
+
+        # -- Queue stats -------------------------------------------------------
+        if scoped:
+            ch_filter = yt_channel_ids if yt_channel_ids else []
+            kw_filter = kw_ids if kw_ids else []
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending')    AS pending,
+                    COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+                    COUNT(*) FILTER (WHERE status = 'done')       AS done,
+                    COUNT(*) FILTER (WHERE status = 'failed')     AS failed
+                FROM yt_video_queue
+                WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+            """, (ch_filter or ['__none__'], kw_filter or [-1]))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending')    AS pending,
+                    COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+                    COUNT(*) FILTER (WHERE status = 'done')       AS done,
+                    COUNT(*) FILTER (WHERE status = 'failed')     AS failed
+                FROM yt_video_queue
+            """)
         q = dict(cursor.fetchone())
-        # Total summaries
-        cursor.execute("SELECT COUNT(*) AS total FROM yt_summaries")
+
+        # -- Total summaries (approximated via done queue items for scoped view) --
+        if scoped:
+            ch_filter = yt_channel_ids if yt_channel_ids else []
+            kw_filter = kw_ids if kw_ids else []
+            cursor.execute("""
+                SELECT COUNT(*) AS total FROM yt_video_queue
+                WHERE status = 'done'
+                  AND (source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s))
+            """, (ch_filter or ['__none__'], kw_filter or [-1]))
+        else:
+            cursor.execute("SELECT COUNT(*) AS total FROM yt_summaries")
         sm = dict(cursor.fetchone())
-        # Today's activity
-        cursor.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today,
-                COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS done_today
-            FROM yt_video_queue
-        """)
+
+        # -- Today's activity -------------------------------------------------
+        if scoped:
+            ch_filter = yt_channel_ids if yt_channel_ids else []
+            kw_filter = kw_ids if kw_ids else []
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today,
+                    COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS done_today
+                FROM yt_video_queue
+                WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+            """, (ch_filter or ['__none__'], kw_filter or [-1]))
+        else:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS queued_today,
+                    COUNT(*) FILTER (WHERE status = 'done' AND processed_at >= CURRENT_DATE) AS done_today
+                FROM yt_video_queue
+            """)
         today = dict(cursor.fetchone())
+
         return {
             'channels': ch,
             'keywords': kw,
@@ -699,22 +852,42 @@ class YouTubeDB:
             'today': today,
         }
 
-    def get_queue_items(self, limit: int = 100):
+    def get_queue_items(self, limit: int = 100, yt_ch_ids=None, kw_ids=None):
         cursor = self._get_cursor()
-        cursor.execute("""
-            SELECT q.*, sv.title AS video_title,
-                   COALESCE(ch.channel_name, sm.channel_name, sv.channel_id) AS video_channel_name
-            FROM yt_video_queue q
-            LEFT JOIN yt_seen_videos sv ON q.video_id = sv.video_id
-            LEFT JOIN yt_channels ch ON sv.channel_id = ch.channel_id
-            LEFT JOIN LATERAL (
-                SELECT channel_name FROM yt_summaries
-                WHERE video_id = q.video_id AND channel_name IS NOT NULL
-                LIMIT 1
-            ) sm ON TRUE
-            ORDER BY q.created_at DESC
-            LIMIT %s
-        """, (limit,))
+        scoped = yt_ch_ids is not None or kw_ids is not None
+        if scoped:
+            ch_f = yt_ch_ids or ['__none__']
+            kw_f = kw_ids or [-1]
+            cursor.execute("""
+                SELECT q.*, sv.title AS video_title,
+                       COALESCE(ch.channel_name, sm.channel_name, sv.channel_id) AS video_channel_name
+                FROM yt_video_queue q
+                LEFT JOIN yt_seen_videos sv ON q.video_id = sv.video_id
+                LEFT JOIN yt_channels ch ON sv.channel_id = ch.channel_id
+                LEFT JOIN LATERAL (
+                    SELECT channel_name FROM yt_summaries
+                    WHERE video_id = q.video_id AND channel_name IS NOT NULL
+                    LIMIT 1
+                ) sm ON TRUE
+                WHERE q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s)
+                ORDER BY q.created_at DESC
+                LIMIT %s
+            """, (ch_f, kw_f, limit))
+        else:
+            cursor.execute("""
+                SELECT q.*, sv.title AS video_title,
+                       COALESCE(ch.channel_name, sm.channel_name, sv.channel_id) AS video_channel_name
+                FROM yt_video_queue q
+                LEFT JOIN yt_seen_videos sv ON q.video_id = sv.video_id
+                LEFT JOIN yt_channels ch ON sv.channel_id = ch.channel_id
+                LEFT JOIN LATERAL (
+                    SELECT channel_name FROM yt_summaries
+                    WHERE video_id = q.video_id AND channel_name IS NOT NULL
+                    LIMIT 1
+                ) sm ON TRUE
+                ORDER BY q.created_at DESC
+                LIMIT %s
+            """, (limit,))
         rows = [dict(r) for r in cursor.fetchall()]
         for r in rows:
             for k in ('created_at', 'processed_at'):
@@ -725,11 +898,23 @@ class YouTubeDB:
     def get_videos_unified(self, limit: int = 50, offset: int = 0,
                            status_filter: str = None, channel_filter: str = None,
                            source_filter: str = None, date_from: str = None,
-                           date_to: str = None):
-        """Return queue items joined with their summaries in one unified view with pagination."""
+                           date_to: str = None,
+                           yt_ch_ids=None, kw_ids=None):
+        """Return queue items joined with their summaries in one unified view with pagination.
+
+        yt_ch_ids: list of YouTube channel_id strings to restrict to (None = all).
+        kw_ids: list of keyword DB IDs to restrict to (None = all).
+        """
         cursor = self._get_cursor()
         clauses = []
         params = []
+
+        # User-scope filter
+        if yt_ch_ids is not None or kw_ids is not None:
+            ch_f = yt_ch_ids or ['__none__']
+            kw_f = kw_ids or [-1]
+            clauses.append("(q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s))")
+            params.extend([ch_f, kw_f])
 
         if status_filter:
             clauses.append("q.status = %s")
@@ -816,10 +1001,23 @@ class YouTubeDB:
 
     def get_summaries(self, limit: int = 100, channel_name: str = None,
                       transcript_source: str = None, telegram_sent: str = None,
-                      date_from: str = None, date_to: str = None):
+                      date_from: str = None, date_to: str = None,
+                      yt_ch_ids=None, kw_ids=None):
         cursor = self._get_cursor()
         clauses = []
         params = []
+
+        # User-scope filter via video_id → queue source
+        if yt_ch_ids is not None or kw_ids is not None:
+            ch_f = yt_ch_ids or ['__none__']
+            kw_f = kw_ids or [-1]
+            clauses.append("""
+                video_id IN (
+                    SELECT video_id FROM yt_video_queue
+                    WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+                )
+            """)
+            params.extend([ch_f, kw_f])
 
         if channel_name:
             clauses.append("channel_name ILIKE %s")

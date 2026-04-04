@@ -41,14 +41,14 @@ def _get_global_prompt() -> str:
     return cfg.get("youtube", {}).get("prompt", "") or DEFAULT_PROMPT
 
 
-def init_worker(youtube_gemini_api_key: str = "", youtube_data_api_key: str = "",
-                telegram_send_fn=None):
+def init_worker(gemini_project: str = "", gemini_location: str = "us-central1",
+                youtube_data_api_key: str = "", telegram_send_fn=None):
     global _gemini_client, _telegram_send_fn, _youtube_data_api_key
-    if youtube_gemini_api_key:
-        _gemini_client = genai.Client(api_key=youtube_gemini_api_key)
-        logger.info("[YT-WORKER] Gemini client initialized with youtube.gemini_api_key")
+    if gemini_project:
+        _gemini_client = genai.Client(vertexai=True, project=gemini_project, location=gemini_location)
+        logger.info(f"[YT-WORKER] Vertex AI client initialized — project={gemini_project}")
     else:
-        logger.warning("[YT-WORKER] youtube.gemini_api_key not set — summarization disabled")
+        logger.warning("[YT-WORKER] youtube.gemini_project not set — summarization disabled")
 
     _youtube_data_api_key = youtube_data_api_key or ""
 
@@ -74,6 +74,9 @@ def _extract_tokens(response) -> tuple[int, int]:
     return 0, 0
 
 
+_YT_LABELS = types.GenerateContentConfig(labels={"service": "youtube"})
+
+
 def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int]:
     """Strategy 1: Send YouTube URL directly to Gemini for native video understanding.
     Returns (summary_text, input_tokens, output_tokens)."""
@@ -85,7 +88,8 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
                 types.Part(file_data=types.FileData(file_uri=url)),
                 types.Part(text=prompt),
             ]
-        )
+        ),
+        config=_YT_LABELS,
     )
     inp, out = _extract_tokens(response)
     return response.text.strip(), inp, out
@@ -112,22 +116,16 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int
 
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
-        contents={'text': prompt + f"\n\nVideo transcript:\n\n{full_text}"}
+        contents={'text': prompt + f"\n\nVideo transcript:\n\n{full_text}"},
+        config=_YT_LABELS,
     )
     inp, out = _extract_tokens(response)
     return response.text.strip(), inp, out
 
 
-def _summarize_via_metadata(video_id: str, title: str, description: str, tags: list, prompt: str) -> tuple[str, int, int]:
-    """Strategy 3: Summarize from metadata only (fallback when no transcript available).
-    Returns (summary_text, input_tokens, output_tokens)."""
-    meta = f"Title: {title}\n\nDescription: {description or 'N/A'}\n\nTags: {', '.join(tags or [])}"
-    response = _gemini_client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents={'text': prompt + f"\n\nVideo metadata (no transcript available):\n\n{meta}"}
-    )
-    inp, out = _extract_tokens(response)
-    return response.text.strip(), inp, out
+# Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
+_ITEM_TIMEOUT_SECS = 180
+
 
 
 def _fetch_video_metadata(video_id: str) -> dict:
@@ -255,10 +253,14 @@ async def process_queue_item(queue_item: dict) -> bool:
     except Exception:
         pass
 
+    loop = asyncio.get_event_loop()
     try:
         if not _video_allowed:
             raise RuntimeError("Daily video-hour quota reached")
-        summary_text, inp_tokens, out_tokens = _summarize_via_gemini_video(video_id, prompt)
+        summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
+            loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt),
+            timeout=_ITEM_TIMEOUT_SECS,
+        )
         transcript_source = 'gemini_video'
         logger.info(f"[YT-WORKER] Strategy 1 (gemini video) success for {video_id}")
         try:
@@ -267,6 +269,8 @@ async def process_queue_item(queue_item: dict) -> bool:
             record_gemini_request(total_tokens=inp_tokens + out_tokens)
         except Exception:
             pass
+    except asyncio.TimeoutError:
+        logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
     except Exception as e:
         delay = _is_rate_limited(e)
         if delay:
@@ -277,7 +281,10 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Strategy 2: Transcript text → Gemini (fallback — no video quota used)
     if not summary_text:
         try:
-            summary_text, inp_tokens, out_tokens = _summarize_via_transcript(video_id, prompt)
+            summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
+                loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt),
+                timeout=_ITEM_TIMEOUT_SECS,
+            )
             transcript_source = 'transcript_api'
             logger.info(f"[YT-WORKER] Strategy 2 (transcript) success for {video_id}")
             try:
@@ -285,6 +292,8 @@ async def process_queue_item(queue_item: dict) -> bool:
                 record_gemini_request(total_tokens=inp_tokens + out_tokens)
             except Exception:
                 pass
+        except asyncio.TimeoutError:
+            logger.warning(f"[YT-WORKER] Strategy 2 (transcript) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
         except Exception as e:
             delay = _is_rate_limited(e)
             if delay:
@@ -292,25 +301,9 @@ async def process_queue_item(queue_item: dict) -> bool:
                 await asyncio.sleep(delay)
             logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id}: {e}")
 
-    # Strategy 3: Metadata only — only if description is substantial (>100 chars)
-    if not summary_text and description and len(description.strip()) > 100:
-        try:
-            summary_text, inp_tokens, out_tokens = _summarize_via_metadata(video_id, title, description, tags, prompt)
-            transcript_source = 'metadata'
-            logger.info(f"[YT-WORKER] Strategy 3 (metadata) success for {video_id}")
-            try:
-                from utils.gemini_usage import record_gemini_request
-                record_gemini_request(total_tokens=inp_tokens + out_tokens)
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"[YT-WORKER] All strategies failed for {video_id}: {e}")
-            db.update_queue_status(queue_id, 'failed', error_log=str(e))
-            return False
-
     # All strategies exhausted — mark as failed so user can retry
     if not summary_text:
-        reason = 'No transcript or meaningful metadata available'
+        reason = 'No transcript available (gemini video and transcript API both failed)'
         logger.warning(f"[YT-WORKER] All strategies failed for {video_id}: {reason}")
         db.update_queue_status(queue_id, 'failed', error_log=reason)
         return False
@@ -332,12 +325,13 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Send via Telegram if target is set and sender is available
     if telegram_target and _telegram_send_fn:
         try:
-            tg_message = summary_text
-            await _telegram_send_fn(telegram_target, tg_message)
+            await _telegram_send_fn(telegram_target, summary_text)
             db.mark_telegram_sent(summary_id)
             logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
         except Exception as e:
-            logger.warning(f"[YT-WORKER] Telegram send failed for {video_id}: {e}")
+            logger.error(f"[YT-WORKER] Telegram send FAILED for {video_id} → {telegram_target}: {e}", exc_info=True)
+    elif telegram_target and not _telegram_send_fn:
+        logger.warning(f"[YT-WORKER] No Telegram send function registered — skipping send for {video_id}")
 
     # Mark done
     db.update_queue_status(queue_id, 'done')
@@ -354,7 +348,11 @@ async def process_pending_queue():
         logger.debug("[YT-WORKER] System disabled — skipping queue processing")
         return 0
     db = get_yt_db()
-    items = db.get_pending_queue_items(limit=5)
+    # Reset items stuck in 'processing' for >10 min (e.g. from a crashed run)
+    stuck = db.reset_stuck_processing_items(stuck_minutes=10)
+    if stuck:
+        logger.warning(f"[YT-WORKER] Reset {stuck} stuck-processing item(s) back to pending")
+    items = db.get_pending_queue_items(limit=3)
     if not items:
         return 0
 
@@ -364,9 +362,12 @@ async def process_pending_queue():
             db.update_queue_status(item['id'], 'failed', error_log='Max attempts reached')
             continue
         try:
-            success = await process_queue_item(item)
+            success = await asyncio.wait_for(process_queue_item(item), timeout=_ITEM_TIMEOUT_SECS + 30)
             if success:
                 processed += 1
+        except asyncio.TimeoutError:
+            logger.error(f"[YT-WORKER] Item {item['video_id']} timed out in scheduler")
+            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_ITEM_TIMEOUT_SECS + 30}s')
         except Exception as e:
             logger.error(f"[YT-WORKER] Unhandled error processing {item['video_id']}: {e}")
             db.update_queue_status(item['id'], 'failed', error_log=str(e))

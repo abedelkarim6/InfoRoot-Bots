@@ -1,20 +1,43 @@
 from fastapi import APIRouter, Body
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from utils.database import get_db
+from routers.auth import is_admin_request, get_request_user_id
 
 router = APIRouter()
 
+
+def _can_access_bot(request: Request, bot_name: str) -> bool:
+    """Return True if the requester is admin or has access to the bot."""
+    if is_admin_request(request):
+        return True
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return False
+    cfg = get_db().get_filtered_bots_config(user_id)
+    return bot_name in cfg
+
+
 @router.get("/prompts")
-def get_all_prompts():
+def get_all_prompts(request: Request):
     db = get_db()
-    return db.get_all_prompts()
+    if is_admin_request(request):
+        return db.get_all_prompts()
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return {}
+    cfg = db.get_filtered_bots_config(user_id)
+    return {bot_name: db.get_bot_prompts(bot_name) for bot_name in cfg}
 
 @router.get("/prompts/{bot_name}")
-def get_bot_prompts(bot_name: str):
+def get_bot_prompts(request: Request, bot_name: str):
+    if not _can_access_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
     db = get_db()
     return db.get_bot_prompts(bot_name)
 
 @router.post("/prompts/update")
-def update_prompt(data: dict = Body(...)):
+def update_prompt(request: Request, data: dict = Body(...)):
     bot_name = data.get("bot_name")
     key = data.get("key")
     text = data.get("text", "")
@@ -23,13 +46,15 @@ def update_prompt(data: dict = Body(...)):
         return {"status": "error", "message": "bot_name is required"}
     if not key:
         return {"status": "error", "message": "key is required"}
+    if not _can_access_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
     db.save_prompt(bot_name, key, text)
     return {"status": "ok", "key": key, "bot_name": bot_name}
 
 @router.post("/prompts/rename-cascade")
-def rename_prompt_cascade(data: dict = Body(...)):
+def rename_prompt_cascade(request: Request, data: dict = Body(...)):
     """Update prompt_key in all schedules of the bot after a prompt is renamed."""
     bot_name = data.get("bot_name")
     old_key  = (data.get("old_key") or "").strip()
@@ -37,26 +62,43 @@ def rename_prompt_cascade(data: dict = Body(...)):
 
     if not bot_name or not old_key or not new_key:
         return {"status": "error", "message": "bot_name, old_key and new_key are required"}
+    if not _can_access_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
     count = db.rename_prompt_key_in_schedules(bot_name, old_key, new_key)
     return {"status": "ok", "updated_schedules": count}
 
 @router.post("/prompts/delete")
-def delete_prompt(data: dict = Body(...)):
+def delete_prompt(request: Request, data: dict = Body(...)):
     bot_name = data.get("bot_name")
     key = data.get("key")
 
     if not bot_name:
         return {"status": "error", "message": "bot_name is required"}
+    if not _can_access_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    # Snapshot prompt for recycle bin
+    schedules = db.get_prompt_schedules(bot_name, key)
+    if schedules:
+        details = ', '.join(
+            f"{s['category_name']}/{s['topic_name']}/{s['schedule_name']}"
+            for s in schedules
+        )
+        return {
+            "status": "error",
+            "blocked": True,
+            "message": f"Cannot delete: prompt is used by {len(schedules)} schedule(s): {details}",
+            "used_in": schedules,
+        }
+
+    user_id = get_request_user_id(request)
     prompts = db.get_bot_prompts(bot_name)
     if key in prompts:
         db.recycle_bin_add('prompt', f"{bot_name}/{key}", {
             'bot_name': bot_name, 'key': key, 'text': prompts[key].get('text', '')
-        })
+        }, owner_id=user_id)
 
     db.delete_prompt(bot_name, key)
     return {"status": "ok"}

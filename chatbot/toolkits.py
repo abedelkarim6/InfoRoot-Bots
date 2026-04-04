@@ -10,40 +10,84 @@ from agno.tools import Toolkit
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# SummaryToolkit — summaries of processed topic groups
+# ---------------------------------------------------------------------------
+
 class SummaryToolkit(Toolkit):
-    """Tools for querying Telegram news summaries."""
+    """Tools for querying generated summaries (digests of grouped messages per topic)."""
 
     def __init__(self, db, **kwargs):
         self.db = db
         super().__init__(
             name="summary_tools",
-            tools=[self.get_recent_summaries, self.get_summary_by_id, self.get_system_stats],
+            tools=[
+                self.get_recent_summaries,
+                self.search_summaries,
+                self.get_summary_by_id,
+                self.get_system_stats,
+                self.get_pending_summary_counts,
+            ],
             **kwargs,
         )
 
-    def get_recent_summaries(self, limit: int = 30) -> str:
-        """Get recent news summaries. Each has bot_name, topic_name, summary_type,
-        preview (first 300 chars), message_count, and timestamp.
-        Use get_summary_by_id to read the full text of a specific summary.
+    def get_recent_summaries(self, limit: int = 20, days: int = None,
+                             topic: str = "", bot_name: str = "") -> str:
+        """Get recently generated summaries. A summary is an AI-generated digest of multiple
+        messages grouped under a topic. Each has: id, bot_name, topic_name, summary_type,
+        message_count, timestamp, preview (first 300 chars of the summary text).
+
+        Use get_summary_by_id to read the full text of a specific entry.
 
         Args:
             limit: Max number of summaries to return (max 50).
+            days: Only return summaries from the last N days (e.g. 3 for last 3 days, 7 for a week).
+            topic: Filter by topic name (partial match, optional).
+            bot_name: Filter by bot name (partial match, optional).
 
         Returns:
             JSON list of summary objects.
         """
         limit = min(max(1, limit), 50)
-        rows = self.db.get_recent_summaries(limit=limit)
+        rows = self.db.get_recent_summaries(
+            limit=limit,
+            days=days or None,
+            topic=topic or None,
+            bot_name=bot_name or None,
+        )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def search_summaries(self, topic: str = "", bot_name: str = "",
+                         days: int = 7, limit: int = 20) -> str:
+        """Search generated summaries by topic and/or bot within a date range.
+        Use this when the user asks for summaries filtered by a specific topic, bot, or time window.
+
+        Args:
+            topic: Topic name to filter by (partial match).
+            bot_name: Bot name to filter by (partial match).
+            days: Look back N days (default 7).
+            limit: Max results (max 50).
+
+        Returns:
+            JSON list of matching summary objects with preview text.
+        """
+        limit = min(max(1, limit), 50)
+        rows = self.db.get_recent_summaries(
+            limit=limit,
+            days=days,
+            topic=topic or None,
+            bot_name=bot_name or None,
+        )
         return json.dumps(rows, ensure_ascii=False)
 
     def get_summary_by_id(self, summary_id: int) -> str:
-        """Get the full text of a specific summary by its ID.
+        """Get the full text of a specific generated summary by its ID.
 
         Args:
-            summary_id: The summary ID to fetch.
+            summary_id: The summary ID (from get_recent_summaries or search_summaries results).
 
         Returns:
-            JSON object with full summary_text, or error message.
+            JSON object with full summary_text and all metadata, or error message.
         """
         cursor = self.db._get_cursor()
         cursor.execute(
@@ -60,7 +104,7 @@ class SummaryToolkit(Toolkit):
         return json.dumps(d, ensure_ascii=False)
 
     def get_system_stats(self) -> str:
-        """Get total message and summary counts for the system.
+        """Get overall system counts: total messages ingested and total summaries generated.
 
         Returns:
             JSON with total_messages and summarized_messages.
@@ -68,24 +112,162 @@ class SummaryToolkit(Toolkit):
         stats = self.db.get_stats()
         return json.dumps(stats, ensure_ascii=False)
 
+    def get_pending_summary_counts(self) -> str:
+        """Get how many messages are waiting to be summarized, broken down by bot, topic,
+        and schedule type (hourly, daily, minute, interval).
+
+        Returns:
+            JSON dict: {bot_name: {topic_name: {hourly: N, daily: N, minute: N, interval: N}}}.
+        """
+        counts = self.db.get_pending_counts()
+        return json.dumps(counts, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# MessageToolkit — raw Telegram messages
+# ---------------------------------------------------------------------------
+
+class MessageToolkit(Toolkit):
+    """Tools for searching and reading raw Telegram messages before they are summarized."""
+
+    def __init__(self, db, **kwargs):
+        self.db = db
+        super().__init__(
+            name="message_tools",
+            tools=[
+                self.get_recent_messages,
+                self.get_messages_by_topic,
+                self.search_messages,
+                self.get_missed_messages,
+                self.get_missed_messages_stats,
+            ],
+            **kwargs,
+        )
+
+    def get_recent_messages(self, limit: int = 30, days: int = None,
+                            source: str = "") -> str:
+        """Get the most recent raw messages from monitored channels across all topics.
+        Each message has: id, channel_username, collection_name, bot_name, topics,
+        categories, keywords_found, timestamp, preview.
+
+        Args:
+            limit: Max messages to return (max 100).
+            days: Only messages from the last N days (optional).
+            source: Filter by channel username (partial match, optional).
+
+        Returns:
+            JSON list of message objects.
+        """
+        limit = min(max(1, limit), 100)
+        rows = self.db.get_recent_messages(
+            limit=limit,
+            days=days or None,
+            source=source or None,
+        )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def get_messages_by_topic(self, topic: str, days: int = 7,
+                              limit: int = 30, source: str = "") -> str:
+        """Get raw messages for a specific topic within a date range.
+        Use this when the user asks about messages related to a particular topic.
+
+        Args:
+            topic: Topic name to filter by (partial match — use the topic name as-is from config).
+            days: Look back N days (default 7).
+            limit: Max results (max 100).
+            source: Optionally also filter by channel username (partial match).
+
+        Returns:
+            JSON list of message objects matching the topic.
+        """
+        limit = min(max(1, limit), 100)
+        rows = self.db.get_recent_messages(
+            limit=limit,
+            topic=topic,
+            days=days,
+            source=source or None,
+        )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def search_messages(self, topic: str = "", source: str = "",
+                        days: int = 7, limit: int = 30) -> str:
+        """Search messages by topic name and/or source channel within a date range.
+        More targeted than get_recent_messages — use when user specifies both a topic and a source.
+
+        Args:
+            topic: Topic name to search for (partial match).
+            source: Source channel username to filter (partial match).
+            days: Look back N days (default 7).
+            limit: Max results (max 100).
+
+        Returns:
+            JSON list of matching messages.
+        """
+        limit = min(max(1, limit), 100)
+        rows = self.db.search_messages(
+            topic_filter=topic or None,
+            source_filter=source or None,
+            days=days,
+            limit=limit,
+        )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def get_missed_messages(self, bot_name: str = "", collection: str = "",
+                            search: str = "", limit: int = 30) -> str:
+        """Get messages that were NOT classified into any topic (missed/unclassified messages).
+        These are messages the system received but could not match to any configured topic keyword.
+        Useful for identifying gaps in keyword coverage or missed news items.
+
+        Args:
+            bot_name: Filter by bot name (optional).
+            collection: Filter by collection name (optional).
+            search: Free text search within the message content (optional).
+            limit: Max results (max 100).
+
+        Returns:
+            JSON list of unclassified message objects with preview text.
+        """
+        limit = min(max(1, limit), 100)
+        rows = self.db.get_unclassified_messages(
+            limit=limit,
+            bot_name=bot_name or None,
+            collection=collection or None,
+            search=search or None,
+        )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def get_missed_messages_stats(self) -> str:
+        """Get counts of missed/unclassified messages grouped by bot and collection.
+        Use this to see how many messages are being missed overall before fetching details.
+
+        Returns:
+            JSON list of {bot_name, collection_name, cnt} rows ordered by count descending.
+        """
+        rows = self.db.get_unclassified_stats()
+        return json.dumps(rows, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# DashboardToolkit — analytics and trends
+# ---------------------------------------------------------------------------
 
 class DashboardToolkit(Toolkit):
-    """Tools for analytics and trend data."""
+    """Tools for analytics, trend data, and dashboard statistics."""
 
     def __init__(self, db, **kwargs):
         self.db = db
         super().__init__(
             name="dashboard_tools",
-            tools=[self.get_analytics, self.get_pending_counts],
+            tools=[self.get_analytics],
             **kwargs,
         )
 
-    def get_analytics(self, days: int = 14, filter_source: str = "", filter_topic: str = "") -> str:
+    def get_analytics(self, days: int = 7, filter_source: str = "", filter_topic: str = "") -> str:
         """Get dashboard analytics: messages per day, per topic, per source, topic trends.
         Can filter by a specific source channel or topic.
 
         Args:
-            days: Number of days to analyze (1-365, default 14).
+            days: Number of days to analyze (1-365, default 7).
             filter_source: Optional source channel username to filter by.
             filter_topic: Optional topic name to filter by.
 
@@ -99,65 +281,13 @@ class DashboardToolkit(Toolkit):
             filter_source=filter_source or None,
             filter_topic=filter_topic or None,
         )
-        # Strip large matrix to save tokens
         stats.pop("source_topic_breakdown", None)
         return json.dumps(stats, ensure_ascii=False, default=str)
 
-    def get_pending_counts(self) -> str:
-        """Get pending (unsummarized) message counts per bot and per topic.
 
-        Returns:
-            JSON dict: {bot_name: {topic_name: {hourly: N, daily: N, minute: N}}}.
-        """
-        counts = self.db.get_pending_counts()
-        return json.dumps(counts, ensure_ascii=False)
-
-
-class MessageToolkit(Toolkit):
-    """Tools for searching and reading raw Telegram messages."""
-
-    def __init__(self, db, **kwargs):
-        self.db = db
-        super().__init__(
-            name="message_tools",
-            tools=[self.get_recent_messages, self.search_messages],
-            **kwargs,
-        )
-
-    def get_recent_messages(self, limit: int = 50) -> str:
-        """Get the most recent raw messages from monitored channels.
-        Each has channel_username, collection_name, topics, categories, preview text.
-
-        Args:
-            limit: Max messages to return (max 100).
-
-        Returns:
-            JSON list of message objects.
-        """
-        limit = min(max(1, limit), 100)
-        rows = self.db.get_recent_messages(limit=limit)
-        return json.dumps(rows, ensure_ascii=False)
-
-    def search_messages(self, topic: str = "", source: str = "", days: int = 7, limit: int = 50) -> str:
-        """Search messages by topic name and/or source channel within a date range.
-
-        Args:
-            topic: Topic name to search for (partial match).
-            source: Source channel username to filter (partial match).
-            days: Look back N days (default 7).
-            limit: Max results (max 100).
-
-        Returns:
-            JSON list of matching messages.
-        """
-        rows = self.db.search_messages(
-            topic_filter=topic or None,
-            source_filter=source or None,
-            days=days,
-            limit=limit,
-        )
-        return json.dumps(rows, ensure_ascii=False)
-
+# ---------------------------------------------------------------------------
+# YouTubeToolkit — video summaries and monitoring data
+# ---------------------------------------------------------------------------
 
 class YouTubeToolkit(Toolkit):
     """Tools for querying YouTube video summaries and monitoring data."""
@@ -175,7 +305,7 @@ class YouTubeToolkit(Toolkit):
             **kwargs,
         )
 
-    def get_video_summaries(self, limit: int = 30, channel_name: str = "",
+    def get_video_summaries(self, limit: int = 20, channel_name: str = "",
                             date_from: str = "", date_to: str = "") -> str:
         """Get YouTube video summaries. Can filter by channel name and date range.
 
@@ -195,7 +325,6 @@ class YouTubeToolkit(Toolkit):
             date_from=date_from or None,
             date_to=date_to or None,
         )
-        # Truncate summary text to save tokens
         for r in rows:
             txt = r.get("summary_text", "") or ""
             r["summary_text"] = txt[:500] + ("…" if len(txt) > 500 else "")
@@ -231,7 +360,6 @@ class YouTubeToolkit(Toolkit):
             JSON list of keyword tracker objects.
         """
         rows = self.yt_db.get_keywords()
-        # Slim down for token efficiency
         slim = []
         for kw in rows:
             slim.append({

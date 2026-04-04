@@ -1,8 +1,14 @@
 """
-In-memory + DB-backed tracker for Gemini API usage.
-Tracks: RPM (requests/minute), total TPM (input+output tokens/minute),
-        RPD (requests/day), video hours/day (Tier 1 native video only).
-RPD and video seconds persist across restarts via system_settings table.
+In-memory + DB-backed tracker for Vertex AI Gemini usage.
+Tracks: QPM (queries/minute), total TPM (input+output tokens/minute),
+        QPD (queries/day), video hours/day (native video only).
+QPD and video seconds persist across restarts via system_settings table.
+
+Vertex AI limits (gemini-2.5-flash, pay-as-you-go):
+  QPM  : 2 000   requests/minute
+  TPM  : 4 000 000 tokens/minute
+  QPD  : no hard daily cap (pay-as-you-go) — tracked for visibility
+  Video: no fixed quota on Vertex AI — tracked for cost awareness
 """
 import time
 import threading
@@ -11,10 +17,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-RPM_LIMIT        = 15
-TPM_LIMIT        = 1_000_000
-RPD_LIMIT        = 1_500
-VIDEO_SECS_LIMIT = 8 * 3600   # 8 hours/day
+RPM_LIMIT        = 2_000
+TPM_LIMIT        = 4_000_000
+RPD_LIMIT        = 100_000      # soft visibility limit, not enforced by Vertex AI
+VIDEO_SECS_LIMIT = 24 * 3600   # 24 h/day — Vertex AI has no fixed video quota
 
 
 class GeminiUsageTracker:
@@ -100,17 +106,45 @@ class GeminiUsageTracker:
             self._load_db()
             return self._vid_day_secs if self._vid_day_str == today else 0.0
 
+    def _read_db_daily(self) -> tuple[int, float]:
+        """Read today's RPD count and video seconds directly from DB (no cache).
+        Returns (rpd, video_secs).  Called without the lock held."""
+        try:
+            from utils.database import get_db
+            db = get_db()
+            if db is None:
+                return 0, 0.0
+            today = datetime.date.today().isoformat()
+            rpd = 0
+            val = db.get_setting("gemini_usage_daily")
+            if val and isinstance(val, dict) and val.get("date") == today:
+                rpd = int(val.get("count", 0))
+            vid = 0.0
+            vval = db.get_setting("gemini_usage_video_daily")
+            if vval and isinstance(vval, dict) and vval.get("date") == today:
+                vid = float(vval.get("seconds", 0))
+            return rpd, vid
+        except Exception as e:
+            logger.warning(f"[GEMINI-USAGE] read_db_daily: {e}")
+            return 0, 0.0
+
     def get_stats(self) -> dict:
         now   = time.time()
-        today = datetime.date.today().isoformat()
         with self._lock:
-            self._load_db()
             cutoff = now - 60.0
             recent   = [(ts, tk) for ts, tk in self._minute_log if ts >= cutoff]
             rpm_used = len(recent)
             tpm_used = sum(tk for _, tk in recent)
-            rpd_used = self._day_count if self._day_str == today else 0
-            vid_secs = self._vid_day_secs if self._vid_day_str == today else 0.0
+        # Always read daily counts from DB so cross-process writes (bot subprocess) are included
+        rpd_used, vid_secs = self._read_db_daily()
+        # Add any in-memory requests not yet flushed to DB (shouldn't happen since record() saves immediately,
+        # but as a safety net: use the higher of the two values)
+        today = datetime.date.today().isoformat()
+        with self._lock:
+            if self._day_str == today and self._day_count > rpd_used:
+                rpd_used = self._day_count
+            if self._vid_day_str == today and self._vid_day_secs > vid_secs:
+                vid_secs = self._vid_day_secs
         return {
             "rpm":   {"used": rpm_used,  "limit": RPM_LIMIT},
             "tpm":   {"used": tpm_used,  "limit": TPM_LIMIT},

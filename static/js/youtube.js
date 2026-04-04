@@ -6,6 +6,8 @@ let _ytCurrentPage = 0;
 const _ytPageSize = 50;
 let _ytTotalItems = 0;
 let _ytDateInitialized = false;
+let _ytProcessingCount = 0;
+const _ytProcessingMax = 3;
 
 // ==================== Toast Notifications ====================
 
@@ -881,6 +883,8 @@ async function loadYtVideosData() {
     document.getElementById('ytq-processing').textContent = stats.processing || 0;
     document.getElementById('ytq-done').textContent = stats.done || 0;
     document.getElementById('ytq-failed').textContent = stats.failed || 0;
+    const resetBtn = document.getElementById('ytq-reset-stuck-btn');
+    if (resetBtn) resetBtn.style.display = (stats.processing || 0) > 0 ? '' : 'none';
 
     // Daily budget bar
     const daily = stats.daily || {};
@@ -982,7 +986,7 @@ async function loadYtVideosData() {
             actions += `<button class="btn btn-secondary btn-sm" onclick="ytShowSummary(${item.summary_id})" title="View summary">👁️</button>`;
         }
         if (item.status === 'pending' || item.status === 'failed') {
-            actions += `<button class="btn btn-secondary btn-sm" onclick="ytProcessOneItem(${item.id})" title="Process now">▶</button>`;
+            actions += `<button class="btn btn-secondary btn-sm" onclick="ytProcessOneItem(${item.id}, this)" title="Process now">▶</button>`;
         }
         if (item.status === 'failed') {
             actions += `<button class="btn btn-secondary btn-sm" onclick="ytRetryQueueItem(${item.id})" title="Retry">🔄</button>`;
@@ -1006,7 +1010,7 @@ async function loadYtVideosData() {
                 <td>${target}</td>
                 <td>${sentBadge}</td>
                 <td class="text-muted">${timeAgo(item.created_at)}</td>
-                <td class="yt-actions-cell">${actions}</td>
+                <td style="text-align:right;white-space:nowrap"><div class="yt-actions-cell">${actions}</div></td>
             </tr>`;
     }
 
@@ -1035,6 +1039,12 @@ function _ytRenderPagination() {
 function ytGoToPage(page) {
     _ytCurrentPage = page;
     loadYtVideosData();
+}
+
+let _ytFilterDebounceTimer = null;
+function ytDebouncedFilter() {
+    clearTimeout(_ytFilterDebounceTimer);
+    _ytFilterDebounceTimer = setTimeout(() => ytGoToPage(0), 400);
 }
 
 function ytPrevPage() {
@@ -1084,14 +1094,44 @@ async function ytRetryQueueItem(id) {
     loadYtVideosData();
 }
 
-async function ytProcessOneItem(id) {
-    ytToast('Processing item…', 'info');
-    const res = await api('/api/youtube/queue/process-one', { id });
+async function ytResetStuck() {
+    const res = await api('/api/youtube/queue/reset-stuck', {});
     if (res.status === 'ok') {
-        ytToast(res.success ? 'Item processed successfully' : 'Processing failed', res.success ? 'success' : 'error');
+        ytToast(res.reset > 0 ? `Reset ${res.reset} stuck item(s) to Failed — you can now retry them` : 'No stuck items found', res.reset > 0 ? 'success' : 'info');
         loadYtVideosData();
     } else {
-        ytToast(res.message || 'Processing failed', 'error');
+        ytToast('Reset failed', 'error');
+    }
+}
+
+async function ytProcessOneItem(id, btn) {
+    if (_ytProcessingCount >= _ytProcessingMax) {
+        ytToast(`Max ${_ytProcessingMax} items processing at once — please wait`, 'warning');
+        return;
+    }
+    _ytProcessingCount++;
+
+    // Immediately reflect processing state in the row
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="yt-spin">⟳</span>';
+        btn.title = 'Processing…';
+        const row = btn.closest('tr');
+        if (row) {
+            const statusCell = row.querySelector('td:nth-child(3)');
+            if (statusCell) statusCell.innerHTML = '<span class="yt-status-badge yt-status-processing">processing</span>';
+        }
+    }
+    try {
+        const res = await api('/api/youtube/queue/process-one', { id });
+        if (res.status === 'ok') {
+            ytToast(res.success ? 'Item processed successfully' : 'Processing failed', res.success ? 'success' : 'error');
+        } else {
+            ytToast(res.message || 'Processing failed', 'error');
+        }
+    } finally {
+        _ytProcessingCount--;
+        loadYtVideosData();
     }
 }
 
@@ -1349,13 +1389,7 @@ function _ytChatRenderMessages() {
 
 function _ytChatFormatText(text) {
     if (!text) return '';
-    // Basic markdown: bold, bullet points, line breaks
-    return escapeHtml(text)
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/^[\-•]\s+(.*)$/gm, '<li>$1</li>')
-        .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-        .replace(/\n/g, '<br>');
+    return marked.parse(text, { gfm: true, breaks: true });
 }
 
 function ytChatToggleSelect(msgId, checked) {

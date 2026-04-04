@@ -49,9 +49,12 @@ def reload_bot():
     return {"status": "bot_reload_requested"}
 
 @router.get("/bots")
-def list_bots():
+def list_bots(request: Request):
     db = get_db()
-    return db.get_all_bots_config()
+    if is_admin_request(request):
+        return db.get_all_bots_config()
+    user_id = get_request_user_id(request)
+    return db.get_filtered_bots_config(user_id) if user_id else {}
 
 @router.post("/bot/save")
 def save_bot(request: Request, data: dict = Body(...)):
@@ -93,12 +96,13 @@ def delete_bot(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
+    user_id = get_request_user_id(request)
     all_bots = db.get_all_bots_config()
     bot_data = all_bots.get(name)
     if bot_data:
         snapshot = {**bot_data, 'name': name}
         snapshot['prompts'] = db.get_bot_prompts(name)
-        db.recycle_bin_add('bot', name, snapshot)
+        db.recycle_bin_add('bot', name, snapshot, owner_id=user_id)
 
     if db.delete_bot(name):
         return {"status": "ok"}

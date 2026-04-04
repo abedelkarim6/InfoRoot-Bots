@@ -230,6 +230,11 @@ class Database:
                 UNIQUE(category_id, name)
             )
         """)
+        # Migrate topics table — add columns introduced after initial creation
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'topics'")
+        topic_cols = [r['column_name'] for r in cursor.fetchall()]
+        if 'catch_all' not in topic_cols:
+            cursor.execute("ALTER TABLE topics ADD COLUMN catch_all BOOLEAN DEFAULT FALSE")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS schedules (
@@ -266,6 +271,8 @@ class Database:
                 cursor.execute('ALTER TABLE schedules ADD COLUMN header_time_arabic BOOLEAN DEFAULT FALSE')
             if 'telegram_targets' not in sch_cols:
                 cursor.execute("ALTER TABLE schedules ADD COLUMN telegram_targets JSONB DEFAULT '[]'")
+            if 'wait_time' not in sch_cols:
+                cursor.execute('ALTER TABLE schedules ADD COLUMN wait_time INTEGER')
 
         # Migrate: add default_schedules to bots if missing
         cursor.execute("""
@@ -317,6 +324,7 @@ class Database:
                 entity_type TEXT NOT NULL,
                 entity_name TEXT NOT NULL,
                 entity_data JSONB NOT NULL DEFAULT '{}',
+                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 deleted_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -344,14 +352,38 @@ class Database:
             cursor.execute("ALTER TABLE users ADD COLUMN youtube_on BOOLEAN DEFAULT FALSE")
         if 'agents_on' not in user_cols:
             cursor.execute("ALTER TABLE users ADD COLUMN agents_on BOOLEAN DEFAULT FALSE")
+        if 'bots_on' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN bots_on BOOLEAN DEFAULT FALSE")
         if 'agents_limit' not in user_cols:
             cursor.execute("ALTER TABLE users ADD COLUMN agents_limit JSONB DEFAULT NULL")
+        if 'yt_chat_on' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN yt_chat_on BOOLEAN DEFAULT FALSE")
+        if 'sys_bot_on' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN sys_bot_on BOOLEAN DEFAULT FALSE")
+        # Vertex AI per-user GCP project IDs (one per feature for billing isolation)
+        if 'gemini_project_bots' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN gemini_project_bots TEXT DEFAULT NULL")
+            if 'gemini_api_key_1' in user_cols:
+                cursor.execute("UPDATE users SET gemini_project_bots = gemini_api_key_1 WHERE gemini_api_key_1 IS NOT NULL")
+        if 'gemini_project_youtube' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN gemini_project_youtube TEXT DEFAULT NULL")
+            if 'gemini_api_key_2' in user_cols:
+                cursor.execute("UPDATE users SET gemini_project_youtube = gemini_api_key_2 WHERE gemini_api_key_2 IS NOT NULL")
+        if 'gemini_project_agents' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN gemini_project_agents TEXT DEFAULT NULL")
+            if 'gemini_api_key_3' in user_cols:
+                cursor.execute("UPDATE users SET gemini_project_agents = gemini_api_key_3 WHERE gemini_api_key_3 IS NOT NULL")
 
         # Migrate bots.owner_id — must run after users table exists
         cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'bots'")
         bot_cols2 = [r['column_name'] for r in cursor.fetchall()]
         if bot_cols2 and 'owner_id' not in bot_cols2:
             cursor.execute("ALTER TABLE bots ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
+
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'recycle_bin'")
+        rb_cols = [r['column_name'] for r in cursor.fetchall()]
+        if rb_cols and 'owner_id' not in rb_cols:
+            cursor.execute("ALTER TABLE recycle_bin ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
 
         # Per-user bot inheritance configuration
         cursor.execute("""
@@ -366,6 +398,43 @@ class Database:
                 inherit_prompts   BOOLEAN DEFAULT TRUE,
                 inherit_messages_db BOOLEAN DEFAULT FALSE,
                 UNIQUE(user_id, bot_id)
+            )
+        """)
+
+        # Per-topic settings for each bot inheritance (schedules, prompts, keyword %)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_bot_topic_settings (
+                id             SERIAL PRIMARY KEY,
+                inheritance_id INTEGER REFERENCES user_bot_inheritance(id) ON DELETE CASCADE,
+                topic_id       INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                include_schedules BOOLEAN DEFAULT TRUE,
+                include_prompts   BOOLEAN DEFAULT TRUE,
+                keyword_pct       INTEGER DEFAULT 100 CHECK (keyword_pct >= 0 AND keyword_pct <= 100),
+                UNIQUE(inheritance_id, topic_id)
+            )
+        """)
+
+        # Per-user collection inheritance (tracks which global collections were granted)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_collection_inheritance (
+                id SERIAL PRIMARY KEY,
+                user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                collection_name TEXT NOT NULL,
+                UNIQUE(user_id, collection_name)
+            )
+        """)
+
+        # Per-user owned collections (independent copies, fully editable by user)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_collections (
+                id              SERIAL PRIMARY KEY,
+                user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                name            TEXT NOT NULL,
+                display_name    TEXT,
+                source_channels JSONB DEFAULT '[]',
+                target_channels JSONB DEFAULT '[]',
+                enabled         BOOLEAN DEFAULT TRUE,
+                UNIQUE(user_id, name)
             )
         """)
 
@@ -386,6 +455,30 @@ class Database:
         """)
 
         self.connection.commit()
+        self._migrate_comma_keywords()
+
+    def _migrate_comma_keywords(self):
+        """One-time migration: split any keyword rows that contain commas into separate rows."""
+        cursor = self._get_cursor()
+        cursor.execute("SELECT id, bot_name, category_name, topic_name, keyword FROM topic_keywords WHERE keyword LIKE '%,%'")
+        bad_rows = cursor.fetchall()
+        if not bad_rows:
+            return
+        fixed = 0
+        for row in bad_rows:
+            parts = [kw.strip() for kw in row['keyword'].split(',') if kw.strip()]
+            # Delete the bad row first
+            cursor.execute("DELETE FROM topic_keywords WHERE id = %s", (row['id'],))
+            # Insert each part
+            for part in parts:
+                cursor.execute("""
+                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
+                    VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+                """, (row['bot_name'], row['category_name'], row['topic_name'], part))
+            fixed += 1
+        self.connection.commit()
+        if fixed:
+            logger.info(f"[KEYWORDS] Migrated {fixed} comma-separated keyword rows into individual entries")
 
     # ── User management ───────────────────────────────────────────────────────
 
@@ -434,7 +527,7 @@ class Database:
     def get_all_users(self):
         cursor = self._get_cursor()
         cursor.execute(
-            "SELECT id, username, role, is_active, youtube_on, agents_on, agents_limit, "
+            "SELECT id, username, role, is_active, bots_on, youtube_on, yt_chat_on, agents_on, sys_bot_on, agents_limit, "
             "telegram_phone, created_at FROM users ORDER BY id"
         )
         return [dict(r) for r in cursor.fetchall()]
@@ -446,7 +539,7 @@ class Database:
         return dict(row) if row else None
 
     def update_user(self, user_id: int, **fields):
-        allowed = {'is_active', 'youtube_on', 'agents_on', 'agents_limit', 'role'}
+        allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role'}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
@@ -475,7 +568,68 @@ class Database:
             WHERE ubi.user_id = %s
             ORDER BY b.name
         """, (user_id,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        for row in rows:
+            row['topic_settings'] = self.get_user_bot_topic_settings(row['id'])
+        return rows
+
+    def get_user_bot_topic_settings(self, inheritance_id: int):
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT topic_id, include_schedules, include_prompts, keyword_pct "
+            "FROM user_bot_topic_settings WHERE inheritance_id = %s",
+            (inheritance_id,)
+        )
         return [dict(r) for r in cursor.fetchall()]
+
+    def upsert_topic_settings(self, inheritance_id: int, topic_id: int, settings: dict):
+        allowed = {'include_schedules', 'include_prompts', 'keyword_pct'}
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT id FROM user_bot_topic_settings WHERE inheritance_id = %s AND topic_id = %s",
+            (inheritance_id, topic_id)
+        )
+        if cursor.fetchone():
+            parts, vals = [], []
+            for k, v in settings.items():
+                if k in allowed:
+                    parts.append(f"{k} = %s")
+                    vals.append(v)
+            if parts:
+                vals += [inheritance_id, topic_id]
+                cursor.execute(
+                    f"UPDATE user_bot_topic_settings SET {', '.join(parts)} "
+                    "WHERE inheritance_id = %s AND topic_id = %s", vals
+                )
+        else:
+            cursor.execute("""
+                INSERT INTO user_bot_topic_settings
+                    (inheritance_id, topic_id, include_schedules, include_prompts, keyword_pct)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                inheritance_id, topic_id,
+                settings.get('include_schedules', True),
+                settings.get('include_prompts', True),
+                settings.get('keyword_pct', 100),
+            ))
+        self.connection.commit()
+
+    def delete_topic_settings(self, inheritance_id: int, topic_id: int):
+        cursor = self._get_cursor()
+        cursor.execute(
+            "DELETE FROM user_bot_topic_settings WHERE inheritance_id = %s AND topic_id = %s",
+            (inheritance_id, topic_id)
+        )
+        self.connection.commit()
+
+    def get_bot_inheritance_id(self, user_id: int, bot_id: int):
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT id FROM user_bot_inheritance WHERE user_id = %s AND bot_id = %s",
+            (user_id, bot_id)
+        )
+        row = cursor.fetchone()
+        return row['id'] if row else None
 
     def upsert_user_bot_inheritance(self, user_id: int, bot_id: int, settings: dict):
         allowed = {'inherit_categories', 'inherit_topics', 'inherit_keywords',
@@ -521,6 +675,108 @@ class Database:
             (user_id, bot_id)
         )
         self.connection.commit()
+
+    # ── Collection inheritance ────────────────────────────────────────────────
+
+    def get_user_collection_inheritances(self, user_id: int):
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT collection_name FROM user_collection_inheritance WHERE user_id = %s ORDER BY collection_name",
+            (user_id,)
+        )
+        return [r['collection_name'] for r in cursor.fetchall()]
+
+    def grant_collection_inheritance(self, user_id: int, collection_name: str):
+        # Record the grant
+        all_colls = self.get_all_collections()
+        coll_data = all_colls.get(collection_name, {})
+        cursor = self._get_cursor()
+        cursor.execute(
+            "INSERT INTO user_collection_inheritance (user_id, collection_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (user_id, collection_name)
+        )
+        # Copy collection data into user_collections (no overwrite if user already customised it)
+        if coll_data:
+            cursor.execute("""
+                INSERT INTO user_collections (user_id, name, display_name, source_channels, target_channels, enabled)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, name) DO NOTHING
+            """, (
+                user_id,
+                collection_name,
+                coll_data.get('name', collection_name),
+                json.dumps(coll_data.get('source_channels', [])),
+                json.dumps([]),   # users set their own target channels
+                coll_data.get('enabled', True),
+            ))
+        self.connection.commit()
+
+    def revoke_collection_inheritance(self, user_id: int, collection_name: str):
+        cursor = self._get_cursor()
+        cursor.execute(
+            "DELETE FROM user_collection_inheritance WHERE user_id = %s AND collection_name = %s",
+            (user_id, collection_name)
+        )
+        cursor.execute(
+            "DELETE FROM user_collections WHERE user_id = %s AND name = %s",
+            (user_id, collection_name)
+        )
+        self.connection.commit()
+
+    # ── Per-user owned collections ────────────────────────────────────────────
+
+    def get_user_collections(self, user_id: int) -> dict:
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM user_collections WHERE user_id = %s ORDER BY id", (user_id,))
+        result = {}
+        for row in cursor.fetchall():
+            result[row['name']] = {
+                'name': row['display_name'] or row['name'],
+                'source_channels': row['source_channels'] or [],
+                'target_channels': row['target_channels'] or [],
+                'enabled': row['enabled'],
+            }
+        return result
+
+    def save_user_collection(self, user_id: int, name: str, data: dict):
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO user_collections (user_id, name, display_name, source_channels, target_channels, enabled)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, name) DO UPDATE SET
+                display_name    = EXCLUDED.display_name,
+                source_channels = EXCLUDED.source_channels,
+                target_channels = EXCLUDED.target_channels,
+                enabled         = EXCLUDED.enabled
+        """, (
+            user_id,
+            name,
+            data.get('name', name),
+            json.dumps(data.get('source_channels', [])),
+            json.dumps(data.get('target_channels', [])),
+            data.get('enabled', True),
+        ))
+        self.connection.commit()
+
+    def delete_user_collection(self, user_id: int, name: str) -> bool:
+        cursor = self._get_cursor()
+        cursor.execute(
+            "DELETE FROM user_collections WHERE user_id = %s AND name = %s",
+            (user_id, name)
+        )
+        deleted = cursor.rowcount > 0
+        self.connection.commit()
+        return deleted
+
+    def toggle_user_collection(self, user_id: int, name: str, enabled: bool) -> bool:
+        cursor = self._get_cursor()
+        cursor.execute(
+            "UPDATE user_collections SET enabled = %s WHERE user_id = %s AND name = %s",
+            (enabled, user_id, name)
+        )
+        updated = cursor.rowcount > 0
+        self.connection.commit()
+        return updated
 
     # ── YouTube inheritance ───────────────────────────────────────────────────
 
@@ -656,15 +912,22 @@ class Database:
         self.connection.commit()
         return row['id']
 
-    def get_pending_counts(self):
+    def get_pending_counts(self, allowed_bot_names: list = None):
         """Returns pending message counts per bot per topic for each schedule type."""
         cursor = self._get_cursor()
-        # Get all messages with their topics, then check what's NOT yet summarized
-        cursor.execute("""
-            SELECT m.id, m.bot_name, m.topics
-            FROM messages m
-            WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
-        """)
+        if allowed_bot_names is not None:
+            cursor.execute("""
+                SELECT m.id, m.bot_name, m.topics
+                FROM messages m
+                WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
+                  AND m.bot_name = ANY(%s)
+            """, (allowed_bot_names,))
+        else:
+            cursor.execute("""
+                SELECT m.id, m.bot_name, m.topics
+                FROM messages m
+                WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
+            """)
         rows = cursor.fetchall()
 
         # Get all existing summarizations
@@ -684,24 +947,45 @@ class Database:
 
             for topic in topics:
                 if topic not in counts[bn]:
-                    counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0}
-                for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes'):
+                    counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0, 'speeches_interval': 0}
+                for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes', 'speeches_interval'):
                     if (row['id'], bn, topic, stype) not in done:
                         counts[bn][topic][stype] += 1
 
         return counts
 
 
-    def get_recent_summaries(self, limit: int = 100):
-        """Returns recent summaries ordered newest first."""
+    def get_recent_summaries(self, limit: int = 100, allowed_bot_names: list = None,
+                             days: int = None, topic: str = None, bot_name: str = None):
+        """Returns recent summaries ordered newest first. Optional filters: days, topic, bot_name."""
         cursor = self._get_cursor()
+        conditions = []
+        params = []
+
+        if allowed_bot_names is not None:
+            conditions.append("bot_name = ANY(%s)")
+            params.append(allowed_bot_names)
+        if bot_name:
+            conditions.append("bot_name ILIKE %s")
+            params.append(f"%{bot_name}%")
+        if topic:
+            conditions.append("topic_name ILIKE %s")
+            params.append(f"%{topic}%")
+        if days:
+            from datetime import datetime, timedelta
+            conditions.append("timestamp >= %s")
+            params.append(datetime.utcnow() - timedelta(days=days))
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
         cursor.execute(
-            """SELECT id, bot_name, topic_name, summary_type, target_entity,
-                      message_count, timestamp, summary_text, message_ids
-               FROM summaries
-               ORDER BY timestamp DESC
-               LIMIT %s""",
-            (limit,)
+            f"""SELECT id, bot_name, topic_name, summary_type, target_entity,
+                       message_count, timestamp, summary_text, message_ids
+                FROM summaries
+                {where}
+                ORDER BY timestamp DESC
+                LIMIT %s""",
+            params,
         )
         result = []
         for row in cursor.fetchall():
@@ -744,17 +1028,40 @@ class Database:
         )
         self.connection.commit()
 
-    def get_recent_messages(self, limit: int = 200, offset: int = 0):
-        """Returns the most recent messages with categorization info (collection_name required)."""
+    def get_recent_messages(self, limit: int = 200, offset: int = 0, allowed_bot_names: list = None,
+                            topic: str = None, bot_name: str = None, days: int = None,
+                            source: str = None):
+        """Returns the most recent messages with optional filters for topic, bot, days, source."""
         cursor = self._get_cursor()
+        clauses = ["collection_name IS NOT NULL AND collection_name != ''"]
+        params = []
+
+        if allowed_bot_names is not None:
+            clauses.append("bot_name = ANY(%s)")
+            params.append(allowed_bot_names)
+        if bot_name:
+            clauses.append("bot_name ILIKE %s")
+            params.append(f"%{bot_name}%")
+        if topic:
+            clauses.append("topics ILIKE %s")
+            params.append(f"%{topic}%")
+        if source:
+            clauses.append("channel_username ILIKE %s")
+            params.append(f"%{source}%")
+        if days:
+            clauses.append("timestamp >= NOW() - (%s * INTERVAL '1 day')")
+            params.append(days)
+
+        where = " AND ".join(clauses)
+        params.extend([limit, offset])
         cursor.execute(
-            """SELECT id, channel_id, channel_username, collection_name, bot_name,
-                      topics, categories, keywords_found, timestamp, text
-               FROM messages
-               WHERE collection_name IS NOT NULL AND collection_name != ''
-               ORDER BY timestamp DESC
-               LIMIT %s OFFSET %s""",
-            (limit, offset)
+            f"""SELECT id, channel_id, channel_username, collection_name, bot_name,
+                       topics, categories, keywords_found, timestamp, text
+                FROM messages
+                WHERE {where}
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s""",
+            params,
         )
         result = []
         for row in cursor.fetchall():
@@ -768,12 +1075,16 @@ class Database:
 
     def get_unclassified_messages(self, limit: int = 500, offset: int = 0,
                                    bot_name: str = None,
-                                   collection: str = None, search: str = None):
+                                   collection: str = None, search: str = None,
+                                   allowed_bot_names: list = None):
         """Returns messages that were not classified into any topic."""
         cursor = self._get_cursor()
         clauses = ["collection_name IS NOT NULL AND collection_name != ''",
                    "(topics IS NULL OR topics = '')"]
         params = []
+        if allowed_bot_names is not None:
+            clauses.append("bot_name = ANY(%s)")
+            params.append(allowed_bot_names)
         if bot_name:
             clauses.append("bot_name = %s")
             params.append(bot_name)
@@ -803,17 +1114,21 @@ class Database:
             result.append(d)
         return result
 
-    def get_unclassified_stats(self):
+    def get_unclassified_stats(self, allowed_bot_names: list = None):
         """Return counts for unclassified messages grouped by bot and collection."""
         cursor = self._get_cursor()
-        cursor.execute("""
+        where = "collection_name IS NOT NULL AND collection_name != '' AND (topics IS NULL OR topics = '')"
+        params = []
+        if allowed_bot_names is not None:
+            where += " AND bot_name = ANY(%s)"
+            params.append(allowed_bot_names)
+        cursor.execute(f"""
             SELECT bot_name, collection_name, COUNT(*) AS cnt
             FROM messages
-            WHERE collection_name IS NOT NULL AND collection_name != ''
-              AND (topics IS NULL OR topics = '')
+            WHERE {where}
             GROUP BY bot_name, collection_name
             ORDER BY cnt DESC
-        """)
+        """, params or None)
         return [dict(r) for r in cursor.fetchall()]
 
     def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None, filter_bot_names: list = None) -> dict:
@@ -1056,10 +1371,7 @@ class Database:
         for bot_name, bot_data in bots.items():
             for category_name, category_data in bot_data.get('categories', {}).items():
                 for topic_name, topic_data in category_data.get('topics', {}).items():
-                    for kw in topic_data.get('keywords', []):
-                        kw = str(kw).strip()
-                        if not kw:
-                            continue
+                    for kw in self._split_keywords(topic_data.get('keywords', [])):
                         cursor.execute("""
                             INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
                             VALUES (%s, %s, %s, %s)
@@ -1177,14 +1489,27 @@ class Database:
 
 
     def get_topic_keywords(self, bot_name: str, category_name: str, topic_name: str) -> list:
-        """Return the keyword list for a specific topic."""
+        """Return the keyword list for a specific topic, always split into individual entries."""
         cursor = self._get_cursor()
         cursor.execute("""
             SELECT keyword FROM topic_keywords
             WHERE bot_name = %s AND category_name = %s AND topic_name = %s
             ORDER BY id
         """, (bot_name, category_name, topic_name))
-        return [row['keyword'] for row in cursor.fetchall()]
+        return self._split_keywords([row['keyword'] for row in cursor.fetchall()])
+
+    @staticmethod
+    def _split_keywords(raw: list) -> list:
+        """Flatten a list that may contain comma-separated strings into individual keywords."""
+        result = []
+        seen = set()
+        for item in raw:
+            for kw in str(item).split(','):
+                kw = kw.strip()
+                if kw and kw not in seen:
+                    seen.add(kw)
+                    result.append(kw)
+        return result
 
     def set_topic_keywords(self, bot_name: str, category_name: str, topic_name: str, keywords: list):
         """Replace all keywords for a topic with the given list."""
@@ -1193,27 +1518,29 @@ class Database:
             DELETE FROM topic_keywords
             WHERE bot_name = %s AND category_name = %s AND topic_name = %s
         """, (bot_name, category_name, topic_name))
-        for kw in keywords:
-            kw = str(kw).strip()
-            if kw:
-                cursor.execute("""
-                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
-                """, (bot_name, category_name, topic_name, kw))
+        for kw in self._split_keywords(keywords):
+            cursor.execute("""
+                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (bot_name, category_name, topic_name, kw))
         self.connection.commit()
 
     def add_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
-        """Add a single keyword. Returns True if inserted, False if already existed."""
+        """Add one or more keywords (splits comma-separated input). Returns True if any were inserted."""
         cursor = self._get_cursor()
-        cursor.execute("""
-            INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-        """, (bot_name, category_name, topic_name, keyword.strip()))
-        inserted = cursor.rowcount
+        total_inserted = 0
+        for kw in self._split_keywords([keyword]):
+            cursor.execute("""
+                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (bot_name, category_name, topic_name, kw))
+            total_inserted += cursor.rowcount
+        if total_inserted > 0:
+            self._bump_config_version()
         self.connection.commit()
-        return inserted > 0
+        return total_inserted > 0
 
     def delete_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
         """Remove a single keyword. Returns True if deleted."""
@@ -1223,6 +1550,8 @@ class Database:
             WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND keyword = %s
         """, (bot_name, category_name, topic_name, keyword.strip()))
         deleted = cursor.rowcount
+        if deleted > 0:
+            self._bump_config_version()
         self.connection.commit()
         return deleted > 0
 
@@ -1440,6 +1769,7 @@ class Database:
                 kws = self.get_topic_keywords(bn, cn, t['name'])
                 result[bn]['categories'][cn]['topics'][t['name']] = {
                     'enabled': t['enabled'],
+                    'catch_all': bool(t.get('catch_all')),
                     'linked_topics': t['linked_topics'] or [],
                     'keywords': kws,
                     'schedules': [],
@@ -1584,6 +1914,15 @@ class Database:
             return {}
         full = self.get_all_bots_config()
         return {n: v for n, v in full.items() if n in names}
+
+    def toggle_bot(self, name: str, enabled: bool) -> bool:
+        cursor = self._get_cursor()
+        cursor.execute("UPDATE bots SET enabled = %s WHERE name = %s", (enabled, name))
+        updated = cursor.rowcount > 0
+        if updated:
+            self._bump_config_version()
+        self.connection.commit()
+        return updated
 
     def delete_bot(self, name: str) -> bool:
         cursor = self._get_cursor()
@@ -1775,6 +2114,19 @@ class Database:
         self.connection.commit()
         return updated
 
+    def set_topic_catch_all(self, bot_name: str, category_name: str, topic_name: str, value: bool) -> bool:
+        cat_id = self._get_category_id(bot_name, category_name)
+        if not cat_id:
+            return False
+        cursor = self._get_cursor()
+        cursor.execute("UPDATE topics SET catch_all = %s WHERE category_id = %s AND name = %s",
+                       (value, cat_id, topic_name))
+        updated = cursor.rowcount > 0
+        if updated:
+            self._bump_config_version()
+        self.connection.commit()
+        return updated
+
     def update_topic_linked(self, bot_name: str, category_name: str, topic_name: str, linked_topics: list):
         cat_id = self._get_category_id(bot_name, category_name)
         if not cat_id:
@@ -1804,8 +2156,8 @@ class Database:
             INSERT INTO schedules (topic_id, name, type, enabled, prompt_key, header, header_datetime,
                                    header_date_arabic, header_time_arabic,
                                    minute, hour, hours, minutes, start_hour, start_minute,
-                                   telegram_targets)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   telegram_targets, wait_time)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             topic_id,
@@ -1824,6 +2176,7 @@ class Database:
             schedule.get('start_hour'),
             schedule.get('start_minute'),
             json.dumps(_parse_jsonb_list(schedule.get('telegram_targets'))),
+            schedule.get('wait_time'),
         ))
         row = cursor.fetchone()
         self._bump_config_version()
@@ -1834,7 +2187,7 @@ class Database:
         allowed = {'name', 'type', 'enabled', 'prompt_key', 'header',
                    'header_datetime', 'header_date_arabic', 'header_time_arabic',
                    'minute', 'hour', 'hours', 'minutes',
-                   'start_hour', 'start_minute', 'telegram_targets'}
+                   'start_hour', 'start_minute', 'telegram_targets', 'wait_time'}
         fields = {k: v for k, v in schedule.items() if k in allowed}
         if not fields:
             return False
@@ -1893,6 +2246,88 @@ class Database:
         self.connection.commit()
         return deleted
 
+    # ── Dependency checks ────────────────────────────────────────────────────
+
+    def get_collection_bots(self, collection_name: str) -> list:
+        """Return list of bot names whose collection_names include this collection."""
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT name FROM bots WHERE collection_names::jsonb @> %s::jsonb ORDER BY name",
+            (json.dumps([collection_name]),)
+        )
+        return [r['name'] for r in cursor.fetchall()]
+
+    def get_prompt_schedules(self, bot_name: str, key: str) -> list:
+        """Return schedules (with topic/category context) that reference this prompt key."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT s.name AS schedule_name, t.name AS topic_name, c.name AS category_name
+            FROM schedules s
+            JOIN topics t ON t.id = s.topic_id
+            JOIN categories c ON c.id = t.category_id
+            JOIN bots b ON b.id = c.bot_id
+            WHERE b.name = %s AND s.prompt_key = %s
+            ORDER BY c.name, t.name, s.name
+        """, (bot_name, key))
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_all_dependency_warnings(self) -> list:
+        """
+        Return actionable dependency warnings:
+        - Orphaned prompt key: a schedule references a prompt that no longer exists
+        - Orphaned collection: a bot references a collection that no longer exists
+        """
+        warnings = []
+        cursor = self._get_cursor()
+
+        # Schedules with a prompt_key that doesn't exist in the prompts table
+        cursor.execute("""
+            SELECT DISTINCT b.name AS bot_name, s.prompt_key,
+                            t.name AS topic_name, c.name AS category_name
+            FROM schedules s
+            JOIN topics t ON t.id = s.topic_id
+            JOIN categories c ON c.id = t.category_id
+            JOIN bots b ON b.id = c.bot_id
+            WHERE s.prompt_key IS NOT NULL AND s.prompt_key != ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM prompts p
+                  WHERE p.bot_name = b.name AND p.key = s.prompt_key
+              )
+            ORDER BY b.name, s.prompt_key
+        """)
+        for r in cursor.fetchall():
+            warnings.append({
+                'type': 'orphaned_prompt',
+                'level': 'error',
+                'message': (
+                    f"Bot \"{r['bot_name']}\" — schedule in "
+                    f"{r['category_name']} / {r['topic_name']} references "
+                    f"missing prompt \"{r['prompt_key']}\""
+                ),
+                'bot_name': r['bot_name'],
+                'prompt_key': r['prompt_key'],
+                'category_name': r['category_name'],
+                'topic_name': r['topic_name'],
+            })
+
+        # Bots referencing collections that don't exist
+        cursor.execute("SELECT name, collection_names FROM bots WHERE collection_names IS NOT NULL")
+        bots = cursor.fetchall()
+        cursor.execute("SELECT name FROM collections")
+        existing = {r['name'] for r in cursor.fetchall()}
+        for bot in bots:
+            for cname in (bot['collection_names'] or []):
+                if cname not in existing:
+                    warnings.append({
+                        'type': 'orphaned_collection',
+                        'level': 'warning',
+                        'message': f"Bot \"{bot['name']}\" references missing collection \"{cname}\"",
+                        'bot_name': bot['name'],
+                        'collection_name': cname,
+                    })
+
+        return warnings
+
     def search_messages(self, topic_filter: str = None, source_filter: str = None,
                          days: int = 7, limit: int = 50):
         """Search messages by topic and/or source within a date range."""
@@ -1935,22 +2370,28 @@ class Database:
 
     # ==================== Recycle Bin ====================
 
-    def recycle_bin_add(self, entity_type: str, entity_name: str, entity_data: dict):
+    def recycle_bin_add(self, entity_type: str, entity_name: str, entity_data: dict, owner_id: int = None):
         """Save a snapshot of the deleted entity before hard-deleting it."""
         cursor = self._get_cursor()
         cursor.execute("""
-            INSERT INTO recycle_bin (entity_type, entity_name, entity_data)
-            VALUES (%s, %s, %s)
-        """, (entity_type, entity_name, json.dumps(entity_data)))
+            INSERT INTO recycle_bin (entity_type, entity_name, entity_data, owner_id)
+            VALUES (%s, %s, %s, %s)
+        """, (entity_type, entity_name, json.dumps(entity_data), owner_id))
         self.connection.commit()
 
-    def recycle_bin_list(self) -> list:
-        """Return all recycle bin items ordered by most recent first."""
+    def recycle_bin_list(self, owner_id: int = None) -> list:
+        """Return recycle bin items. Admin (owner_id=None) sees all; users see only their own."""
         cursor = self._get_cursor()
-        cursor.execute("""
-            SELECT id, entity_type, entity_name, entity_data, deleted_at
-            FROM recycle_bin ORDER BY deleted_at DESC
-        """)
+        if owner_id is not None:
+            cursor.execute("""
+                SELECT id, entity_type, entity_name, entity_data, deleted_at
+                FROM recycle_bin WHERE owner_id = %s ORDER BY deleted_at DESC
+            """, (owner_id,))
+        else:
+            cursor.execute("""
+                SELECT id, entity_type, entity_name, entity_data, deleted_at
+                FROM recycle_bin ORDER BY deleted_at DESC
+            """)
         rows = cursor.fetchall()
         result = []
         for r in rows:

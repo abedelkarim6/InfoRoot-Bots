@@ -178,11 +178,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     initSidebar();
     initNavigation();
     await loadAllData();
+    loadWarnings();
     // Wait for auth/role check (accounts.js) before showing initial page
     // so hidden nav sections are gated before the first render.
     if (typeof authReady !== 'undefined') await authReady;
-    const savedPage = localStorage.getItem('activePage') || 'system';
-    showPage(savedPage);
+    const initialPage = location.hash.slice(1) || localStorage.getItem('activePage') || 'system';
+    // Seed the history entry so back/forward works from the start
+    history.replaceState({ page: initialPage }, '', '#' + initialPage);
+    showPage(initialPage);
+});
+
+// Back / forward navigation
+let _poppingState = false;
+window.addEventListener('popstate', () => {
+    _poppingState = true;
+    showPage(location.hash.slice(1) || 'system');
+    _poppingState = false;
 });
 
 // ==================== API Helper ====================
@@ -231,6 +242,14 @@ function showPage(pageName) {
     const pageEl = document.getElementById(`${pageName}-page`);
     if (pageEl) pageEl.classList.add('active');
 
+    // Chat pages fill the viewport — strip main-content padding
+    const chatPages = ['yt-chat', 'agent-chat'];
+    document.body.classList.toggle('chat-page-active', chatPages.includes(pageName));
+
+    // Update URL (skip when driven by popstate to avoid duplicate history entries)
+    if (!_poppingState && location.hash !== '#' + pageName) {
+        history.pushState({ page: pageName }, '', '#' + pageName);
+    }
     localStorage.setItem('activePage', pageName);
 
     if (pageName === 'system') renderSystemPage();
@@ -247,10 +266,29 @@ function showPage(pageName) {
     else if (pageName === 'yt-videos') loadYtVideosData();
     else if (pageName === 'yt-chat') ytChatInit();
     else if (pageName === 'agent-chat') agentChatInit();
-    else if (pageName === 'system-chat') sysChatInit();
     else if (pageName === 'recycle-bin') loadRecycleBinData();
     else if (pageName === 'accounts') loadAccountsData();
     else if (pageName === 'profile') loadProfileData();
+}
+
+// ==================== System Bot FAB ====================
+function toggleSysBot() {
+    const drawer = document.getElementById('sys-bot-drawer');
+    const isOpen = drawer.classList.contains('open');
+    if (isOpen) {
+        closeSysBot();
+    } else {
+        drawer.classList.add('open');
+        document.getElementById('sys-bot-overlay').classList.add('open');
+        document.getElementById('sys-bot-fab').classList.add('open');
+        sysChatInit();
+    }
+}
+
+function closeSysBot() {
+    document.getElementById('sys-bot-drawer').classList.remove('open');
+    document.getElementById('sys-bot-overlay').classList.remove('open');
+    document.getElementById('sys-bot-fab').classList.remove('open');
 }
 
 // ==================== Data Loading ====================
@@ -264,6 +302,47 @@ async function loadAllData() {
         console.error('Error loading data:', error);
         showNotification('Failed to load configuration', 'error');
     }
+}
+
+// ==================== Warnings Panel ====================
+async function loadWarnings() {
+    const result = await api('/api/warnings');
+    if (result && Array.isArray(result.warnings)) {
+        renderWarningsPanel(result.warnings);
+    }
+}
+
+function renderWarningsPanel(warnings) {
+    const panel = document.getElementById('warnings-panel');
+    const body = document.getElementById('warn-panel-body');
+    const count = document.getElementById('warn-panel-count');
+    const title = document.getElementById('warn-panel-title');
+    if (!panel) return;
+
+    if (!warnings.length) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    panel.style.display = '';
+    count.textContent = warnings.length;
+
+    const errCount = warnings.filter(w => w.level === 'error').length;
+    title.textContent = errCount
+        ? `⛔ System Warnings (${errCount} error${errCount > 1 ? 's' : ''})`
+        : '⚠️ System Warnings';
+
+    body.innerHTML = warnings.map(w => `
+        <div class="warn-item warn-${w.level}">
+            <span class="warn-item-icon">${w.level === 'error' ? '⛔' : '⚠️'}</span>
+            <span class="warn-item-text">${escapeHtmlSys(w.message)}</span>
+        </div>
+    `).join('');
+}
+
+function toggleWarningsPanel() {
+    const panel = document.getElementById('warnings-panel');
+    if (panel) panel.classList.toggle('open');
 }
 
 
@@ -314,7 +393,6 @@ function renderSystemPage() {
     // Show/hide admin-only controls
     const hide = (id, hidden) => { const el = document.getElementById(id); if (el) el.style.display = hidden ? 'none' : ''; };
     hide('sys-add-bot-btn',          !isAdmin);
-    hide('sys-control-toggle-wrap',  !isAdmin);
     hide('sys-news-section-title',   !hasBotAccess);
     hide('sys-yt-section-title',     !hasYt);
     hide('system-yt-overview',       !hasYt);
@@ -336,6 +414,7 @@ function renderSystemPage() {
                 <p class="text-muted" style="font-size:12px;margin-top:4px">Contact the admin to request access.</p>
                </div>`;
         updateSystemStatus();
+        if (!isAdmin) renderUserChannelsCard();
         if (hasYt) renderYoutubeOverview();
         return;
     }
@@ -346,184 +425,85 @@ function renderSystemPage() {
 
     updateStats();
     updateSystemStatus();
-    if (isAdmin) checkTelegramSessionStatus();
     if (hasYt) renderYoutubeOverview();
 }
 
-// ── Telegram Session Card ─────────────────────────────────────────────────────
+// ── User Channel Access Card ──────────────────────────────────────────────────
 
-async function checkTelegramSessionStatus() {
-    const card = document.getElementById('tg-session-card');
-    if (!card) return;
-    const isAdmin = !currentUser || currentUser.role === 'admin';
-    if (!isAdmin) return;
-    const data = await api('/api/telegram/session/status');
-    if (data.status !== 'ok') return;
-    card.innerHTML = _renderTgSessionCardHtml(data);
+let _userChOpen = false;
+function toggleUserChCard() {
+    _userChOpen = !_userChOpen;
+    const body = document.getElementById('user-ch-body');
+    const icon = document.getElementById('user-ch-toggle-icon');
+    if (body) body.style.display = _userChOpen ? 'block' : 'none';
+    if (icon) icon.textContent   = _userChOpen ? '▼' : '▶';
 }
 
-function _renderTgSessionCardHtml(data) {
-    const hasSession = data.has_session;
-    const phone = data.phone ? escapeHtmlSys(data.phone) : '';
-    const badge = hasSession
-        ? `<span class="tg-status-badge tg-status-ok">● Session on file</span>${phone ? `<span class="tg-status-phone">${phone}</span>` : ''}`
-        : `<span class="tg-status-badge tg-status-warn">⚠ No session configured</span>`;
-    return `
-        <div class="card tg-session-card">
-            <div class="tg-session-card-header">
-                <div style="display:flex;align-items:center;gap:10px">
+function renderUserChannelsCard(targetId) {
+    const el = document.getElementById(targetId || 'sys-user-channels');
+    if (!el) return;
+
+    const collections = globalConfig.collections || {};
+    const entries = Object.entries(collections);
+
+    if (!entries.length) {
+        el.innerHTML = `
+        <div class="ch-val-card">
+            <div class="ch-val-header">
+                <div class="ch-val-title">
                     <span style="font-size:20px">📡</span>
-                    <div>
-                        <strong>Telegram Userbot</strong>
-                        <div style="margin-top:3px">${badge}</div>
-                    </div>
-                </div>
-                <div style="display:flex;gap:8px">
-                    <button class="btn btn-sm btn-secondary" id="tg-test-btn" onclick="tgTestConnection()">🔌 Test</button>
-                    <button class="btn btn-sm btn-primary" onclick="openTgSessionModal()">${hasSession ? '✏️ Update' : '⚙️ Setup'} Session</button>
+                    <h3 style="margin:0">Subscribed Channels</h3>
                 </div>
             </div>
-            <div id="tg-test-logs" class="tg-logs-panel" style="display:none;margin-top:12px"></div>
+            <div class="ch-val-body" style="display:block;padding:12px 16px">
+                <p class="text-muted" style="font-size:13px;margin:0">No channels have been shared with your account yet. Contact the admin to request access.</p>
+            </div>
         </div>`;
-}
+        return;
+    }
 
-async function tgTestConnection() {
-    const logsEl = document.getElementById('tg-test-logs');
-    const btn = document.getElementById('tg-test-btn');
-    if (!logsEl || !btn) return;
-    btn.disabled = true;
-    btn.textContent = '⏳ Testing…';
-    logsEl.style.display = '';
-    logsEl.innerHTML = '<div class="tg-log-line tg-log-info">Connecting…</div>';
-    const data = await api('/api/telegram/session/test', {});
-    const logs = data.logs || [];
-    logsEl.innerHTML = logs.map(l => {
-        const cls = l.includes('[ERROR]') ? 'tg-log-error' : l.includes('[SUCCESS]') ? 'tg-log-success' : 'tg-log-info';
-        return `<div class="tg-log-line ${cls}">${escapeHtmlSys(l)}</div>`;
+    let totalChannels = 0;
+    const sections = entries.map(([collName, coll]) => {
+        const sources = coll.source_channels || [];
+        totalChannels += sources.length;
+
+        const chips = sources.length
+            ? sources.map(ch => {
+                const display = ch.startsWith('@') ? ch : (ch.toString().startsWith('-') ? ch : `@${ch}`);
+                return `<span class="ch-val-badge info" style="margin:2px 4px 2px 0">${escapeHtmlSys(display)}</span>`;
+              }).join('')
+            : `<span style="font-size:12px;color:var(--text-muted)">No source channels</span>`;
+
+        const statusBadge = coll.enabled === false
+            ? `<span class="ch-val-badge warn">● Paused</span>`
+            : `<span class="ch-val-badge ok">● Active</span>`;
+
+        return `
+        <div class="ch-val-collection">
+            <div class="ch-val-collection-name" style="display:flex;align-items:center;gap:8px">
+                📦 ${escapeHtmlSys(collName)} ${statusBadge}
+            </div>
+            <div style="margin-top:6px;display:flex;flex-wrap:wrap">${chips}</div>
+        </div>`;
     }).join('');
-    if (data.status === 'ok') {
-        logsEl.innerHTML += `<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this)">🔄 Restart Bot to Apply</button></div>`;
-    }
-    btn.disabled = false;
-    btn.textContent = '🔌 Test';
+
+    const subtitle = `${totalChannels} source channel${totalChannels !== 1 ? 's' : ''} across ${entries.length} collection${entries.length !== 1 ? 's' : ''}`;
+
+    el.innerHTML = `
+    <div class="ch-val-card">
+        <div class="ch-val-header" onclick="toggleUserChCard()" style="cursor:pointer">
+            <div class="ch-val-title">
+                <span class="ch-val-toggle-icon" id="user-ch-toggle-icon">▶</span>
+                <h3>📡 Subscribed Channels</h3>
+                <span class="text-muted" style="font-size:0.8rem;margin-left:8px">${escapeHtmlSys(subtitle)}</span>
+            </div>
+        </div>
+        <div class="ch-val-body" id="user-ch-body" style="display:none">
+            ${sections}
+        </div>
+    </div>`;
 }
 
-function openTgSessionModal() {
-    switchTgTab('paste');
-    tgResetLinkFlow();
-    const pi = document.getElementById('tg-paste-input');
-    const pp = document.getElementById('tg-paste-phone');
-    if (pi) pi.value = '';
-    if (pp) pp.value = '';
-    const logs = document.getElementById('tg-modal-logs');
-    if (logs) logs.style.display = 'none';
-    document.getElementById('tg-session-modal').style.display = 'flex';
-}
-
-function closeTgSessionModal() {
-    document.getElementById('tg-session-modal').style.display = 'none';
-}
-
-function switchTgTab(tab) {
-    document.getElementById('tg-tab-paste').style.display = tab === 'paste' ? '' : 'none';
-    document.getElementById('tg-tab-link').style.display  = tab === 'link'  ? '' : 'none';
-    document.getElementById('tg-tab-btn-paste').classList.toggle('active', tab === 'paste');
-    document.getElementById('tg-tab-btn-link').classList.toggle('active',  tab === 'link');
-}
-
-function tgResetLinkFlow() {
-    const s = (id, show) => { const el = document.getElementById(id); if (el) el.style.display = show ? '' : 'none'; };
-    s('tg-link-step-phone', true);
-    s('tg-link-step-code',  false);
-    s('tg-link-step-2fa',   false);
-    ['tg-link-phone','tg-link-code','tg-link-2fa'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-}
-
-function _tgShowModalLogs(logs) {
-    const wrap = document.getElementById('tg-modal-logs');
-    const content = document.getElementById('tg-modal-logs-content');
-    if (!wrap || !content) return;
-    wrap.style.display = '';
-    content.innerHTML = logs.map(l => {
-        const cls = l.includes('[ERROR]') ? 'tg-log-error' : l.includes('[SUCCESS]') ? 'tg-log-success' : 'tg-log-info';
-        return `<div class="tg-log-line ${cls}">${escapeHtmlSys(l)}</div>`;
-    }).join('');
-}
-
-async function tgSaveSession() {
-    const sessionStr = (document.getElementById('tg-paste-input').value || '').trim();
-    const phone = (document.getElementById('tg-paste-phone').value || '').trim();
-    if (!sessionStr) { showAlert('Please enter a session string.'); return; }
-    const r = await api('/api/auth/profile/update-session', { session_string: sessionStr, phone });
-    if (r.status === 'ok') {
-        _tgShowModalLogs(['[INFO] Session saved — testing connection…']);
-        const test = await api('/api/telegram/session/test', {});
-        _tgShowModalLogs(test.logs || []);
-        if (test.status === 'ok') {
-            await checkTelegramSessionStatus();
-            document.getElementById('tg-modal-logs-content').innerHTML +=
-                '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
-        }
-    } else {
-        _tgShowModalLogs([`[ERROR] ${r.error || 'Failed to save session'}`]);
-    }
-}
-
-let _tgPendingPhone = '';
-
-async function tgSendCode() {
-    const phone = (document.getElementById('tg-link-phone').value || '').trim();
-    if (!phone) { showAlert('Please enter your phone number.'); return; }
-    const btn = document.getElementById('tg-send-code-btn');
-    btn.disabled = true; btn.textContent = '⏳ Sending…';
-    const r = await api('/api/auth/telegram/send-code', { phone });
-    btn.disabled = false; btn.textContent = '📨 Send Code';
-    if (r.status === 'ok') {
-        _tgPendingPhone = phone;
-        document.getElementById('tg-link-step-phone').style.display = 'none';
-        document.getElementById('tg-link-step-code').style.display  = '';
-        showNotification('Code sent to your Telegram app', 'success');
-    } else {
-        showAlert(r.error || 'Failed to send code');
-    }
-}
-
-async function tgVerifyCode() {
-    const code = (document.getElementById('tg-link-code').value || '').trim();
-    if (!code) { showAlert('Please enter the code.'); return; }
-    const btn = document.getElementById('tg-verify-code-btn');
-    btn.disabled = true; btn.textContent = '⏳ Verifying…';
-    const r = await api('/api/auth/telegram/verify-code', { phone: _tgPendingPhone, code });
-    btn.disabled = false; btn.textContent = '✅ Verify Code';
-    if (r.status === 'ok') {
-        _tgShowModalLogs(['[SUCCESS] Telegram account linked successfully']);
-        await checkTelegramSessionStatus();
-        document.getElementById('tg-modal-logs-content').innerHTML +=
-            '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
-    } else if (r.status === 'needs_2fa') {
-        document.getElementById('tg-link-step-code').style.display = 'none';
-        document.getElementById('tg-link-step-2fa').style.display  = '';
-    } else {
-        showAlert(r.error || 'Verification failed');
-    }
-}
-
-async function tgVerify2FA() {
-    const pwd = document.getElementById('tg-link-2fa').value || '';
-    if (!pwd) { showAlert('Please enter your 2FA password.'); return; }
-    const btn = document.getElementById('tg-verify-2fa-btn');
-    btn.disabled = true; btn.textContent = '⏳ Verifying…';
-    const r = await api('/api/auth/telegram/verify-2fa', { phone: _tgPendingPhone, password: pwd });
-    btn.disabled = false; btn.textContent = '🔓 Confirm';
-    if (r.status === 'ok') {
-        _tgShowModalLogs(['[SUCCESS] Telegram account linked successfully']);
-        await checkTelegramSessionStatus();
-        document.getElementById('tg-modal-logs-content').innerHTML +=
-            '<div class="mt-2"><button class="btn btn-sm btn-success" onclick="restartBotProcess(this);closeTgSessionModal()">🔄 Restart Bot to Apply</button></div>';
-    } else {
-        showAlert(r.error || '2FA verification failed');
-    }
-}
 
 async function restartBotProcess(btn) {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Restarting…'; }
@@ -778,9 +758,9 @@ function updateStats() {
 function renderCollectionsPage() {
     const container = document.getElementById('collections-container');
     if (!container) return;
-    
+
     const collections = globalConfig.collections || {};
-    
+
     if (Object.keys(collections).length === 0) {
         container.innerHTML = `
             <div class="create-bot-card">
@@ -793,7 +773,7 @@ function renderCollectionsPage() {
         `;
         return;
     }
-    
+
     container.innerHTML = Object.entries(collections)
         .map(([name, collection]) => createCollectionCard(name, collection))
         .join('');
@@ -802,13 +782,13 @@ function renderCollectionsPage() {
 function createCollectionCard(collectionName, collection) {
     const sources = (collection.source_channels || []).join(', ') || 'None';
     const targets = (collection.target_channels || [collection.target_channel]).filter(Boolean).join(', ') || 'Not set';
-    
+
     return `
         <div class="collection-card">
             <div class="collection-header">
                 <div class="flex-center">
                     <label class="toggle-switch">
-                        <input type="checkbox" ${collection.enabled ? 'checked' : ''} 
+                        <input type="checkbox" ${collection.enabled ? 'checked' : ''}
                                onchange="toggleCollection('${collectionName}', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
@@ -1190,9 +1170,10 @@ async function deleteCollection(collectionName) {
         if (result.status === 'ok') {
             await loadAllData();
             renderCollectionsPage();
+            loadWarnings();
             showNotification('Collection deleted', 'success');
         } else {
-            showNotification('Failed to delete collection', 'error');
+            showAlert(result.message || 'Failed to delete collection', { title: 'Cannot Delete', icon: '⛔' });
         }
     }, { title: 'Delete Collection' });
 }
@@ -1715,6 +1696,7 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
     const keywords = topic.keywords || [];
     const schedules = topic.schedules || [];
     const linkedTopics = topic.linked_topics || [];
+    const catchAll = !!topic.catch_all;
     const sectionId = `topic-${botName}-${categoryName}-${topicName}`;
     const savedState = loadCollapsibleState(sectionId);
     const defaultOpen = savedState !== null ? savedState : false; // Default closed for Topics
@@ -1727,6 +1709,7 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                 <div class="topic-title-group">
                     <strong>📌 ${escapeHtmlSys(topicName)}</strong>
                     ${isDisabledByCategory ? '<span class="disabled-badge">Category Disabled</span>' : ''}
+                    ${catchAll ? '<span class="linked-badge" style="background:var(--accent-primary,#6366f1);color:#fff;">🌐 Catch All</span>' : ''}
                     ${linkedTopics.length > 0 ? `<span class="linked-badge">🔗 ${linkedTopics.length} linked</span>` : ''}
                     <span class="schedule-indicator">🕐 ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''}</span>
                 </div>
@@ -1747,7 +1730,19 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
             <div class="collapsible-content">
               <div class="collapsible-inner">
                 <div class="topic-body">
-                    <div class="form-group">
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-secondary,#1e1e2e);border-radius:6px;margin-bottom:8px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${catchAll ? 'checked' : ''}
+                                   onchange="setTopicCatchAll('${b}', '${c}', '${t}', this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <div>
+                            <span style="font-size:13px;font-weight:500;">🌐 Catch All Messages</span>
+                            <small class="text-muted d-block" style="font-size:11px;">Matches every incoming message — no keywords required</small>
+                        </div>
+                    </div>
+
+                    <div class="form-group" ${catchAll ? 'style="opacity:0.4;pointer-events:none;"' : ''}>
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                             <label class="form-label" style="margin:0;">Keywords (${keywords.length})</label>
                             ${keywords.length > 0 ? `<div class="kw-bulk-actions" style="display:flex;gap:6px;align-items:center;">
@@ -1844,6 +1839,9 @@ function formatSchedule(schedule) {
         return `Every ${schedule.hours || 1}h — starts ${sh}:${sm}`;
     }
     if (type === 'daily') return `Daily at ${String(schedule.hour || 0).padStart(2, '0')}:${String(schedule.minute || 0).padStart(2, '0')}`;
+    if (type === 'speeches_interval') {
+        return `Speeches — every 1min check — send after ${schedule.wait_time || 5}m idle`;
+    }
     return type;
 }
 
@@ -1981,6 +1979,7 @@ function openDefaultScheduleModal(botName) {
                         <option value="interval_minutes">Interval (Minutes)</option>
                         <option value="interval">Interval (Hours)</option>
                         <option value="daily">Daily</option>
+                        <option value="speeches_interval">Speeches Interval</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -2063,6 +2062,10 @@ function updateDsInputs() {
             <input type="number" class="input" id="ds-hour" min="0" max="23" value="18"></div>
             <div class="form-group"><label class="form-label">Minute</label>
             <input type="number" class="input" id="ds-minute" min="0" max="59" value="0"></div>`;
+    } else if (type === 'speeches_interval') {
+        container.innerHTML = `<div class="form-group"><label class="form-label">Wait Time (mins) — send buckets when idle</label>
+            <input type="number" class="input" id="ds-wait-time" min="1" value="5">
+            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code> on its own line.</small></div>`;
     } else {
         container.innerHTML = '';
     }
@@ -2097,6 +2100,9 @@ async function saveDefaultSchedule(botName) {
     if (type === 'daily') {
         ds.hour = Number(document.getElementById('ds-hour')?.value || 0);
         ds.minute = Number(document.getElementById('ds-minute')?.value || 0);
+    }
+    if (type === 'speeches_interval') {
+        ds.wait_time = Number(document.getElementById('ds-wait-time')?.value || 5);
     }
 
     const bot = globalConfig.bots[botName];
@@ -2225,7 +2231,10 @@ async function deletePrompt(botName, promptKey) {
         if (result.status === 'ok') {
             await loadAllData();
             renderBotsPage();
+            loadWarnings();
             showNotification('Prompt deleted', 'success');
+        } else {
+            showAlert(result.message || 'Failed to delete prompt', { title: 'Cannot Delete', icon: '⛔' });
         }
     }, { title: 'Delete Prompt' });
 }
@@ -2451,11 +2460,27 @@ async function toggleTopic(botName, categoryName, topicName, enabled) {
         topic_name: topicName,
         enabled
     });
-    
+
     if (result.status === 'ok') {
         await loadAllData();
         renderBotsPage();
         showNotification(`Topic ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    }
+}
+
+async function setTopicCatchAll(botName, categoryName, topicName, value) {
+    const result = await api('/api/topic/catch_all', {
+        bot_name: botName,
+        category_name: categoryName,
+        topic_name: topicName,
+        catch_all: value,
+    });
+    if (result.status === 'ok') {
+        await loadAllData();
+        const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+        const categoryId = `categories-${botName}`;
+        renderBotsPage([topicId, categoryId]);
+        showNotification(value ? 'Catch All enabled' : 'Catch All disabled', 'success');
     }
 }
 
@@ -2710,6 +2735,7 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                         <option value="interval_minutes">Every X Minutes</option>
                         <option value="interval">Every X Hours</option>
                         <option value="daily">Daily</option>
+                        <option value="speeches_interval">Speeches Interval</option>
                     </select>
                 </div>
                 <div class="form-group" id="topic-schedule-inputs">
@@ -2815,6 +2841,12 @@ function updateTopicScheduleInputs() {
             <label class="form-label mt-1">Minute</label>
             <input type="number" class="input" id="topic-schedule-minute" min="0" max="59" value="0">
         `;
+    } else if (type === 'speeches_interval') {
+        container.innerHTML = `
+            <label class="form-label">Wait Time (mins) — send buckets when idle</label>
+            <input type="number" class="input" id="topic-schedule-wait-time" min="1" value="5">
+            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code> on its own line.</small>
+        `;
     }
 }
 
@@ -2863,6 +2895,8 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     } else if (type === 'daily') {
         schedule.hour = Number(document.getElementById('topic-schedule-hour').value);
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
+    } else if (type === 'speeches_interval') {
+        schedule.wait_time = Number(document.getElementById('topic-schedule-wait-time').value);
     }
 
     const result = await api('/api/topic/schedule/add', {
@@ -3018,8 +3052,8 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
     modal.dataset.categoryName = categoryName;
     modal.dataset.topicName = topicName;
 
-    const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval', 'daily'];
-    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval: 'Every X Hours', daily: 'Daily' };
+    const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval', 'daily', 'speeches_interval'];
+    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval: 'Every X Hours', daily: 'Daily', speeches_interval: 'Speeches Interval' };
 
     modal.innerHTML = `
         <div class="modal-dialog">
@@ -3134,6 +3168,10 @@ function buildEditScheduleInputs(schedule) {
                 <input type="number" class="input" id="edit-sch-hour" min="0" max="23" value="${schedule.hour || 0}">
                 <label class="form-label mt-1">Minute</label>
                 <input type="number" class="input" id="edit-sch-minute" min="0" max="59" value="${schedule.minute || 0}">`;
+    } else if (type === 'speeches_interval') {
+        return `<label class="form-label">Wait Time (mins) — send buckets when idle</label>
+                <input type="number" class="input" id="edit-sch-wait-time" min="1" value="${schedule.wait_time || 5}">
+                <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code>.</small>`;
     }
     return '';
 }
@@ -3176,6 +3214,8 @@ async function saveEditedSchedule(scheduleId) {
     } else if (type === 'daily') {
         schedule.hour   = Number(document.getElementById('edit-sch-hour').value);
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
+    } else if (type === 'speeches_interval') {
+        schedule.wait_time = Number(document.getElementById('edit-sch-wait-time').value);
     }
 
     const result = await api('/api/topic/schedule/update', {
@@ -3706,11 +3746,12 @@ function renderSchRow(r) {
 }
 
 function scheduleIcon(sch) {
-    if (sch.type === 'hourly')           return '🕐';
-    if (sch.type === 'daily')            return '📅';
-    if (sch.type === 'minute')           return '⚡';
-    if (sch.type === 'interval')         return '🔁';
-    if (sch.type === 'interval_minutes') return '🔁';
+    if (sch.type === 'hourly')              return '🕐';
+    if (sch.type === 'daily')               return '📅';
+    if (sch.type === 'minute')              return '⚡';
+    if (sch.type === 'interval')            return '🔁';
+    if (sch.type === 'interval_minutes')    return '🔁';
+    if (sch.type === 'speeches_interval')   return '🎙️';
     return '🔔';
 }
 
@@ -3727,6 +3768,9 @@ function scheduleSpec(sch) {
         const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
         const sm = String(sch.start_minute ?? 0).padStart(2, '0');
         return `every ${sch.hours || 1}h — starts ${sh}:${sm}`;
+    }
+    if (sch.type === 'speeches_interval') {
+        return `every 1m check — send after ${sch.wait_time || 5}m idle`;
     }
     return sch.type;
 }
@@ -3804,6 +3848,13 @@ function computeNextRun(sch) {
         const elapsed = (now - anchor) / 3600000; // hours
         const n = Math.floor(elapsed / hours);
         const next = new Date(anchor.getTime() + (n + 1) * hours * 3600000);
+        return next;
+    }
+    if (sch.type === 'speeches_interval') {
+        // Fixed 1-minute tick — next run is at the start of the next minute
+        const next = new Date(now);
+        next.setSeconds(0, 0);
+        next.setMinutes(next.getMinutes() + 1);
         return next;
     }
     if (sch.type === 'interval_minutes') {

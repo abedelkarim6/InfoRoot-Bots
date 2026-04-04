@@ -1,17 +1,27 @@
 import logging
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Request
+from fastapi.responses import JSONResponse
 from utils.database import get_db
+from routers.auth import is_admin_request, get_request_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _get_allowed_owner_id(request: Request):
+    """Returns None for admin (sees all), or the user's id for scoped access."""
+    if is_admin_request(request):
+        return None
+    return get_request_user_id(request)
+
+
 @router.get("/recycle-bin/list")
-def list_recycle_bin():
+def list_recycle_bin(request: Request):
     try:
         db = get_db()
-        items = db.recycle_bin_list()
+        owner_id = _get_allowed_owner_id(request)
+        items = db.recycle_bin_list(owner_id=owner_id)
         return {"status": "ok", "items": items}
     except Exception as e:
         logger.error(f"[RECYCLE-BIN] list failed: {e}", exc_info=True)
@@ -19,18 +29,23 @@ def list_recycle_bin():
 
 
 @router.post("/recycle-bin/restore")
-def restore_item(data: dict = Body(...)):
+def restore_item(request: Request, data: dict = Body(...)):
     item_id = data.get("id")
     if item_id is None:
         return {"status": "error", "message": "Missing id"}
 
     db = get_db()
-    # Fetch item from recycle bin
     cursor = db._get_cursor()
     cursor.execute("SELECT * FROM recycle_bin WHERE id = %s", (item_id,))
     row = cursor.fetchone()
     if not row:
         return {"status": "error", "message": "Item not found in recycle bin"}
+
+    # Non-admin can only restore their own items
+    if not is_admin_request(request):
+        user_id = get_request_user_id(request)
+        if row['owner_id'] != user_id:
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     entity_type = row['entity_type']
     entity_data = row['entity_data']
@@ -57,25 +72,35 @@ def restore_item(data: dict = Body(...)):
     except Exception as e:
         return {"status": "error", "message": f"Restore failed: {str(e)}"}
 
-    # Remove from recycle bin after successful restore
     db.recycle_bin_delete(item_id)
     return {"status": "ok", "entity_type": entity_type}
 
 
 @router.post("/recycle-bin/delete")
-def permanently_delete(data: dict = Body(...)):
+def permanently_delete(request: Request, data: dict = Body(...)):
     item_id = data.get("id")
     if item_id is None:
         return {"status": "error", "message": "Missing id"}
 
     db = get_db()
+    if not is_admin_request(request):
+        cursor = db._get_cursor()
+        cursor.execute("SELECT owner_id FROM recycle_bin WHERE id = %s", (item_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "error", "message": "Item not found"}
+        if row['owner_id'] != get_request_user_id(request):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
     if db.recycle_bin_delete(item_id):
         return {"status": "ok"}
     return {"status": "error", "message": "Item not found"}
 
 
 @router.post("/recycle-bin/empty")
-def empty_recycle_bin():
+def empty_recycle_bin(request: Request):
+    if not is_admin_request(request):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
     db = get_db()
     cursor = db._get_cursor()
     cursor.execute("DELETE FROM recycle_bin")

@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/static/css/modern.css?v=4">
     <link rel="stylesheet" href="/static/css/auto-save.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 </head>
 <body>
     <!-- Sidebar -->
@@ -14,84 +15,83 @@
         <div class="sidebar-header">
             <div style="display:flex;align-items:center;justify-content:space-between">
                 <div class="sidebar-title-wrap">
-                    <h1>🤖 Summaries Bot Manager</h1>
+                    <h1>Inforoot AI</h1>
                     <p class="version">v4.0</p>
                 </div>
                 <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" onclick="toggleSidebar()" title="Collapse sidebar">◀</button>
             </div>
         </div>
         <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
-        
+
         <nav class="sidebar-nav">
+            <!-- Always visible -->
             <a href="#" class="nav-item active" data-page="system">
                 <span class="icon">🔌</span>
-                <span>System</span>
+                <span>Main Dashboard</span>
             </a>
 
-            <!-- News Summaries — hidden for users with no bot inheritance -->
+            <!-- Summaries — hidden for users with no bot inheritance -->
             <div id="news-nav-section" style="display:none">
                 <div class="nav-separator"></div>
-                <span class="nav-section-label">News Summaries</span>
+                <span class="nav-section-label">Summaries</span>
 
+                <a href="#" class="nav-item" data-page="dashboard">
+                    <span class="icon">📊</span>
+                    <span>Summaries Dashboard</span>
+                </a>
                 <a href="#" class="nav-item" data-page="collections">
                     <span class="icon">📦</span>
-                    <span>Collections</span>
+                    <span>Sources Collections</span>
                     <span class="badge" id="collections-count">0</span>
                 </a>
                 <a href="#" class="nav-item" data-page="bots">
                     <span class="icon">🤖</span>
-                    <span>Bots</span>
+                    <span>Summaries Bots</span>
                     <span class="badge" id="bots-count">0</span>
                 </a>
                 <a href="#" class="nav-item" data-page="monitor">
                     <span class="icon">📡</span>
-                    <span>Monitor</span>
-                </a>
-                <a href="#" class="nav-item" data-page="dashboard">
-                    <span class="icon">📊</span>
-                    <span>Dashboard</span>
+                    <span>Schedules Monitor</span>
                 </a>
             </div>
 
-            <!-- YouTube Summaries — hidden for users without youtube_on -->
+            <!-- YouTube Reader — hidden for users without youtube_on -->
             <div id="yt-nav-section" style="display:none">
                 <div class="nav-separator"></div>
-                <span class="nav-section-label">YouTube Summaries</span>
+                <span class="nav-section-label">YouTube Reader</span>
 
+                <a href="#" class="nav-item" data-page="yt-videos">
+                    <span class="icon">📋</span>
+                    <span>Youtube Dashboard</span>
+                </a>
                 <a href="#" class="nav-item" data-page="yt-channels">
                     <span class="icon">📺</span>
-                    <span>Channels</span>
+                    <span>Youtube Channels</span>
                 </a>
                 <a href="#" class="nav-item" data-page="yt-keywords">
                     <span class="icon">🔎</span>
-                    <span>Trackers</span>
+                    <span>Youtube Trackers</span>
                 </a>
-                <a href="#" class="nav-item" data-page="yt-videos">
-                    <span class="icon">📋</span>
-                    <span>Activity</span>
-                </a>
-                <a href="#" class="nav-item" data-page="yt-chat">
+            </div>
+
+            <!-- AI Chatbots — hidden for users without agents_on or youtube_on -->
+            <div id="ai-nav-section" style="display:none">
+                <div class="nav-separator"></div>
+                <span class="nav-section-label">AI Chatbots</span>
+
+                <a href="#" class="nav-item" data-page="yt-chat" id="nav-yt-chat" style="display:none">
                     <span class="icon">💬</span>
                     <span>Video Chat</span>
                 </a>
-            </div>
-
-            <!-- AI Tools — hidden for users without agents_on -->
-            <div id="ai-nav-section" style="display:none">
-                <div class="nav-separator"></div>
-                <span class="nav-section-label">AI Tools</span>
-
-                <a href="#" class="nav-item" data-page="agent-chat">
+                <a href="#" class="nav-item" data-page="agent-chat" id="nav-agent-chat" style="display:none">
                     <span class="icon">🤖</span>
-                    <span>Agent Chat</span>
-                </a>
-                <a href="#" class="nav-item" data-page="system-chat">
-                    <span class="icon">⚙️</span>
-                    <span>System Chat</span>
+                    <span>Agent Bot</span>
                 </a>
             </div>
 
+            <!-- System -->
             <div class="nav-separator"></div>
+            <span class="nav-section-label">System</span>
 
             <a href="#" class="nav-item" data-page="recycle-bin">
                 <span class="icon">🗑️</span>
@@ -137,6 +137,17 @@
     <!-- Main Content -->
     <main class="main-content">
 
+        <!-- ══ Warnings Panel ════════════════════════════════════════════ -->
+        <div id="warnings-panel" style="display:none">
+            <div class="warn-panel-header" onclick="toggleWarningsPanel()">
+                <span class="warn-panel-icon" id="warn-panel-toggle-icon">▶</span>
+                <span id="warn-panel-title">⚠️ System Warnings</span>
+                <span class="warn-panel-count badge" id="warn-panel-count">0</span>
+                <button class="btn btn-secondary btn-sm warn-panel-refresh" onclick="event.stopPropagation(); loadWarnings()" title="Refresh warnings">↻</button>
+            </div>
+            <div class="warn-panel-body" id="warn-panel-body"></div>
+        </div>
+
         <!-- ══ Dashboard Page ══════════════════════════════════════════ -->
         <div id="dashboard-page" class="page">
             <header class="page-header">
@@ -172,26 +183,45 @@
                 <button class="dash-filter-clear" id="dash-filter-clear-btn" onclick="clearDashboardFilters()" style="display:none">✕ Clear filters</button>
             </div>
 
+            <!-- Subscribed / Registered Channels — rendered by renderDashChannels() -->
+            <div id="dash-channels-wrap" style="margin-bottom:24px">
+                <div class="ch-val-card" id="ch-val-card" style="display:none">
+                    <div class="ch-val-header" onclick="toggleChValCard()">
+                        <div class="ch-val-title">
+                            <span class="ch-val-toggle-icon" id="ch-val-toggle-icon">▶</span>
+                            <h3>📡 Subscribed Channels</h3>
+                            <span class="text-muted" style="font-size:0.8rem;margin-left:8px;">Verify which channels the userbot has joined</span>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="ch-val-btn"
+                                onclick="validateChannels(event)" style="white-space:nowrap">
+                            🔍 Validate
+                        </button>
+                    </div>
+                    <div class="ch-val-body" id="ch-val-body"></div>
+                </div>
+                <div id="dash-user-channels"></div>
+            </div>
+
             <!-- Stat cards -->
             <div class="dash-stat-grid">
                 <div class="dash-stat-card">
                     <div class="dash-stat-icon">📨</div>
-                    <div class="dash-stat-value" id="ds-total-msgs">—</div>
+                    <div class="dash-stat-value" id="ds-total-msgs">0</div>
                     <div class="dash-stat-label">Total Messages</div>
                 </div>
                 <div class="dash-stat-card">
                     <div class="dash-stat-icon">📅</div>
-                    <div class="dash-stat-value" id="ds-period-msgs">—</div>
+                    <div class="dash-stat-value" id="ds-period-msgs">0</div>
                     <div class="dash-stat-label" id="ds-period-label">Messages (period)</div>
                 </div>
                 <div class="dash-stat-card">
                     <div class="dash-stat-icon">📝</div>
-                    <div class="dash-stat-value" id="ds-summaries">—</div>
+                    <div class="dash-stat-value" id="ds-summaries">0</div>
                     <div class="dash-stat-label">Total Summaries</div>
                 </div>
                 <div class="dash-stat-card">
                     <div class="dash-stat-icon">📡</div>
-                    <div class="dash-stat-value" id="ds-sources">—</div>
+                    <div class="dash-stat-value" id="ds-sources">0</div>
                     <div class="dash-stat-label">Active Sources</div>
                 </div>
             </div>
@@ -240,6 +270,7 @@
                     <p class="mon-empty">Select the Dashboard page to load data.</p>
                 </div>
             </div>
+
         </div>
 
         <!-- System Page (Replaces Dashboard) -->
@@ -266,9 +297,6 @@
                     Loading...
                 </p>
             </div>
-
-            <!-- Telegram Session Card (admin only, rendered by JS) -->
-            <div id="tg-session-card"></div>
 
             <h3 class="section-title mt-4" id="sys-news-section-title">📰 News Summarizer Bots</h3>
             <div class="stats-grid" id="sys-news-stats" style="margin-bottom:16px">
@@ -326,24 +354,6 @@
                     <span>➕</span> Add Collection
                 </button>
             </header>
-
-            <!-- Channel Membership Validator -->
-            <div class="ch-val-card" id="ch-val-card">
-                <div class="ch-val-header" onclick="toggleChValCard()">
-                    <div class="ch-val-title">
-                        <span class="ch-val-toggle-icon" id="ch-val-toggle-icon">▶</span>
-                        <h3>📋 Channel Membership Validator</h3>
-                        <span class="text-muted" style="font-size:0.8rem;margin-left:8px;">Verify which channels the userbot has joined</span>
-                    </div>
-                    <button class="btn btn-secondary btn-sm" id="ch-val-btn"
-                            onclick="validateChannels(event)" style="white-space:nowrap">
-                        🔍 Validate
-                    </button>
-                </div>
-                <div class="ch-val-body" id="ch-val-body">
-                    <!-- populated by validateChannels() -->
-                </div>
-            </div>
 
             <div id="collections-container">
                 <!-- Collections rendered here -->
@@ -589,10 +599,13 @@
                     <div class="dash-stat-value" id="ytq-pending">0</div>
                     <div class="dash-stat-label">Pending</div>
                 </div>
-                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('processing')">
+                <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('processing')" style="position:relative">
                     <div class="dash-stat-icon">⚙️</div>
                     <div class="dash-stat-value" id="ytq-processing">0</div>
                     <div class="dash-stat-label">Processing</div>
+                    <button class="btn btn-danger btn-sm" id="ytq-reset-stuck-btn"
+                        style="display:none;position:absolute;bottom:8px;right:8px;font-size:11px;padding:2px 7px"
+                        onclick="event.stopPropagation();ytResetStuck()" title="Reset stuck items to Failed">⚠️ Reset</button>
                 </div>
                 <div class="dash-stat-card yt-stat-clickable" onclick="ytFilterByStatus('done')">
                     <div class="dash-stat-icon">✅</div>
@@ -610,13 +623,13 @@
             <div class="dash-filter-bar">
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">📅 Date</span>
-                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-from" style="width:140px;">
+                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-from" style="width:140px;" onchange="ytGoToPage(0)">
                     <span class="text-muted">to</span>
-                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-to" style="width:140px;">
+                    <input type="date" class="input dash-filter-select" id="ytv-filter-date-to" style="width:140px;" onchange="ytGoToPage(0)">
                 </div>
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">📊 Status</span>
-                    <select class="select dash-filter-select" id="ytv-filter-status">
+                    <select class="select dash-filter-select" id="ytv-filter-status" onchange="ytGoToPage(0)">
                         <option value="">All</option>
                         <option value="pending">Pending</option>
                         <option value="processing">Processing</option>
@@ -626,17 +639,16 @@
                 </div>
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">📺 Channel</span>
-                    <input type="text" class="input dash-filter-select" id="ytv-filter-channel" placeholder="Filter…" style="width:140px;">
+                    <input type="text" class="input dash-filter-select" id="ytv-filter-channel" placeholder="Filter…" style="width:140px;" oninput="ytDebouncedFilter()">
                 </div>
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">🔧 Source</span>
-                    <select class="select dash-filter-select" id="ytv-filter-source">
+                    <select class="select dash-filter-select" id="ytv-filter-source" onchange="ytGoToPage(0)">
                         <option value="">All Sources</option>
                         <option value="transcript_api">Transcript</option>
                         <option value="metadata">Metadata</option>
                     </select>
                 </div>
-                <button class="btn btn-secondary btn-sm" onclick="ytGoToPage(0)">Apply</button>
                 <button class="btn btn-secondary btn-sm yt-filter-clear-btn" id="ytv-clear-filters" onclick="ytClearFilters()" style="display:none;">✕ Clear</button>
             </div>
 
@@ -769,6 +781,9 @@
                             <button class="agent-chat-send-btn" id="agent-chat-send-btn" onclick="agentChatSend()" title="Send message">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                             </button>
+                            <button class="chat-cancel-btn" id="agent-chat-cancel-btn" onclick="agentChatCancel()" title="Stop generating" style="display:none;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -800,60 +815,6 @@
             </div>
         </div>
 
-        <!-- ==================== System Chat Page ==================== -->
-        <div id="system-chat-page" class="page">
-            <div class="sc-layout">
-                <!-- Chat panel -->
-                <div class="sc-panel">
-                    <div class="sc-header">
-                        <div class="sc-header-left">
-                            <div class="sc-avatar">SYS</div>
-                            <div>
-                                <h3>System Control</h3>
-                                <span class="sc-status" id="sc-status">
-                                    <span class="sc-status-dot"></span> Ready
-                                </span>
-                            </div>
-                        </div>
-                        <div class="sc-header-actions">
-                            <button class="agent-chat-icon-btn" onclick="sysChatReset()" title="New conversation">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="sc-messages" id="sc-messages">
-                        <!-- Rendered by JS -->
-                    </div>
-
-                    <!-- Action cards rendered here after each response -->
-                    <div class="sc-actions-strip" id="sc-actions-strip" style="display:none;"></div>
-
-                    <div class="sc-input-bar">
-                        <div class="sc-suggestions" id="sc-suggestions">
-                            <button class="sc-suggestion" onclick="sysChatSend('Show me the full system status')">
-                                <span class="sc-suggestion-icon">📋</span> System status
-                            </button>
-                            <button class="sc-suggestion" onclick="sysChatSend('List all YouTube keyword trackers')">
-                                <span class="sc-suggestion-icon">🔎</span> YT keywords
-                            </button>
-                            <button class="sc-suggestion" onclick="sysChatSend('Show all topics and their status')">
-                                <span class="sc-suggestion-icon">🏷️</span> Topics overview
-                            </button>
-                            <button class="sc-suggestion" onclick="sysChatSend('List all YouTube channels')">
-                                <span class="sc-suggestion-icon">📺</span> YT channels
-                            </button>
-                        </div>
-                        <div class="sc-compose">
-                            <textarea class="input sc-textarea" id="sc-input" rows="1" placeholder="Tell me what to change…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sysChatSend();}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
-                            <button class="agent-chat-send-btn" id="sc-send-btn" onclick="sysChatSend()" title="Send">
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
 
         <!-- Recycle Bin Page -->
         <div id="recycle-bin-page" class="page">
@@ -901,53 +862,68 @@
 
     </main>
 
-    <!-- Telegram Session Setup Modal -->
-    <div id="tg-session-modal" class="dialog-overlay" style="display:none" onclick="if(event.target===this)closeTgSessionModal()">
-        <div class="dialog-box" style="max-width:500px;width:100%;padding:0;overflow:hidden" role="dialog" aria-modal="true">
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid var(--border)">
-                <h3 style="margin:0;font-size:16px">📡 Telegram Session Setup</h3>
-                <button class="btn btn-sm btn-secondary" onclick="closeTgSessionModal()" style="padding:2px 8px;font-size:18px;line-height:1">&times;</button>
+    <!-- ==================== System Bot FAB + Drawer ==================== -->
+    <button class="sys-bot-fab" id="sys-bot-fab" onclick="toggleSysBot()" title="System Bot" style="display:none;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            <line x1="12" y1="3" x2="12" y2="3.01"/>
+            <circle cx="9" cy="16" r="1" fill="currentColor"/>
+            <circle cx="15" cy="16" r="1" fill="currentColor"/>
+        </svg>
+    </button>
+
+    <div class="sys-bot-overlay" id="sys-bot-overlay" onclick="closeSysBot()"></div>
+
+    <div class="sys-bot-drawer" id="sys-bot-drawer">
+        <div class="sc-panel">
+            <div class="sc-header">
+                <div class="sc-header-left">
+                    <div class="sc-avatar">SYS</div>
+                    <div>
+                        <h3>System Bot</h3>
+                        <span class="sc-status" id="sc-status">
+                            <span class="sc-status-dot"></span> Ready
+                        </span>
+                    </div>
+                </div>
+                <div class="sc-header-actions">
+                    <button class="agent-chat-icon-btn" onclick="sysChatReset()" title="New conversation">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                    </button>
+                    <button class="agent-chat-icon-btn" onclick="closeSysBot()" title="Close">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
             </div>
-            <div style="padding:20px">
-                <!-- Tabs -->
-                <div class="tg-modal-tabs">
-                    <button class="tg-tab active" id="tg-tab-btn-paste" onclick="switchTgTab('paste')">📋 Paste Session</button>
-                    <button class="tg-tab" id="tg-tab-btn-link" onclick="switchTgTab('link')">📱 Link Telegram</button>
-                </div>
 
-                <!-- Tab: Paste -->
-                <div id="tg-tab-paste">
-                    <p class="text-muted" style="font-size:13px;margin-bottom:10px">Paste an existing StringSession string. Generate one with <code>get_ss.py</code>.</p>
-                    <textarea id="tg-paste-input" class="form-control" rows="4" placeholder="1BVtsU… (session string)"></textarea>
-                    <input id="tg-paste-phone" class="form-control mt-2" type="tel" placeholder="Phone (optional, e.g. +1234567890)">
-                    <button class="btn btn-primary mt-3" onclick="tgSaveSession()">💾 Save Session</button>
-                </div>
+            <div class="sc-messages" id="sc-messages"></div>
 
-                <!-- Tab: Link via OTP -->
-                <div id="tg-tab-link" style="display:none">
-                    <div id="tg-link-step-phone">
-                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Enter your phone number to receive a code via Telegram.</p>
-                        <input id="tg-link-phone" class="form-control" type="tel" placeholder="+1234567890">
-                        <button class="btn btn-primary mt-3" id="tg-send-code-btn" onclick="tgSendCode()">📨 Send Code</button>
-                    </div>
-                    <div id="tg-link-step-code" style="display:none">
-                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Enter the code sent to your Telegram app.</p>
-                        <input id="tg-link-code" class="form-control" type="text" placeholder="12345" maxlength="10">
-                        <div style="display:flex;gap:8px;margin-top:12px">
-                            <button class="btn btn-secondary" onclick="tgResetLinkFlow()">← Back</button>
-                            <button class="btn btn-primary" id="tg-verify-code-btn" onclick="tgVerifyCode()">✅ Verify Code</button>
-                        </div>
-                    </div>
-                    <div id="tg-link-step-2fa" style="display:none">
-                        <p class="text-muted" style="font-size:13px;margin-bottom:10px">Two-factor authentication required. Enter your Telegram password.</p>
-                        <input id="tg-link-2fa" class="form-control" type="password" placeholder="2FA Password">
-                        <button class="btn btn-primary mt-3" id="tg-verify-2fa-btn" onclick="tgVerify2FA()">🔓 Confirm</button>
-                    </div>
-                </div>
+            <div class="sc-actions-strip" id="sc-actions-strip" style="display:none;"></div>
 
-                <!-- Connection logs -->
-                <div id="tg-modal-logs" style="display:none;margin-top:14px">
-                    <div class="tg-logs-panel" id="tg-modal-logs-content"></div>
+            <div class="sc-input-bar">
+                <div class="sc-suggestions" id="sc-suggestions">
+                    <button class="sc-suggestion" onclick="sysChatSend('Show me the full system status')">
+                        <span class="sc-suggestion-icon">📋</span> System status
+                    </button>
+                    <button class="sc-suggestion" onclick="sysChatSend('List all YouTube keyword trackers')">
+                        <span class="sc-suggestion-icon">🔎</span> YT keywords
+                    </button>
+                    <button class="sc-suggestion" onclick="sysChatSend('Show all topics and their status')">
+                        <span class="sc-suggestion-icon">🏷️</span> Topics overview
+                    </button>
+                    <button class="sc-suggestion" onclick="sysChatSend('List all YouTube channels')">
+                        <span class="sc-suggestion-icon">📺</span> YT channels
+                    </button>
+                </div>
+                <div class="sc-compose">
+                    <textarea class="input sc-textarea" id="sc-input" rows="1" placeholder="Tell me what to change…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sysChatSend();}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
+                    <button class="agent-chat-send-btn" id="sc-send-btn" onclick="sysChatSend()" title="Send">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                    </button>
+                    <button class="chat-cancel-btn" id="sc-cancel-btn" onclick="sysChatCancel()" title="Stop generating" style="display:none;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                    </button>
                 </div>
             </div>
         </div>

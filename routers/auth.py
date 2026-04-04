@@ -57,6 +57,14 @@ def revoke_token(token: str):
     _token_users.pop(token, None)
 
 
+def revoke_all_tokens_for_user(user_id: int):
+    """Invalidate all active sessions for a given DB user (e.g. when deactivated)."""
+    to_revoke = [t for t, uid in list(_token_users.items()) if uid == user_id]
+    for t in to_revoke:
+        _tokens.pop(t, None)
+        _token_users.pop(t, None)
+
+
 def get_token_user_id(token: str) -> Optional[int]:
     return _token_users.get(token)
 
@@ -185,6 +193,11 @@ def login(req: LoginRequest, request: Request):
             db      = get_db()
             db_user = db.get_user_by_username(req.username)
             if db_user and verify_password(req.password, db_user["password_hash"]):
+                if not db_user.get("is_active", True):
+                    return JSONResponse(
+                        {"error": "This account has been deactivated. Contact an administrator."},
+                        status_code=403,
+                    )
                 valid   = True
                 user_id = db_user["id"]
         except Exception:
@@ -258,7 +271,9 @@ def me(request: Request):
         return JSONResponse({"error": "User not found"}, status_code=404)
 
     has_bot_access = bool(
-        db.get_user_bot_inheritances(user["id"]) or db.get_owned_bots_config(user["id"])
+        user.get("bots_on")
+        or db.get_user_bot_inheritances(user["id"])
+        or db.get_owned_bots_config(user["id"])
     )
 
     return {
@@ -266,8 +281,11 @@ def me(request: Request):
         "username": user["username"],
         "role": user["role"],
         "is_active": user["is_active"],
+        "bots_on": bool(user.get("bots_on")),
         "youtube_on": user["youtube_on"],
+        "yt_chat_on": bool(user.get("yt_chat_on")),
         "agents_on": user["agents_on"],
+        "sys_bot_on": bool(user.get("sys_bot_on")),
         "telegram_phone": user.get("telegram_phone"),
         "telegram_session": user.get("telegram_session"),
         "created_at": str(user["created_at"]) if user.get("created_at") else None,
@@ -468,6 +486,29 @@ def update_session(req: UpdateSessionRequest, request: Request):
         return JSONResponse({"error": "Session string cannot be empty."}, status_code=400)
 
     db.update_user_telegram(user_id, req.phone.strip() or None, req.session_string.strip())
+    return {"status": "ok"}
+
+
+class ProfileGeminiProjectsRequest(BaseModel):
+    gemini_project_bots:    Optional[str] = None   # GCP project for Bots
+    gemini_project_youtube: Optional[str] = None   # GCP project for YouTube
+    gemini_project_agents:  Optional[str] = None   # GCP project for Agents
+
+
+@router.post("/auth/profile/gemini-keys")
+def profile_update_gemini_keys(req: ProfileGeminiProjectsRequest, request: Request):
+    token   = _get_bearer(request)
+    if not token or not validate_token(token):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    user_id = get_token_user_id(token)
+    if not user_id:
+        return JSONResponse({"error": "Not available for legacy admin token."}, status_code=400)
+
+    db = get_db()
+    p1 = req.gemini_project_bots.strip()    if req.gemini_project_bots    else None
+    p2 = req.gemini_project_youtube.strip() if req.gemini_project_youtube else None
+    p3 = req.gemini_project_agents.strip()  if req.gemini_project_agents  else None
+    db.update_user(user_id, gemini_project_bots=p1, gemini_project_youtube=p2, gemini_project_agents=p3)
     return {"status": "ok"}
 
 

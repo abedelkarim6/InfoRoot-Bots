@@ -50,7 +50,8 @@ def delete_category(request: Request, data: dict = Body(...)):
     cat_data = bot.get('categories', {}).get(category_name)
     if cat_data:
         db.recycle_bin_add('category', f"{bot_name}/{category_name}",
-                           {'bot_name': bot_name, 'category_name': category_name, **cat_data})
+                           {'bot_name': bot_name, 'category_name': category_name, **cat_data},
+                           owner_id=get_request_user_id(request))
 
     if db.delete_category(bot_name, category_name):
         return {"status": "ok"}
@@ -129,11 +130,30 @@ def delete_topic(request: Request, data: dict = Body(...)):
         db.recycle_bin_add('topic', f"{bot_name}/{category_name}/{topic_name}", {
             'bot_name': bot_name, 'category_name': category_name,
             'topic_name': topic_name, **topic_data
-        })
+        }, owner_id=get_request_user_id(request))
 
     if db.delete_topic(bot_name, category_name, topic_name):
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found"}
+
+@router.post("/topic/catch_all")
+def set_topic_catch_all(request: Request, data: dict = Body(...)):
+    bot_name = data.get('bot_name')
+    category_name = data.get('category_name')
+    topic_name = data.get('topic_name')
+    value = data.get('catch_all')
+
+    if not bot_name or not category_name or not topic_name or value is None:
+        return {"status": "error", "message": "Missing required fields"}
+
+    if not _can_modify_bot(request, bot_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+    db = get_db()
+    if db.set_topic_catch_all(bot_name, category_name, topic_name, bool(value)):
+        return {"status": "ok", "catch_all": bool(value)}
+    return {"status": "error", "message": "Topic not found"}
+
 
 @router.post("/topic/toggle")
 def toggle_topic(request: Request, data: dict = Body(...)):
@@ -207,7 +227,7 @@ def add_topic_schedule(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     schedule_type = schedule.get('type')
-    if schedule_type not in ['minute', 'hourly', 'daily', 'interval', 'interval_minutes']:
+    if schedule_type not in ['minute', 'hourly', 'daily', 'interval', 'interval_minutes', 'speeches_interval']:
         return {"status": "error", "message": "Invalid schedule type"}
 
     db = get_db()
@@ -248,7 +268,7 @@ def delete_topic_schedule(request: Request, data: dict = Body(...)):
         db.recycle_bin_add('schedule', schedule_data.get('name', f'schedule-{schedule_id}'), {
             'bot_name': bot_name, 'category_name': category_name,
             'topic_name': topic_name, 'schedule': schedule_data
-        })
+        }, owner_id=get_request_user_id(request))
 
     if db.delete_schedule(schedule_id):
         return {"status": "ok"}

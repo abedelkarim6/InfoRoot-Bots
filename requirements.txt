@@ -9,6 +9,7 @@ youtube-transcript-api
 google-api-python-client
 agno
 psycopg2
+sqlalchemy
 
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -26,6 +27,7 @@ fastapi==0.128.0
 google==3.0.0
 google-auth==2.48.0
 google-genai==1.61.0
+google-cloud-aiplatform
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1

@@ -98,6 +98,73 @@ def get_userbot_dialogs():
     return {"status": "ok", **result}
 
 
+# ── Userbot profile ───────────────────────────────────────────────────────────
+
+@router.get("/telegram/userbot/me")
+async def get_userbot_me(request: Request):
+    """Fetch the actual Telegram profile (name, username, phone) using the stored session."""
+    from routers.auth import get_request_user_id, is_admin_request
+    from utils.database import get_db
+    from utils.helpers import load_config
+
+    db = get_db()
+    if is_admin_request(request):
+        admin = db.get_admin_user()
+        session_str = admin.get("telegram_session") if admin else None
+        if not session_str:
+            cfg = load_config()
+            session_str = cfg.get("telegram", {}).get("string_session", "")
+    else:
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+        user = db.get_user_by_id(user_id)
+        session_str = user.get("telegram_session") if user else None
+
+    if not session_str:
+        return {"status": "no_session"}
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        cfg = load_config()
+        tg_cfg = cfg.get("telegram", {})
+        api_id   = int(tg_cfg["api_id"])
+        api_hash = tg_cfg["api_hash"]
+
+        client = TelegramClient(StringSession(session_str), api_id, api_hash)
+        try:
+            await asyncio.wait_for(client.connect(), timeout=15)
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": "Connection timed out"}
+
+        try:
+            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            return {"status": "error", "message": "Authorization check timed out"}
+
+        if not authorized:
+            await client.disconnect()
+            return {"status": "unauthorized"}
+
+        me = await client.get_me()
+        await client.disconnect()
+
+        return {
+            "status": "ok",
+            "first_name": me.first_name or "",
+            "last_name":  me.last_name  or "",
+            "username":   me.username   or "",
+            "phone":      me.phone      or "",
+            "tg_user_id": me.id,
+        }
+    except Exception as e:
+        logger.error(f"[TG-ME] {e}")
+        return {"status": "error", "message": str(e)}
+
+
 # ── Session status & test ─────────────────────────────────────────────────────
 
 @router.get("/telegram/session/status")

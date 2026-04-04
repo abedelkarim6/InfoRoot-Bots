@@ -59,8 +59,9 @@ if not config.get("gemini"):
     )
 else:
     llm_client = GeminiClient(
-        api_key=config["gemini"]["api_key"],
-        model=config["gemini"].get("model"))
+        project=config["gemini"]["project"],
+        location=config["gemini"].get("location", "us-central1"),
+        model=config["gemini"].get("model", "gemini-2.5-flash"))
 
 # Telegram userbot settings
 API_ID = config["telegram"]["api_id"]
@@ -74,6 +75,10 @@ client: TelegramClient = None  # Set in main()
 # Built at startup and rebuilt on every config change.
 # Avoids username-based matching which breaks for private channels (no username).
 _source_channel_map: dict = {}
+
+# State for speeches_interval schedules.
+# Keyed by job_id; value: {buckets, msg_ids, send_task}
+_speech_pending: dict = {}
 
 _ARABIC_DIGITS = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
 
@@ -543,10 +548,157 @@ async def generate_and_send_summary(job_data):
     except Exception as e:
         logger.error(f"Critical error in summary generation: {e}", exc_info=True)
 
+# ==================== Speeches Interval ====================
+
+def _parse_speech_buckets(llm_response: str) -> list:
+    """
+    Split an LLM response into bucket messages.
+    Uses '\\n---\\n' as the section separator (design your prompt to use ---).
+    Falls back to a single bucket if no separator is present.
+    """
+    parts = re.split(r'\n\s*---\s*\n', llm_response.strip())
+    buckets = [p.strip() for p in parts if p.strip()]
+    return buckets if buckets else [llm_response.strip()]
+
+
+async def _send_speech_buckets(job_id: str, job_data: dict, buckets: list,
+                                msg_ids: list, wait_secs: float):
+    """
+    Sleep wait_secs then send each bucket as a separate Telegram message.
+    Called as an asyncio task — cancels gracefully if a newer LLM run resets the timer.
+    """
+    try:
+        await asyncio.sleep(wait_secs)
+    except asyncio.CancelledError:
+        return  # Timer was reset by a newer LLM run
+
+    if job_id not in _speech_pending:
+        return  # State was already cleared
+
+    bot_name   = job_data['bot_name']
+    topic_name = job_data['topic_name']
+    schedule_type = job_data['schedule_type']
+    header_text   = job_data.get('header', '').strip()
+
+    try:
+        bots_cfg = db.get_all_bots_config()
+        bot_cfg  = bots_cfg.get(bot_name, {})
+
+        schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
+        if schedule_targets:
+            target_channels = list(set(schedule_targets))
+        else:
+            collections_cfg = db.get_all_collections()
+            target_channels = []
+            for coll_name in bot_cfg.get('collections', []):
+                if coll_name in collections_cfg:
+                    target_channels.extend(collections_cfg[coll_name].get('target_channels', []))
+            target_channels = list(set(target_channels))
+
+        if not target_channels:
+            logger.warning(f"[SPEECH] No target channels | Bot: {bot_name} | Topic: {topic_name}")
+            _speech_pending.pop(job_id, None)
+            return
+
+        for bucket_text in buckets:
+            if header_text:
+                full_text = f"{header_text}\n{'—'*20}\n\n{bucket_text}"
+            else:
+                full_text = bucket_text
+
+            for target_chat in target_channels:
+                try:
+                    await client.send_message(target_chat, full_text, parse_mode='md')
+                    db.save_summary(
+                        summary_text=bucket_text,
+                        message_count=len(msg_ids),
+                        summary_type=schedule_type,
+                        target_entity=str(target_chat),
+                        bot_name=bot_name,
+                        topic_name=topic_name,
+                        message_ids=msg_ids,
+                    )
+                except Exception as e:
+                    logger.error(f"[SPEECH] Failed to send bucket to {target_chat}: {e}")
+
+        db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
+        logger.info(f"[SPEECH] Sent {len(buckets)} bucket(s) | Bot: {bot_name} | Topic: {topic_name}")
+
+    except Exception as e:
+        logger.error(f"[SPEECH] Error sending buckets: {e}", exc_info=True)
+    finally:
+        _speech_pending.pop(job_id, None)
+
+
+async def generate_speech_buckets(job_data: dict):
+    """
+    Collect unsummarized messages, call LLM, parse buckets,
+    and (re)schedule the send task with a fresh wait_time countdown.
+    """
+    bot_name      = job_data['bot_name']
+    topic_name    = job_data['topic_name']
+    schedule_type = job_data['schedule_type']
+    prompt_key    = job_data['prompt_key']
+    wait_mins     = int(job_data.get('sch_wait_time') or 5)
+    job_id        = job_data.get('job_id', f"{bot_name}:{job_data.get('category_name', '')}:{topic_name}")
+
+    try:
+        messages = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
+
+        topic_messages = [
+            m for m in messages
+            if topic_name in [t.strip() for t in (m.get('topics') or '').split(',')]
+        ]
+
+        if not topic_messages:
+            return
+
+        # No window enforcement — messages accumulate until the wait_time send fires.
+        # The 1-minute tick only sends to LLM when at least 1 message is available.
+        in_window = topic_messages
+
+        bots_cfg = db.get_all_bots_config()
+        bot_cfg  = bots_cfg.get(bot_name, {})
+        if len(in_window) < bot_cfg.get('minimum_messages', 1):
+            return
+
+        texts   = [m['text'] for m in in_window]
+        msg_ids = [m['id']   for m in in_window]
+
+        prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+        llm_response = llm_client.generate_summary(prompt)
+        buckets      = _parse_speech_buckets(llm_response)
+
+        # Cancel any existing pending send task and restart the countdown
+        existing = _speech_pending.get(job_id)
+        if existing and existing.get('send_task'):
+            existing['send_task'].cancel()
+
+        wait_secs = wait_mins * 60
+        send_task = asyncio.create_task(
+            _send_speech_buckets(job_id, job_data, buckets, msg_ids, wait_secs)
+        )
+        _speech_pending[job_id] = {
+            'buckets': buckets,
+            'msg_ids': msg_ids,
+            'send_task': send_task,
+        }
+        logger.info(
+            f"[SPEECH] Buckets updated ({len(buckets)}) | Bot: {bot_name} | Topic: {topic_name} "
+            f"| Sending in {wait_mins}m"
+        )
+
+    except Exception as e:
+        logger.error(f"[SPEECH] Error in generate_speech_buckets: {e}", exc_info=True)
+
+
 async def trigger_summary(job_data):
     """Trigger summary generation with complete job data."""
     try:
-        await generate_and_send_summary(job_data)
+        if job_data.get('schedule_type') == 'speeches_interval':
+            await generate_speech_buckets(job_data)
+        else:
+            await generate_and_send_summary(job_data)
     except Exception as e:
         logger.error(f"[ERROR] trigger_summary failed | Bot: {job_data.get('bot_name')} | Topic: {job_data.get('topic_name')} | Error: {e}", exc_info=True)
 
@@ -606,6 +758,7 @@ async def schedule_summaries():
                     schedule_header = schedule.get('header', f"*{schedule_name}*")
                     header_datetime = schedule.get('header_datetime', False)
 
+                    job_id = f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                     job_data = {
                         'schedule_type': schedule_type,
                         'bot_name': bot_name,
@@ -624,6 +777,9 @@ async def schedule_summaries():
                         'sch_minutes':      schedule.get('minutes'),
                         'sch_start_hour':   schedule.get('start_hour', 0),
                         'sch_start_minute': schedule.get('start_minute', 0),
+                        # speeches_interval specific
+                        'sch_wait_time':    schedule.get('wait_time', 5),
+                        'job_id':           job_id,
                     }
 
                     try:
@@ -658,6 +814,9 @@ async def schedule_summaries():
                                 while start_dt <= now:
                                     start_dt += datetime.timedelta(hours=interval_hours)
                             trigger = IntervalTrigger(hours=interval_hours, start_date=start_dt)
+                        elif schedule_type == "speeches_interval":
+                            # Always runs every 1 minute; wait_time controls when buckets are sent
+                            trigger = IntervalTrigger(minutes=1)
                         elif schedule_type == "daily":
                             hour = schedule.get('hour', 0)
                             minute = schedule.get('minute', 0)

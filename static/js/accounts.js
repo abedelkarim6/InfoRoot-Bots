@@ -29,27 +29,37 @@ const authReady = new Promise(res => { _authReadyResolve = res; });
             if (el) el.style.display = visible ? '' : 'none';
         };
 
-        const hasBotAccess = isAdmin || !!currentUser.has_bot_access;
+        const hasBotAccess = isAdmin || !!currentUser.bots_on || !!currentUser.has_bot_access;
+
+        const hasYt       = isAdmin || !!currentUser.youtube_on;
+        const hasYtChat   = isAdmin || !!currentUser.yt_chat_on;
+        const hasAgents   = isAdmin || !!currentUser.agents_on;
+        const hasSysBot   = isAdmin || !!currentUser.sys_bot_on;
 
         show('admin-nav-section', isAdmin);
-        // News Summaries: hidden for users with no bot inheritance
+        // News Summaries: hidden for users with no bot access
         show('news-nav-section', hasBotAccess);
-        // YouTube Summaries: hidden for users without youtube_on
-        show('yt-nav-section',   isAdmin || !!currentUser.youtube_on);
-        // AI Tools: hidden for users without agents_on
-        show('ai-nav-section',   isAdmin || !!currentUser.agents_on);
+        // YouTube Reader: hidden for users without youtube_on
+        show('yt-nav-section',   hasYt);
+        // AI Chatbots: visible when any chat feature is enabled
+        show('ai-nav-section',   hasYtChat || hasAgents);
+        // Per-item visibility inside AI Chatbots
+        show('nav-yt-chat',      hasYtChat);
+        show('nav-agent-chat',   hasAgents);
+        show('sys-bot-fab',      hasSysBot);
 
         // If the currently active page is now hidden, fall back to system
         const newsPages  = ['collections', 'bots', 'monitor', 'dashboard'];
-        const ytPages    = ['yt-channels', 'yt-keywords', 'yt-videos', 'yt-chat'];
-        const aiPages    = ['agent-chat', 'system-chat'];
+        const ytPages    = ['yt-channels', 'yt-keywords', 'yt-videos'];
+        const aiPages    = ['agent-chat'];
         const adminPages = ['accounts'];
         const activePage = localStorage.getItem('activePage') || 'system';
 
         const pageHidden =
             (!hasBotAccess && newsPages.includes(activePage)) ||
-            (!isAdmin && !currentUser.youtube_on && ytPages.includes(activePage)) ||
-            (!isAdmin && !currentUser.agents_on  && aiPages.includes(activePage)) ||
+            (!isAdmin && !currentUser.youtube_on  && ytPages.includes(activePage)) ||
+            (!isAdmin && !currentUser.yt_chat_on  && activePage === 'yt-chat') ||
+            (!isAdmin && !currentUser.agents_on   && aiPages.includes(activePage)) ||
             (!isAdmin && adminPages.includes(activePage));
 
         if (pageHidden) {
@@ -90,11 +100,12 @@ async function loadAccountsData() {
 }
 
 function renderAccounts(data, container) {
-    const users    = (data.users || []).filter(u => u.role !== 'admin');
-    const allBots  = data.available_bots || [];
-    const allChans = data.yt_channels    || [];
-    const allKws   = data.yt_keywords    || [];
-    const cats     = data.categories     || [];
+    const users       = (data.users || []).filter(u => u.role !== 'admin');
+    const allBots     = data.available_bots       || [];
+    const allChans    = data.yt_channels           || [];
+    const allKws      = data.yt_keywords           || [];
+    const cats        = data.categories            || [];
+    const allColls    = data.available_collections || [];
 
     const badge = document.getElementById('accounts-count');
     if (badge) {
@@ -115,12 +126,12 @@ function renderAccounts(data, container) {
     }
 
     container.innerHTML = users.map(u =>
-        renderUserCard(u, allBots, allChans, allKws, cats)
+        renderUserCard(u, allBots, allChans, allKws, cats, allColls)
     ).join('');
 }
 
 // ── User card ─────────────────────────────────────────────────────────────────
-function renderUserCard(u, allBots, allChans, allKws, cats) {
+function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
     const pendingYt = (u.yt_inheritances || []).filter(i => i.status === 'pending').length;
 
     return `
@@ -160,6 +171,15 @@ function renderUserCard(u, allBots, allChans, allKws, cats) {
   <div class="ac-features">
     <div class="ac-feature-row">
       <label class="toggle-switch">
+        <input type="checkbox" ${u.bots_on ? 'checked' : ''}
+          onchange="setUserFlag(${u.id}, 'bots_on', this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:13px">📰 Summaries</span>
+    </div>
+
+    <div class="ac-feature-row">
+      <label class="toggle-switch">
         <input type="checkbox" ${u.youtube_on ? 'checked' : ''}
           onchange="setUserFlag(${u.id}, 'youtube_on', this.checked)">
         <span class="toggle-slider"></span>
@@ -167,14 +187,56 @@ function renderUserCard(u, allBots, allChans, allKws, cats) {
       <span style="font-size:13px">📺 YouTube Summaries</span>
     </div>
 
-    <div class="ac-feature-row" id="agents-feature-row-${u.id}">
+    <div class="ac-feature-row">
       <label class="toggle-switch">
-        <input type="checkbox" ${u.agents_on ? 'checked' : ''}
-          onchange="setUserFlag(${u.id}, 'agents_on', this.checked)">
+        <input type="checkbox" ${u.yt_chat_on ? 'checked' : ''}
+          onchange="setUserFlag(${u.id}, 'yt_chat_on', this.checked)">
         <span class="toggle-slider"></span>
       </label>
-      <span style="font-size:13px">🤖 Agent Chat</span>
-      ${renderAgentsLimit(u)}
+      <span style="font-size:13px">💬 Video Chat</span>
+    </div>
+
+  </div>
+
+  <!-- ── Agent Bot Access ── -->
+  <div class="ac-section">
+    <div class="ac-section-hd" onclick="toggleAcctSection('agents-${u.id}')">
+      <div style="display:flex;align-items:center;gap:10px">
+        <label class="toggle-switch" onclick="event.stopPropagation()">
+          <input type="checkbox" ${u.agents_on ? 'checked' : ''}
+            onchange="setUserFlag(${u.id}, 'agents_on', this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+        <span>🤖 Agent Bot</span>
+        ${u.agents_on ? `<span class="ac-chip" style="background:rgba(16,185,129,.15);color:#6ee7b7;border:1px solid rgba(16,185,129,.3)">Enabled</span>` : `<span class="ac-chip">Disabled</span>`}
+      </div>
+      <span class="ac-chevron" id="chevron-agents-${u.id}">▶</span>
+    </div>
+    <div class="ac-section-bd" id="agents-${u.id}" style="display:none">
+      <div id="agents-limit-wrap-${u.id}">
+        ${renderAgentsLimitBody(u)}
+      </div>
+    </div>
+  </div>
+
+  <!-- ── System Bot Access ── -->
+  <div class="ac-section">
+    <div class="ac-section-hd" onclick="toggleAcctSection('sysbot-${u.id}')">
+      <div style="display:flex;align-items:center;gap:10px">
+        <label class="toggle-switch" onclick="event.stopPropagation()">
+          <input type="checkbox" ${u.sys_bot_on ? 'checked' : ''}
+            onchange="setUserFlag(${u.id}, 'sys_bot_on', this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+        <span>🔧 System Bot</span>
+        ${u.sys_bot_on ? `<span class="ac-chip" style="background:rgba(16,185,129,.15);color:#6ee7b7;border:1px solid rgba(16,185,129,.3)">Enabled</span>` : `<span class="ac-chip">Disabled</span>`}
+      </div>
+      <span class="ac-chevron" id="chevron-sysbot-${u.id}">▶</span>
+    </div>
+    <div class="ac-section-bd" id="sysbot-${u.id}" style="display:none">
+      <p style="font-size:12px;color:var(--text-muted);padding:4px 0">
+        Grants access to the System Bot assistant panel (bottom-right FAB). The system bot can answer questions about the platform and help with configuration tasks.
+      </p>
     </div>
   </div>
 
@@ -189,6 +251,20 @@ function renderUserCard(u, allBots, allChans, allKws, cats) {
     </div>
     <div class="ac-section-bd" id="bots-${u.id}" style="display:none">
       ${renderBotInheritance(u, allBots, cats)}
+    </div>
+  </div>
+
+  <!-- ── Collection Inheritance ── -->
+  <div class="ac-section">
+    <div class="ac-section-hd" onclick="toggleAcctSection('colls-${u.id}')">
+      <span>📦 Collection Access</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="ac-chip">${(u.collection_inheritances || []).length} granted</span>
+        <span class="ac-chevron" id="chevron-colls-${u.id}">▶</span>
+      </div>
+    </div>
+    <div class="ac-section-bd" id="colls-${u.id}" style="display:none">
+      ${renderCollectionInheritance(u, allColls)}
     </div>
   </div>
 
@@ -207,11 +283,14 @@ function renderUserCard(u, allBots, allChans, allKws, cats) {
     </div>
   </div>
 
+
 </div>`;
 }
 
-function renderAgentsLimit(u) {
-    if (!u.agents_on) return '';
+function renderAgentsLimitBody(u) {
+    if (!u.agents_on) {
+        return `<p style="font-size:12px;color:var(--text-muted);padding:4px 0">Enable Agent Bot above to configure usage limits.</p>`;
+    }
     const lim   = u.agents_limit || {};
     const type  = lim.type  || 'calls';
     const value = lim.value != null ? lim.value : '';
@@ -219,6 +298,7 @@ function renderAgentsLimit(u) {
         ? `$${lim.value}`
         : lim.value != null ? `${lim.value} calls` : 'No limit';
     return `
+<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Usage limit — leave blank for unlimited.</div>
 <div class="ac-limit-row" id="agents-limit-${u.id}">
   <select class="select" style="font-size:12px;padding:4px 8px;height:28px"
     onchange="setAgentsLimitType(${u.id}, this.value)">
@@ -233,6 +313,7 @@ function renderAgentsLimit(u) {
 </div>`;
 }
 
+
 // ── Bot inheritance panel ─────────────────────────────────────────────────────
 function renderBotInheritance(u, allBots, cats) {
     const granted    = u.bot_inheritances || [];
@@ -245,11 +326,18 @@ function renderBotInheritance(u, allBots, cats) {
         const selTops = (g.inherit_topics && g.inherit_topics.length)
             ? new Set(g.inherit_topics) : null;
 
-        const featureChecks = ['keywords','rules','prompts','messages_db'].map(f => `
+        // Build per-topic settings map: {topic_id -> {include_schedules, include_prompts, keyword_pct}}
+        const tsMap = {};
+        for (const ts of (g.topic_settings || [])) {
+            tsMap[ts.topic_id] = ts;
+        }
+
+        // Bot-level flags: rules + messages_db only (keywords/prompts are now per-topic)
+        const featureChecks = ['rules', 'messages_db'].map(f => `
           <label class="ac-check">
             <input type="checkbox" ${g['inherit_' + f] ? 'checked' : ''}
               onchange="updateBotFlag(${u.id}, ${g.bot_id}, 'inherit_${f}', this.checked)">
-            ${f === 'messages_db' ? 'Share messages DB' : f.charAt(0).toUpperCase() + f.slice(1)}
+            ${f === 'messages_db' ? 'Share messages DB' : 'Rules'}
           </label>`).join('');
 
         const treeHtml = botCats.length ? `
@@ -261,22 +349,48 @@ function renderBotInheritance(u, allBots, cats) {
                 const catOn = selCats === null || selCats.has(c.category_id);
                 const topicRows = (c.topics || []).map(t => {
                     const topOn = selTops === null || selTops.has(t.id);
-                    return `<label class="ac-check">
-                        <input type="checkbox" data-topic-id="${t.id}"
-                          ${topOn ? 'checked' : ''}
-                          onchange="updateBotTopics(${u.id}, ${g.bot_id})">
-                        🏷 ${escapeHtmlSys(t.name)}
-                      </label>`;
+                    const ts = tsMap[t.id] || {};
+                    const inclSched = ts.include_schedules !== false;
+                    const inclProm  = ts.include_prompts  !== false;
+                    const kwPct     = ts.keyword_pct != null ? ts.keyword_pct : 100;
+                    return `
+                      <div class="ac-topic-row">
+                        <label class="ac-check">
+                          <input type="checkbox" data-topic-id="${t.id}"
+                            ${topOn ? 'checked' : ''}
+                            onchange="updateBotTopics(${u.id}, ${g.bot_id}, this)">
+                          🏷 ${escapeHtmlSys(t.name)}
+                        </label>
+                        <div class="ac-topic-settings" style="${topOn ? '' : 'display:none'}">
+                          <label class="ac-check ac-check-sm">
+                            <input type="checkbox" ${inclSched ? 'checked' : ''}
+                              onchange="updateTopicSetting(${u.id},${g.bot_id},${t.id},'include_schedules',this.checked)">
+                            📅 Schedules
+                          </label>
+                          <label class="ac-check ac-check-sm">
+                            <input type="checkbox" ${inclProm ? 'checked' : ''}
+                              onchange="updateTopicSetting(${u.id},${g.bot_id},${t.id},'include_prompts',this.checked)">
+                            💬 Prompts
+                          </label>
+                          <div class="ac-kw-pct">
+                            <span class="ac-check-sm">🔑 Keywords</span>
+                            <input type="number" min="0" max="100" value="${kwPct}"
+                              class="ac-num-inp ac-num-pct"
+                              onblur="updateTopicSetting(${u.id},${g.bot_id},${t.id},'keyword_pct',Math.min(100,Math.max(0,parseInt(this.value)||0)))">
+                            <span class="ac-check-sm">%</span>
+                          </div>
+                        </div>
+                      </div>`;
                 }).join('');
                 return `
                 <div style="margin-bottom:8px">
                   <label class="ac-check" style="font-weight:500">
                     <input type="checkbox" data-cat-id="${c.category_id}"
                       ${catOn ? 'checked' : ''}
-                      onchange="updateBotCategories(${u.id}, ${g.bot_id})">
+                      onchange="updateBotCategories(${u.id}, ${g.bot_id}, this)">
                     📁 ${escapeHtmlSys(c.category_name)}
                   </label>
-                  ${topicRows ? `<div style="margin-left:22px;display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${topicRows}</div>` : ''}
+                  ${topicRows ? `<div style="margin-left:22px;margin-top:6px">${topicRows}</div>` : ''}
                 </div>`;
             }).join('')}
           </div>` : '';
@@ -307,6 +421,37 @@ function renderBotInheritance(u, allBots, cats) {
   <button class="btn btn-primary btn-sm" onclick="grantBot(${u.id})">Grant Access</button>
 </div>`
     : `<p style="font-size:12px;color:var(--text-muted);margin-top:6px">All bots already granted.</p>`;
+
+    return (grantedRows || '') + grantRow;
+}
+
+// ── Collection inheritance panel ──────────────────────────────────────────────
+function renderCollectionInheritance(u, allColls) {
+    const granted    = u.collection_inheritances || [];
+    const grantedSet = new Set(granted);
+
+    const grantedRows = granted.map(name => `
+<div class="ac-inh-row" id="inh-coll-${u.id}-${escapeHtmlSys(name)}">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+    <span style="font-size:13px;font-weight:500">📦 ${escapeHtmlSys(name)}</span>
+    <button class="btn btn-danger" style="padding:3px 9px;font-size:11px"
+      onclick="revokeCollection(${u.id}, '${escapeHtmlSys(name)}')">Revoke</button>
+  </div>
+</div>`).join('');
+
+    const available = allColls.filter(n => !grantedSet.has(n));
+    const grantRow  = available.length ? `
+<div class="ac-add-row">
+  <select class="select" style="font-size:12px;padding:4px 8px;height:28px"
+    id="grant-coll-sel-${u.id}">
+    <option value="">— Select collection to grant —</option>
+    ${available.map(n => `<option value="${escapeHtmlSys(n)}">${escapeHtmlSys(n)}</option>`).join('')}
+  </select>
+  <button class="btn btn-primary btn-sm" onclick="grantCollection(${u.id})">Grant Access</button>
+</div>`
+    : !allColls.length
+        ? `<p style="font-size:12px;color:var(--text-muted);margin-top:6px">No collections configured yet.</p>`
+        : `<p style="font-size:12px;color:var(--text-muted);margin-top:6px">All collections already granted.</p>`;
 
     return (grantedRows || '') + grantRow;
 }
@@ -413,16 +558,31 @@ async function setUserFlag(userId, flag, value) {
         const userData = (_acctData?.users || []).find(u => u.id === userId);
         if (userData) {
             userData.agents_on = value;
-            const existing = document.getElementById(`agents-limit-${userId}`);
-            if (existing) existing.remove();
-            if (value) {
-                const row = document.getElementById(`agents-feature-row-${userId}`);
-                if (row) row.insertAdjacentHTML('beforeend', renderAgentsLimit(userData));
-            }
+            // Refresh limit body
+            const wrap = document.getElementById(`agents-limit-wrap-${userId}`);
+            if (wrap) wrap.innerHTML = renderAgentsLimitBody(userData);
+            // Refresh enabled chip in header
+            _refreshAccessChip(userId, 'agents', value);
         }
+    } else if (flag === 'sys_bot_on') {
+        _refreshAccessChip(userId, 'sysbot', value);
     } else if (flag === 'is_active') {
         const lbl = document.getElementById(`active-label-${userId}`);
         if (lbl) lbl.textContent = value ? 'Active' : 'Inactive';
+    }
+}
+
+function _refreshAccessChip(userId, sectionKey, enabled) {
+    const hd = document.querySelector(`#${sectionKey}-${userId}`)?.previousElementSibling;
+    if (!hd) return;
+    const chip = hd.querySelector('.ac-chip');
+    if (!chip) return;
+    if (enabled) {
+        chip.style.cssText = 'background:rgba(16,185,129,.15);color:#6ee7b7;border:1px solid rgba(16,185,129,.3)';
+        chip.textContent = 'Enabled';
+    } else {
+        chip.style.cssText = '';
+        chip.textContent = 'Disabled';
     }
 }
 
@@ -476,22 +636,82 @@ async function updateBotFlag(userId, botId, flag, value) {
     await acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}`, { [flag]: value });
 }
 
-async function updateBotCategories(userId, botId) {
-    const row    = document.getElementById(`inh-bot-${userId}-${botId}`);
+async function updateBotCategories(userId, botId, changedCb) {
+    const row = document.getElementById(`inh-bot-${userId}-${botId}`);
     if (!row) return;
-    const checks  = Array.from(row.querySelectorAll('input[data-cat-id]'));
-    const checked = checks.filter(c => c.checked).map(c => parseInt(c.dataset.catId));
-    await acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}`,
-        { inherit_categories: checked.length === checks.length ? [] : checked });
+
+    // Cascade to child topics of this category
+    if (changedCb) {
+        const catContainer = changedCb.closest('div[style*="margin-bottom"]') || changedCb.closest('div');
+        const topicCbs = Array.from(catContainer.querySelectorAll('input[data-topic-id]'));
+        topicCbs.forEach(tcb => {
+            tcb.checked = changedCb.checked;
+            const settingsDiv = tcb.closest('.ac-topic-row')?.querySelector('.ac-topic-settings');
+            if (settingsDiv) settingsDiv.style.display = changedCb.checked ? '' : 'none';
+        });
+        // Sync topic settings records
+        await Promise.all(topicCbs.map(tcb => {
+            const tid = parseInt(tcb.dataset.topicId);
+            return changedCb.checked
+                ? acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}/topics/${tid}`, {})
+                : acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}/topics/${tid}/delete`);
+        }));
+    }
+
+    const catChecks = Array.from(row.querySelectorAll('input[data-cat-id]'));
+    const checkedCats = catChecks.filter(c => c.checked).map(c => parseInt(c.dataset.catId));
+    const topChecks = Array.from(row.querySelectorAll('input[data-topic-id]'));
+    const checkedTops = topChecks.filter(c => c.checked).map(c => parseInt(c.dataset.topicId));
+
+    await Promise.all([
+        acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}`,
+            { inherit_categories: checkedCats.length === catChecks.length ? [] : checkedCats }),
+        acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}`,
+            { inherit_topics: checkedTops.length === topChecks.length ? [] : checkedTops }),
+    ]);
 }
 
-async function updateBotTopics(userId, botId) {
-    const row    = document.getElementById(`inh-bot-${userId}-${botId}`);
+async function updateBotTopics(userId, botId, changedCb) {
+    const row = document.getElementById(`inh-bot-${userId}-${botId}`);
     if (!row) return;
     const checks  = Array.from(row.querySelectorAll('input[data-topic-id]'));
     const checked = checks.filter(c => c.checked).map(c => parseInt(c.dataset.topicId));
+
+    // Toggle per-topic settings visibility for the changed checkbox
+    if (changedCb) {
+        const settingsDiv = changedCb.closest('.ac-topic-row')?.querySelector('.ac-topic-settings');
+        if (settingsDiv) settingsDiv.style.display = changedCb.checked ? '' : 'none';
+
+        // Init default settings when topic is first checked
+        const topicId = parseInt(changedCb.dataset.topicId);
+        if (changedCb.checked) {
+            acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}/topics/${topicId}`, {});
+        } else {
+            acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}/topics/${topicId}/delete`);
+        }
+    }
+
     await acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}`,
         { inherit_topics: checked.length === checks.length ? [] : checked });
+}
+
+async function updateTopicSetting(userId, botId, topicId, field, value) {
+    await acctApi('POST', `/api/admin/accounts/${userId}/bots/${botId}/topics/${topicId}`,
+        { [field]: value });
+}
+
+// ── Collection inheritance actions ───────────────────────────────────────────
+
+async function grantCollection(userId) {
+    const sel = document.getElementById(`grant-coll-sel-${userId}`);
+    if (!sel || !sel.value) return;
+    await acctApi('POST', `/api/admin/accounts/${userId}/collections/${encodeURIComponent(sel.value)}`);
+    loadAccountsData();
+}
+
+async function revokeCollection(userId, collectionName) {
+    await acctApi('POST', `/api/admin/accounts/${userId}/collections/${encodeURIComponent(collectionName)}/delete`);
+    loadAccountsData();
 }
 
 // ── YouTube inheritance actions ───────────────────────────────────────────────
@@ -628,6 +848,24 @@ function fmtDate(iso) {
     .toggle-switch.toggle-sm input:checked + .toggle-slider:before {
         transform:translateX(16px);
     }
+
+    /* Per-topic row */
+    .ac-topic-row { margin-bottom:6px; }
+    .ac-topic-settings {
+        display:flex; align-items:center; flex-wrap:wrap; gap:10px;
+        margin-top:5px; margin-left:22px;
+        padding:6px 10px;
+        background:rgba(255,255,255,.03);
+        border-left:2px solid var(--accent-primary);
+        border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+    }
+    .ac-check-sm {
+        display:inline-flex; align-items:center; gap:4px;
+        font-size:11px; color:var(--text-muted); cursor:pointer; user-select:none;
+    }
+    .ac-check-sm input { accent-color:var(--accent-primary); cursor:pointer; }
+    .ac-kw-pct { display:flex; align-items:center; gap:4px; }
+    .ac-num-pct { width:52px !important; height:24px !important; font-size:11px !important; padding:2px 6px !important; }
     `;
     document.head.appendChild(s);
 })();

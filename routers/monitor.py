@@ -7,14 +7,26 @@ from routers.auth import is_admin_request, get_request_user_id
 router = APIRouter()
 
 
+def _get_allowed_bots(request: Request):
+    """Returns None for admin (no filter), or list of bot names for regular users."""
+    if is_admin_request(request):
+        return None
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return ["__no_access__"]
+    cfg = get_db().get_filtered_bots_config(user_id)
+    return list(cfg.keys()) or ["__no_access__"]
+
+
 @router.get("/monitor/data")
 def get_monitor_data(request: Request):
     db = get_db()
     try:
-        pending_counts = db.get_pending_counts()
-        recent_summaries = db.get_recent_summaries(limit=100)
+        allowed_bots = _get_allowed_bots(request)
+        pending_counts = db.get_pending_counts(allowed_bot_names=allowed_bots)
+        recent_summaries = db.get_recent_summaries(limit=100, allowed_bot_names=allowed_bots)
 
-        if is_admin_request(request):
+        if allowed_bots is None:
             bots_cfg = db.get_all_bots_config()
         else:
             user_id = get_request_user_id(request)
@@ -54,13 +66,26 @@ def get_monitor_data(request: Request):
 
 
 @router.get("/monitor/summary-messages")
-def get_summary_messages(id: int = Query(...)):
+def get_summary_messages(request: Request, id: int = Query(...)):
     db = get_db()
     try:
         cursor = db._get_cursor()
-        cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
-        row = cursor.fetchone()
-        if not row or not row['message_ids']:
+        # Verify user has access to the bot that generated this summary
+        allowed_bots = _get_allowed_bots(request)
+        if allowed_bots is not None:
+            cursor.execute("SELECT message_ids, bot_name FROM summaries WHERE id = %s", (id,))
+            row = cursor.fetchone()
+            if not row:
+                return {'status': 'ok', 'messages': []}
+            if row['bot_name'] not in allowed_bots:
+                return {'status': 'error', 'message': 'Access denied'}, 403
+        else:
+            cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
+            row = cursor.fetchone()
+            if not row:
+                return {'status': 'ok', 'messages': []}
+
+        if not row['message_ids']:
             return {'status': 'ok', 'messages': []}
         ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
         messages = db.get_messages_by_ids(ids)
@@ -71,14 +96,16 @@ def get_summary_messages(id: int = Query(...)):
 
 @router.get("/monitor/messages")
 def get_monitor_messages(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     db = get_db()
     try:
+        allowed_bots = _get_allowed_bots(request)
         if offset == 0:
             db.cleanup_uncollected_messages()
-        messages = db.get_recent_messages(limit=limit, offset=offset)
+        messages = db.get_recent_messages(limit=limit, offset=offset, allowed_bot_names=allowed_bots)
 
         id_to_username = {}
         for msg in messages:
@@ -109,6 +136,7 @@ def get_monitor_messages(
 
 @router.get("/monitor/unclassified")
 def get_unclassified_messages(
+    request: Request,
     bot: str = Query(default=None),
     collection: str = Query(default=None),
     search: str = Query(default=None),
@@ -117,13 +145,14 @@ def get_unclassified_messages(
 ):
     db = get_db()
     try:
+        allowed_bots = _get_allowed_bots(request)
         messages = db.get_unclassified_messages(
-            limit=limit, offset=offset, bot_name=bot, collection=collection, search=search)
-        stats = db.get_unclassified_stats()
+            limit=limit, offset=offset, bot_name=bot, collection=collection,
+            search=search, allowed_bot_names=allowed_bots)
+        stats = db.get_unclassified_stats(allowed_bot_names=allowed_bots)
         return {'status': 'ok', 'messages': messages, 'stats': stats}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-
 
 
 @router.get("/dashboard/stats")
@@ -141,7 +170,6 @@ def get_dashboard_stats(
             if user_id:
                 cfg = db.get_filtered_bots_config(user_id)
                 allowed_bots = list(cfg.keys())
-                # Empty list means user has no bots at all — pass sentinel so DB returns zeros
                 if not allowed_bots:
                     allowed_bots = ["__no_access__"]
         data = db.get_dashboard_stats(

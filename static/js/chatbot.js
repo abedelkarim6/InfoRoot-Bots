@@ -6,6 +6,8 @@ let _agentChatSuggestionsInfo = []; // AI-generated informative questions
 let _agentChatSuggestionsAnalytical = []; // AI-generated analytical questions
 let _agentChatYtChannels = []; // cached YouTube channels
 let _agentChatYtKeywords = []; // cached YouTube keywords
+let _agentChatStreaming = false; // true while a stream is in progress
+let _agentChatAbortController = null; // AbortController for the active stream
 
 // ==================== Init & Session ====================
 
@@ -15,20 +17,26 @@ async function agentChatInit() {
     const tgInput = document.getElementById('agent-chat-tg-target');
     if (saved && tgInput) tgInput.value = saved;
 
-    // Render welcome screen
-    _agentChatRenderMessages();
-
-    // Create session if none exists
-    if (!_agentChatSessionId) {
-        _agentChatSetStatus('connecting', 'Connecting…');
-        const res = await api('/api/chatbot/start', {});
-        if (res.status === 'ok') {
-            _agentChatSessionId = res.session_id;
-            _agentChatSetStatus('ready', 'Ready');
-        } else {
-            _agentChatSetStatus('error', 'Connection failed');
-            ytToast('Failed to start chat session: ' + (res.message || ''), 'error');
+    // If already active (returning to page mid-stream or with messages), just re-render
+    if (_agentChatSessionId) {
+        _agentChatRenderMessages();
+        _agentChatSetCancelVisible(_agentChatStreaming);
+        if (!_agentChatStreaming) {
+            document.getElementById('agent-chat-input')?.focus();
         }
+        return;
+    }
+
+    // Fresh start
+    _agentChatRenderMessages();
+    _agentChatSetStatus('connecting', 'Connecting…');
+    const res = await api('/api/chatbot/start', {});
+    if (res.status === 'ok') {
+        _agentChatSessionId = res.session_id;
+        _agentChatSetStatus('ready', 'Ready');
+    } else {
+        _agentChatSetStatus('error', 'Connection failed');
+        ytToast('Failed to start chat session: ' + (res.message || ''), 'error');
     }
     document.getElementById('agent-chat-input')?.focus();
 
@@ -36,7 +44,29 @@ async function agentChatInit() {
     _agentChatLoadSuggestions();
 }
 
+function agentChatCancel() {
+    if (_agentChatAbortController) {
+        _agentChatAbortController.abort();
+        _agentChatAbortController = null;
+    }
+}
+
+function _agentChatSetCancelVisible(visible) {
+    const btn = document.getElementById('agent-chat-cancel-btn');
+    const send = document.getElementById('agent-chat-send-btn');
+    if (btn) btn.style.display = visible ? '' : 'none';
+    if (send) send.style.display = visible ? 'none' : '';
+}
+
 async function agentChatReset() {
+    // Cancel any active stream first
+    if (_agentChatAbortController) {
+        _agentChatAbortController.abort();
+        _agentChatAbortController = null;
+    }
+    _agentChatStreaming = false;
+    _agentChatSetCancelVisible(false);
+
     if (_agentChatSessionId) {
         api('/api/chatbot/end', { session_id: _agentChatSessionId });
     }
@@ -224,40 +254,135 @@ async function agentChatSend(text) {
     const msgId = Date.now();
     _agentChatMessages.push({ role: 'user', text: message, id: msgId, selected: false });
 
-    // Add placeholder for AI response
     const replyId = msgId + 1;
-    _agentChatMessages.push({ role: 'assistant', text: '', id: replyId, selected: false, loading: true });
+    _agentChatMessages.push({ role: 'assistant', text: '', steps: [], id: replyId, selected: false, loading: true, streaming: false });
     _agentChatRenderMessages();
 
-    // Disable input while waiting
     const sendBtn = document.getElementById('agent-chat-send-btn');
     if (input) input.disabled = true;
-    if (sendBtn) sendBtn.disabled = true;
+    _agentChatStreaming = true;
+    _agentChatSetCancelVisible(true);
     _agentChatSetStatus('thinking', 'Thinking…');
 
     const payload = { session_id: _agentChatSessionId, message };
     const ctx = _agentChatGetContext();
     if (ctx) payload.context = ctx;
-    const res = await api('/api/chatbot/send', payload);
 
-    if (input) input.disabled = false;
-    if (sendBtn) sendBtn.disabled = false;
-    if (input) input.focus();
-    _agentChatSetStatus('ready', 'Ready');
+    _agentChatAbortController = new AbortController();
 
-    // Update placeholder with actual reply
-    const placeholder = _agentChatMessages.find(m => m.id === replyId);
-    if (placeholder) {
-        placeholder.loading = false;
-        if (res.status === 'ok') {
-            placeholder.text = res.reply;
+    try {
+        const response = await fetch('/api/chatbot/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: _agentChatAbortController.signal,
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let started = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let evt;
+                try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+                const msg = _agentChatMessages.find(m => m.id === replyId);
+                if (!msg) continue;
+
+                if (!started) {
+                    started = true;
+                    msg.loading = false;
+                    msg.streaming = true;
+                }
+
+                if (evt.type === 'step') {
+                    msg.steps.push(evt);
+                    _agentChatUpdateBubble(replyId);
+                } else if (evt.type === 'delta') {
+                    msg.text += evt.content;
+                    _agentChatUpdateBubble(replyId);
+                } else if (evt.type === 'done') {
+                    msg.text = evt.content || msg.text;
+                    msg.streaming = false;
+                    _agentChatUpdateBubble(replyId);
+                } else if (evt.type === 'error') {
+                    _agentChatMessages = _agentChatMessages.filter(m => m.id !== replyId);
+                    ytToast(evt.message || 'Agent error', 'error');
+                    _agentChatRenderMessages();
+                }
+            }
+        }
+    } catch (e) {
+        if (e.name === 'AbortError') {
+            // User cancelled — keep whatever partial content was received
+            const msg = _agentChatMessages.find(m => m.id === replyId);
+            if (msg) {
+                msg.loading = false;
+                msg.streaming = false;
+                if (!msg.text) {
+                    _agentChatMessages = _agentChatMessages.filter(m => m.id !== replyId);
+                }
+            }
+            _agentChatRenderMessages();
         } else {
-            // Remove the failed placeholder and show error as toast
             _agentChatMessages = _agentChatMessages.filter(m => m.id !== replyId);
-            ytToast('Failed to get response. Please try again.', 'error');
+            ytToast('Connection error. Please try again.', 'error');
+            _agentChatRenderMessages();
         }
     }
-    _agentChatRenderMessages();
+
+    _agentChatStreaming = false;
+    _agentChatAbortController = null;
+    _agentChatSetCancelVisible(false);
+    if (input) input.disabled = false;
+    if (input) input.focus();
+    _agentChatSetStatus('ready', 'Ready');
+}
+
+function _agentChatUpdateBubble(msgId) {
+    const msg = _agentChatMessages.find(m => m.id === msgId);
+    if (!msg) return;
+    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!el) { _agentChatRenderMessages(); return; }
+
+    const labelEl = el.querySelector('.ac-msg-agent-label');
+    if (labelEl) {
+        labelEl.textContent = msg.loading ? 'Thinking…' : msg.streaming ? 'Working…' : 'Agent';
+    }
+
+    const bubble = el.querySelector('.ac-msg-bubble-ai');
+    if (bubble) bubble.innerHTML = _agentChatBubbleInner(msg);
+
+    const container = document.getElementById('agent-chat-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+}
+
+function _agentChatBubbleInner(msg) {
+    if (msg.loading) return _agentChatSkeletonHTML();
+    let html = '';
+    if (msg.steps && msg.steps.length) {
+        html += '<div class="ac-steps">';
+        html += msg.steps.map(s =>
+            `<div class="ac-step"><span class="ac-step-icon">${s.icon}</span><span class="ac-step-label">${escapeHtml(s.label)}</span></div>`
+        ).join('');
+        html += '</div>';
+    }
+    if (msg.text) {
+        html += `<div class="ac-content${msg.streaming ? ' ac-content-streaming' : ''}">${_agentChatFormatText(msg.text)}</div>`;
+    } else if (msg.streaming && (!msg.steps || !msg.steps.length)) {
+        html += _agentChatSkeletonHTML();
+    }
+    return html;
 }
 
 
@@ -279,19 +404,20 @@ function _agentChatRenderMessages() {
                 <div class="ac-msg-bubble ac-msg-bubble-user">${escapeHtml(msg.text)}</div>
             </div>`;
         } else {
-            const checkable = !msg.loading && !msg.error;
+            const checkable = !msg.loading && !msg.streaming && !msg.error;
             const selectedClass = msg.selected ? 'ac-msg-selected' : '';
-            html += `<div class="ac-msg ac-msg-ai ${selectedClass}">
+            const agentLabel = msg.loading ? 'Thinking…' : msg.streaming ? 'Working…' : 'Agent';
+            html += `<div class="ac-msg ac-msg-ai ${selectedClass}" data-msg-id="${msg.id}">
                 <div class="ac-msg-avatar">AI</div>
                 <div class="ac-msg-body">
                     <div class="ac-msg-meta">
                         ${checkable ? `<label class="ac-msg-check">
                             <input type="checkbox" ${msg.selected ? 'checked' : ''} onchange="agentChatToggleSelect(${msg.id}, this.checked)">
                         </label>` : ''}
-                        <span class="ac-msg-agent-label">${msg.loading ? 'Thinking…' : 'Agent'}</span>
+                        <span class="ac-msg-agent-label">${agentLabel}</span>
                     </div>
                     <div class="ac-msg-bubble ac-msg-bubble-ai ${msg.error ? 'ac-msg-bubble-error' : ''}">
-                        ${msg.loading ? _agentChatSkeletonHTML() : _agentChatFormatText(msg.text)}
+                        ${_agentChatBubbleInner(msg)}
                     </div>
                 </div>
             </div>`;
@@ -372,31 +498,7 @@ function _agentChatSkeletonHTML() {
 
 function _agentChatFormatText(text) {
     if (!text) return '';
-    let html = escapeHtml(text);
-    // Code blocks (triple backtick)
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="ac-code-block"><code>$2</code></pre>');
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code class="ac-inline-code">$1</code>');
-    // Headers
-    html = html.replace(/^### (.+)$/gm, '<h4 class="ac-md-h">$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3 class="ac-md-h">$1</h3>');
-    html = html.replace(/^# (.+)$/gm, '<h2 class="ac-md-h">$1</h2>');
-    // Bold & italic
-    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
-    // Numbered lists
-    html = html.replace(/^\d+\.\s+(.*)$/gm, '<li class="ac-ol-item">$1</li>');
-    // Bullet lists
-    html = html.replace(/^[\-•]\s+(.*)$/gm, '<li>$1</li>');
-    // Wrap consecutive <li> in <ul>
-    html = html.replace(/((?:<li[^>]*>.*?<\/li>\s*)+)/g, '<ul class="ac-list">$1</ul>');
-    // Line breaks (but not inside pre/code)
-    html = html.replace(/\n/g, '<br>');
-    // Clean up double <br> after block elements
-    html = html.replace(/(<\/h[234]>)<br>/g, '$1');
-    html = html.replace(/(<\/pre>)<br>/g, '$1');
-    html = html.replace(/(<\/ul>)<br>/g, '$1');
-    return html;
+    return marked.parse(text, { gfm: true, breaks: true });
 }
 
 

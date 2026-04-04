@@ -3,13 +3,15 @@ Agent Chatbot API router.
 Endpoints under /api/chatbot/...
 """
 
+import json
 import logging
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from utils.database import get_db
 from youtube_monitor.db import get_yt_db
-from chatbot.service import create_session, send_message, get_session, delete_session, generate_suggestions
-from chatbot.system_service import create_system_session, send_system_message, delete_system_session
+from chatbot.service import create_session, send_message, get_session, delete_session, generate_suggestions, stream_message
+from chatbot.system_service import create_system_session, send_system_message, delete_system_session, stream_system_message
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,24 @@ async def chatbot_send(request: Request):
         return {"status": "error", "message": str(e)}
 
 
+@router.post("/stream")
+async def chatbot_stream(request: Request):
+    """Stream chatbot response via SSE (step / delta / done / error events)."""
+    data = await request.json()
+    session_id = data.get("session_id", "").strip()
+    message = data.get("message", "").strip()
+    if not session_id or not message:
+        async def _err():
+            yield f'data: {json.dumps({"type": "error", "message": "session_id and message are required"})}\n\n'
+        return StreamingResponse(_err(), media_type="text/event-stream")
+    context = data.get("context")
+    return StreamingResponse(
+        stream_message(session_id, message, context=context),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
 @router.post("/end")
 async def chatbot_end(request: Request):
     """End a chatbot session."""
@@ -102,6 +122,23 @@ async def system_chatbot_send(request: Request):
     except Exception as e:
         logger.error(f"[SYS-CHAT] Error in session {session_id}: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.post("/system/stream")
+async def system_chatbot_stream(request: Request):
+    """Stream system chatbot response via SSE (step / delta / done / error events)."""
+    data = await request.json()
+    session_id = data.get("session_id", "").strip()
+    message = data.get("message", "").strip()
+    if not session_id or not message:
+        async def _err():
+            yield f'data: {json.dumps({"type": "error", "message": "session_id and message are required"})}\n\n'
+        return StreamingResponse(_err(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_system_message(session_id, message),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/system/end")

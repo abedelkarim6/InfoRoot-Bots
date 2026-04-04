@@ -108,6 +108,9 @@ window.loadDashboardData = async function () {
 
   /* ── Matrix ─────────────────────────────────────── */
   renderSourceMatrix(data.source_topic_breakdown, data.messages_per_topic);
+
+  /* ── Subscribed Channels ────────────────────────── */
+  renderDashChannels();
 };
 
 /* ── Populate source & topic filter dropdowns ──── */
@@ -367,6 +370,100 @@ function renderSourceMatrix(breakdown, perTopic) {
 
   html += '</tbody></table>';
   container.innerHTML = html;
+}
+
+/* ── Subscribed / Registered Channels card ─────────── */
+function renderDashChannels() {
+  // currentUser is declared in accounts.js (shared classic-script scope)
+  const user    = typeof currentUser !== 'undefined' ? currentUser : null;
+  const isAdmin = !user || user.role === 'admin';
+  const chValCard = document.getElementById('ch-val-card');
+  const userChDiv = document.getElementById('dash-user-channels');
+
+  if (isAdmin) {
+    if (chValCard) chValCard.style.display = '';
+    if (userChDiv) userChDiv.innerHTML = '';
+  } else {
+    if (chValCard) chValCard.style.display = 'none';
+    if (userChDiv) renderDashUserChannels(userChDiv);
+  }
+}
+
+async function renderDashUserChannels(container) {
+  container.innerHTML = `
+    <div class="ch-val-card">
+      <div class="ch-val-header">
+        <div class="ch-val-title">
+          <span style="font-size:20px">📡</span>
+          <h3 style="margin:0">Subscribed Channels</h3>
+        </div>
+      </div>
+      <div class="ch-val-body" style="display:block;padding:12px 16px">
+        <p class="text-muted" style="font-size:13px;margin:0">Loading…</p>
+      </div>
+    </div>`;
+
+  const token = localStorage.getItem('auth_token');
+  let data;
+  try {
+    const r = await fetch('/api/telegram/userbot/dialogs', {
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    data = await r.json();
+  } catch (e) {
+    data = {};
+  }
+
+  if (data.status !== 'ok' || !data.channels?.length) {
+    container.innerHTML = `
+      <div class="ch-val-card">
+        <div class="ch-val-header">
+          <div class="ch-val-title">
+            <span style="font-size:20px">📡</span>
+            <h3 style="margin:0">Subscribed Channels</h3>
+          </div>
+        </div>
+        <div class="ch-val-body" style="display:block;padding:12px 16px">
+          <p class="text-muted" style="font-size:13px;margin:0">
+            ${data.status === 'no_session' || data.status === 'unauthorized'
+              ? 'No Telegram account linked. Link your account in Profile to see subscribed channels.'
+              : 'No subscribed channels found.'}
+          </p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const channels = data.channels;
+  const rows = channels.map(ch => `
+    <div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;
+                background:var(--bg-secondary);font-size:12px;margin-bottom:4px">
+      <span>${ch.is_group ? '👥' : '📢'}</span>
+      <div style="flex:1;overflow:hidden">
+        <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          ${escapeHtmlSys(ch.title || ch.username || 'Unknown')}
+        </div>
+        ${ch.username ? `<div style="color:var(--text-muted)">@${escapeHtmlSys(ch.username)}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+  container.innerHTML = `
+    <div class="ch-val-card">
+      <div class="ch-val-header" onclick="this.parentElement.querySelector('.ch-val-body').style.display = this.parentElement.querySelector('.ch-val-body').style.display==='none'?'block':'none'; this.querySelector('.ch-dash-toggle').textContent = this.parentElement.querySelector('.ch-val-body').style.display==='none'?'▶':'▼'" style="cursor:pointer">
+        <div class="ch-val-title">
+          <span class="ch-dash-toggle">▼</span>
+          <h3>📡 Subscribed Channels</h3>
+          <span class="text-muted" style="font-size:0.8rem;margin-left:8px">${channels.length} channel${channels.length !== 1 ? 's' : ''}</span>
+        </div>
+      </div>
+      <div class="ch-val-body" style="display:block">
+        <div style="max-height:220px;overflow-y:auto">
+          ${rows}
+        </div>
+        ${data.updated_at ? `<div style="font-size:10px;color:var(--text-muted);margin-top:6px">
+          Last refreshed: ${new Date(data.updated_at).toLocaleString()}</div>` : ''}
+      </div>
+    </div>`;
 }
 
 /* ── Source filter ────────────────────────────────── */

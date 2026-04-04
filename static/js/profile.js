@@ -25,6 +25,11 @@ async function loadProfileData() {
 
     el.innerHTML = renderProfilePage(_profileUser);
     if (_profileUser.role === 'admin') loadGeminiUsage();
+    // Load Telegram profile info async after page render
+    if (_profileUser.telegram_session || _profileUser.telegram_phone) {
+        loadTgProfile();
+        if (_profileUser.role === 'admin') loadTgChannels();
+    }
 }
 
 function renderProfilePage(u) {
@@ -61,43 +66,61 @@ function renderProfilePage(u) {
       <div class="pf-flag ${u.youtube_on ? 'pf-flag-on' : ''}">
         📺 YouTube Summaries <strong>${u.youtube_on ? 'ON' : 'OFF'}</strong>
       </div>
+      <div class="pf-flag ${u.yt_chat_on ? 'pf-flag-on' : ''}">
+        💬 Video Chat <strong>${u.yt_chat_on ? 'ON' : 'OFF'}</strong>
+      </div>
       <div class="pf-flag ${u.agents_on ? 'pf-flag-on' : ''}">
-        🤖 Agent Chat <strong>${u.agents_on ? 'ON' : 'OFF'}</strong>
+        🤖 Agent Bot <strong>${u.agents_on ? 'ON' : 'OFF'}</strong>
+      </div>
+      <div class="pf-flag ${u.sys_bot_on ? 'pf-flag-on' : ''}">
+        🔧 System Bot <strong>${u.sys_bot_on ? 'ON' : 'OFF'}</strong>
       </div>
     </div>` : ''}
   </div>
 
-  <!-- ── Telegram account ── -->
+  <!-- ── Telegram account (unified) ── -->
   <div class="card" style="margin-bottom:20px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <h3 style="font-size:14px;font-weight:600;margin:0">📱 Telegram Account</h3>
-      ${hasTelegram
-        ? `<button class="btn btn-secondary btn-sm" onclick="startTgRelink()">Re-link</button>`
-        : `<button class="btn btn-primary btn-sm" onclick="startTgRelink()">Link Telegram</button>`}
+      <div style="display:flex;gap:8px">
+        ${isAdmin && hasTelegram ? `<button class="btn btn-secondary btn-sm" id="pf-tg-test-btn" onclick="pfTestTgConnection()">🔌 Test</button>` : ''}
+        <button class="btn ${hasTelegram ? 'btn-secondary' : 'btn-primary'} btn-sm" onclick="startTgRelink()">
+          ${hasTelegram ? '🔄 Re-link' : '🔗 Link Telegram'}
+        </button>
+      </div>
     </div>
 
-    <div id="pf-tg-status">
+    <!-- Profile info — populated async by loadTgProfile() -->
+    <div id="pf-tg-profile">
       ${hasTelegram
         ? `<div style="display:flex;align-items:center;gap:10px">
-             <span style="font-size:22px">✅</span>
+             <div style="width:40px;height:40px;border-radius:50%;background:var(--accent-primary);display:flex;align-items:center;justify-content:center;font-size:16px;color:#fff;flex-shrink:0">
+               ${(u.telegram_phone || '?')[0]}
+             </div>
              <div>
                ${u.telegram_phone ? `<div style="font-size:14px;font-weight:500">${escapeHtmlSys(u.telegram_phone)}</div>` : ''}
-               <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
-               ${u.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${u.telegram_session.substring(0, 40)}…</div>` : ''}
+               <span style="font-size:11px;color:var(--text-muted)">Checking connection…</span>
              </div>
            </div>`
         : `<div style="display:flex;align-items:center;gap:10px">
-             <span style="font-size:22px">⚠️</span>
+             <span style="font-size:20px">⚠️</span>
              <div>
                <div style="font-size:13px;color:var(--warning)">No Telegram account linked</div>
-               <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Link your account to receive messages</div>
+               <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Link your account to enable monitoring</div>
              </div>
            </div>`}
     </div>
 
+    <!-- Test connection logs -->
+    <div id="pf-tg-test-logs" style="display:none;margin-top:10px;background:var(--bg-secondary);border-radius:6px;padding:8px 10px;font-family:monospace;font-size:11px;max-height:120px;overflow-y:auto"></div>
+
+    <!-- Subscribed channels — admin only, loaded async -->
+    ${isAdmin ? `<div id="pf-tg-channels" style="margin-top:2px"></div>` : ''}
+
     <!-- OTP re-link form (hidden by default) -->
     <div id="pf-tg-form" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border-color)">
-      <!-- Step 1: Phone input -->
+      <div style="font-size:13px;font-weight:500;margin-bottom:12px">Link a Telegram account via OTP</div>
+      <!-- Step 1: Phone -->
       <div id="pf-tg-step-phone">
         <label class="form-label">Phone number (with country code)</label>
         <div style="display:flex;gap:8px;margin-top:6px">
@@ -108,8 +131,7 @@ function renderProfilePage(u) {
         <div id="pf-tg-phone-err" class="pf-err"></div>
         <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="cancelTgRelink()">Cancel</button>
       </div>
-
-      <!-- Step 2: Code input -->
+      <!-- Step 2: Code -->
       <div id="pf-tg-step-code" style="display:none">
         <label class="form-label">Verification code sent to Telegram</label>
         <div style="display:flex;gap:8px;margin-top:6px">
@@ -121,7 +143,6 @@ function renderProfilePage(u) {
         <div id="pf-tg-code-err" class="pf-err"></div>
         <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="pfBackToPhone()">← Change number</button>
       </div>
-
       <!-- Step 3: 2FA -->
       <div id="pf-tg-step-2fa" style="display:none">
         <label class="form-label">Two-factor authentication password</label>
@@ -133,32 +154,32 @@ function renderProfilePage(u) {
         <div id="pf-tg-2fa-err" class="pf-err"></div>
       </div>
     </div>
+
+    <!-- Advanced: paste session string directly -->
+    <details style="margin-top:16px">
+      <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none">🔑 Advanced: Paste Session String</summary>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)">
+        <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
+          <div>
+            <label class="form-label">Phone number (optional)</label>
+            <input id="pf-ss-phone" type="tel" class="input" style="margin-top:4px"
+              placeholder="+1 234 567 8900" value="${escapeHtmlSys(u.telegram_phone || '')}">
+          </div>
+          <div>
+            <label class="form-label">Session string</label>
+            <textarea id="pf-ss-value" class="input" rows="3"
+              style="margin-top:4px;resize:vertical;font-family:monospace;font-size:11px"
+              placeholder="Paste your StringSession here…"></textarea>
+          </div>
+          <div id="pf-ss-msg" class="pf-err"></div>
+          <button class="btn btn-primary" style="align-self:flex-start" onclick="pfUpdateSession()">
+            Save Session
+          </button>
+        </div>
+      </div>
+    </details>
   </div>
 
-  <!-- ── Update Session String ── -->
-  <div class="card" style="margin-bottom:20px">
-    <h3 style="font-size:14px;font-weight:600;margin:0 0 14px">🔑 Telegram Session String</h3>
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
-      Paste a <code>StringSession</code> directly (e.g. from <code>get_ss.py</code>). This replaces the OTP flow and works for all accounts including admin.
-    </div>
-    <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
-      <div>
-        <label class="form-label">Phone number (optional)</label>
-        <input id="pf-ss-phone" type="tel" class="input" style="margin-top:4px"
-          placeholder="+1 234 567 8900" value="${escapeHtmlSys(u.telegram_phone || '')}">
-      </div>
-      <div>
-        <label class="form-label">Session string</label>
-        <textarea id="pf-ss-value" class="input" rows="4"
-          style="margin-top:4px;resize:vertical;font-family:monospace;font-size:11px"
-          placeholder="Paste your StringSession here…">${escapeHtmlSys(u.telegram_session || '')}</textarea>
-      </div>
-      <div id="pf-ss-msg" class="pf-err"></div>
-      <button class="btn btn-primary" style="align-self:flex-start" onclick="pfUpdateSession()">
-        Save Session
-      </button>
-    </div>
-  </div>
 
   <!-- ── Gemini API usage (admin only) ── -->
   ${isAdmin ? `<div class="card" style="margin-bottom:20px" id="pf-gemini-card">
@@ -246,6 +267,105 @@ async function loadGeminiUsage() {
         `<p style="font-size:11px;color:var(--text-muted);margin-top:4px">
            RPM &amp; TPM reset every 60 s · RPD &amp; Video reset at midnight
          </p>`;
+}
+
+// ── Telegram profile & channels (async loaders) ──────────────────────────────
+
+async function loadTgProfile() {
+    const el = document.getElementById('pf-tg-profile');
+    if (!el) return;
+    const token = localStorage.getItem('auth_token');
+    const data = await fetch('/api/telegram/userbot/me', {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    }).then(r => r.json()).catch(() => ({}));
+
+    if (data.status === 'ok') {
+        const name = [data.first_name, data.last_name].filter(Boolean).join(' ');
+        const initial = (data.first_name || data.username || '?')[0].toUpperCase();
+        el.innerHTML = `
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="width:44px;height:44px;border-radius:50%;background:var(--accent-primary);
+                        display:flex;align-items:center;justify-content:center;
+                        font-size:18px;font-weight:700;color:#fff;flex-shrink:0">${initial}</div>
+            <div>
+              <div style="font-size:15px;font-weight:600">${escapeHtmlSys(name || 'Unknown')}</div>
+              ${data.username ? `<div style="font-size:12px;color:var(--text-muted)">@${escapeHtmlSys(data.username)}</div>` : ''}
+              ${data.phone ? `<div style="font-size:12px;color:var(--text-muted)">+${escapeHtmlSys(data.phone)}</div>` : ''}
+              <span style="font-size:11px;padding:2px 7px;border-radius:8px;
+                           background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);
+                           color:#6ee7b7;margin-top:5px;display:inline-block">✅ Connected</span>
+            </div>
+          </div>`;
+    } else if (data.status === 'unauthorized') {
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:var(--warning);font-size:13px">
+          <span>⚠️</span><span>Session expired — please re-link your account</span></div>`;
+    } else if (data.status === 'no_session') {
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);font-size:13px">
+          <span>📵</span><span>No session configured</span></div>`;
+    } else {
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:var(--warning);font-size:13px">
+          <span>⚠️</span><span>Could not verify: ${escapeHtmlSys(data.message || 'unknown error')}</span></div>`;
+    }
+}
+
+async function loadTgChannels() {
+    const el = document.getElementById('pf-tg-channels');
+    if (!el) return;
+    el.innerHTML = '';
+    const token = localStorage.getItem('auth_token');
+    const data = await fetch('/api/telegram/userbot/dialogs', {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    }).then(r => r.json()).catch(() => ({}));
+
+    if (data.status !== 'ok' || !data.channels?.length) return;
+
+    const channels = data.channels;
+    el.innerHTML = `
+      <div style="border-top:1px solid var(--border-color);margin-top:14px;padding-top:14px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">
+          📡 Subscribed Channels (${channels.length})
+        </div>
+        <div style="max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
+          ${channels.map(ch => `
+            <div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;
+                        background:var(--bg-secondary);font-size:12px">
+              <span>${ch.is_group ? '👥' : '📢'}</span>
+              <div style="flex:1;overflow:hidden">
+                <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                  ${escapeHtmlSys(ch.title || ch.username || 'Unknown')}
+                </div>
+                ${ch.username ? `<div style="color:var(--text-muted)">@${escapeHtmlSys(ch.username)}</div>` : ''}
+              </div>
+            </div>`).join('')}
+        </div>
+        ${data.updated_at ? `<div style="font-size:10px;color:var(--text-muted);margin-top:6px">
+          Last refreshed: ${new Date(data.updated_at).toLocaleString()}</div>` : ''}
+      </div>`;
+}
+
+async function pfTestTgConnection() {
+    const btn = document.getElementById('pf-tg-test-btn');
+    const logsEl = document.getElementById('pf-tg-test-logs');
+    if (!logsEl) return;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    logsEl.style.display = '';
+    logsEl.innerHTML = '<span style="color:var(--text-muted)">Connecting…</span>';
+
+    const token = localStorage.getItem('auth_token');
+    const data = await fetch('/api/telegram/session/test', {
+        method: 'POST',
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    }).then(r => r.json()).catch(() => ({ logs: ['[ERROR] Request failed'] }));
+
+    const logs = data.logs || [];
+    logsEl.innerHTML = logs.map(l => {
+        const color = l.includes('[ERROR]') ? 'var(--danger)' : l.includes('[SUCCESS]') ? 'var(--success)' : 'var(--text-muted)';
+        return `<div style="color:${color}">${escapeHtmlSys(l)}</div>`;
+    }).join('');
+
+    if (btn) { btn.disabled = false; btn.textContent = '🔌 Test'; }
+    // Refresh profile after test
+    if (data.status === 'ok') loadTgProfile();
 }
 
 // ── Telegram re-link flow ─────────────────────────────────────────────────────
@@ -356,32 +476,18 @@ function pfBackToPhone() {
 }
 
 function pfTgSuccess(sessionString) {
-    // Update local user state and re-render status
     if (_profileUser) {
         _profileUser.telegram_phone = _tgLinkPhone;
         if (sessionString) _profileUser.telegram_session = sessionString;
     }
-    // Update the session string textarea if visible
-    if (sessionString) {
-        const ssEl = document.getElementById('pf-ss-value');
-        if (ssEl) ssEl.value = sessionString;
-    }
-
     document.getElementById('pf-tg-form').style.display = 'none';
-    document.getElementById('pf-tg-status').innerHTML = `
-      <div style="display:flex;align-items:center;gap:10px">
-        <span style="font-size:22px">✅</span>
-        <div>
-          <div style="font-size:14px;font-weight:500">${escapeHtmlSys(_tgLinkPhone)}</div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
-          ${_profileUser?.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${_profileUser.telegram_session.substring(0, 40)}…</div>` : ''}
-        </div>
-      </div>`;
-    
-    // Clear form
-    document.getElementById('pf-tg-phone').value = '';
-    document.getElementById('pf-tg-code').value = '';
-    document.getElementById('pf-tg-2fa').value = '';
+    // Clear form inputs
+    ['pf-tg-phone', 'pf-tg-code', 'pf-tg-2fa'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.value = '';
+    });
+    // Refresh the profile display with real data from Telegram
+    loadTgProfile();
+    if (_profileUser?.role === 'admin') loadTgChannels();
 }
 
 // ── Change password ───────────────────────────────────────────────────────────
@@ -445,30 +551,19 @@ async function pfUpdateSession() {
     if (data.error) { msgEl.textContent = data.error; return; }
 
     msgEl.style.color = 'var(--success, #10b981)';
-    msgEl.textContent = 'Session saved successfully!';
-    
-    // Update local user state
+    msgEl.textContent = 'Session saved!';
     if (_profileUser) {
         _profileUser.telegram_session = ssVal;
         if (phone) _profileUser.telegram_phone = phone;
-        
-        // Update status display without full reload
-        const hasTelegram = !!_profileUser.telegram_phone || !!_profileUser.telegram_session;
-        if (hasTelegram) {
-            document.getElementById('pf-tg-status').innerHTML = `
-              <div style="display:flex;align-items:center;gap:10px">
-                <span style="font-size:22px">✅</span>
-                <div>
-                  ${_profileUser.telegram_phone ? `<div style="font-size:14px;font-weight:500">${escapeHtmlSys(_profileUser.telegram_phone)}</div>` : ''}
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Telegram account linked</div>
-                  ${_profileUser.telegram_session ? `<div style="font-size:10px;color:var(--text-muted);margin-top:4px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:300px">Session: ${_profileUser.telegram_session.substring(0, 40)}…</div>` : ''}
-                </div>
-              </div>`;
-        }
     }
-    
-    // Clear form after 2 seconds
-    setTimeout(() => { document.getElementById('pf-ss-value').value = ''; }, 2000);
+    // Refresh the live profile display
+    loadTgProfile();
+    if (_profileUser?.role === 'admin') loadTgChannels();
+    setTimeout(() => {
+        msgEl.textContent = '';
+        const ssEl = document.getElementById('pf-ss-value');
+        if (ssEl) ssEl.value = '';
+    }, 2500);
 }
 
 // ── Injected styles ───────────────────────────────────────────────────────────

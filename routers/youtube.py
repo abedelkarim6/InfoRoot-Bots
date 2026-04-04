@@ -3,6 +3,7 @@ YouTube Monitor API router.
 All endpoints under /api/youtube/...
 """
 
+import asyncio
 import re
 import logging
 from fastapi import APIRouter, Request, Query
@@ -22,6 +23,31 @@ from youtube_monitor.worker import process_pending_queue, process_queue_item, DE
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
+
+
+def _get_yt_user_source_filter(request: Request):
+    """Return (yt_ch_ids, kw_db_ids) scoped to the current user.
+
+    Returns (None, None) for admin → no filter (global view).
+    Returns ([], []) for unauthenticated → see nothing.
+    Returns ([youtube_channel_id_strings], [keyword_db_int_ids]) for regular users.
+    """
+    if is_admin_request(request):
+        return None, None
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return [], []
+    from utils.database import get_db
+    inheritances = get_db().get_user_yt_inheritances(user_id)
+    ch_db_ids = [i['source_id'] for i in inheritances if i['source_type'] == 'channel']
+    kw_db_ids = [i['source_id'] for i in inheritances if i['source_type'] == 'keyword']
+    # Resolve integer DB IDs → YouTube channel_id TEXT strings used in queue rows
+    yt_db = get_yt_db()
+    yt_ch_ids = []
+    if ch_db_ids:
+        ch_id_map = {ch['id']: ch['channel_id'] for ch in yt_db.get_channels()}
+        yt_ch_ids = [ch_id_map[i] for i in ch_db_ids if i in ch_id_map]
+    return yt_ch_ids, kw_db_ids
 
 
 def _get_callback_url(request: Request = None):
@@ -87,9 +113,22 @@ async def websub_notification(request: Request):
 # ── System Overview ───────────────────────────────────────────────
 
 @router.get("/overview")
-async def youtube_overview():
-    db = get_yt_db()
-    return {"status": "ok", **db.get_system_overview()}
+async def youtube_overview(request: Request):
+    yt_db = get_yt_db()
+    if is_admin_request(request):
+        return {"status": "ok", **yt_db.get_system_overview()}
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return {"status": "ok", **yt_db.get_system_overview(
+            allowed_channel_db_ids=[], allowed_keyword_db_ids=[]
+        )}
+    from utils.database import get_db
+    inheritances = get_db().get_user_yt_inheritances(user_id)
+    ch_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'channel'}
+    kw_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'keyword'}
+    return {"status": "ok", **yt_db.get_system_overview(
+        allowed_channel_db_ids=ch_ids, allowed_keyword_db_ids=kw_ids
+    )}
 
 
 # ── Channels ─────────────────────────────────────────────────────
@@ -488,6 +527,7 @@ async def save_default_targets(request: Request):
 
 @router.get("/videos")
 async def get_videos_unified(
+    request: Request,
     status: str = Query(None),
     channel: str = Query(None),
     source: str = Query(None),
@@ -497,11 +537,13 @@ async def get_videos_unified(
     date_to: str = Query(None),
 ):
     db = get_yt_db()
-    stats = db.get_queue_stats()
+    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
+    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
     result = db.get_videos_unified(
         limit=limit, offset=offset, status_filter=status,
         channel_filter=channel, source_filter=source,
         date_from=date_from, date_to=date_to,
+        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids,
     )
     return {"status": "ok", "stats": stats, "items": result["items"], "total": result["total"]}
 
@@ -509,10 +551,11 @@ async def get_videos_unified(
 # ── Queue ────────────────────────────────────────────────────────
 
 @router.get("/queue")
-async def get_queue():
+async def get_queue(request: Request):
     db = get_yt_db()
-    stats = db.get_queue_stats()
-    items = db.get_queue_items(limit=200)
+    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
+    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
+    items = db.get_queue_items(limit=200, yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
     return {"status": "ok", "stats": stats, "items": items}
 
 
@@ -551,10 +594,22 @@ async def process_single_queue_item(request: Request):
         if item['status'] == 'failed':
             db.retry_queue_item(queue_id)
             item = db.get_queue_item_by_id(queue_id)
-        success = await process_queue_item(item)
+        success = await asyncio.wait_for(process_queue_item(item), timeout=200)
         return {"status": "ok", "success": success}
+    except asyncio.TimeoutError:
+        db.update_queue_status(queue_id, 'failed', error_log='Processing timed out (200s)')
+        return {"status": "error", "message": "Processing timed out — item marked failed, you can retry"}
     except Exception as e:
+        db.update_queue_status(queue_id, 'failed', error_log=str(e))
         return {"status": "error", "message": str(e)}
+
+
+@router.post("/queue/reset-stuck")
+async def reset_stuck_queue_items():
+    """Force all stuck 'processing' items to 'failed' so they can be retried."""
+    db = get_yt_db()
+    count = db.reset_all_processing_to_failed()
+    return {"status": "ok", "reset": count}
 
 
 @router.get("/queue/{queue_id}")
@@ -585,6 +640,7 @@ async def clear_queue():
 
 @router.get("/summaries")
 async def get_summaries(
+    request: Request,
     channel_name: str = Query(None),
     transcript_source: str = Query(None),
     telegram_sent: str = Query(None),
@@ -593,10 +649,12 @@ async def get_summaries(
     limit: int = Query(100),
 ):
     db = get_yt_db()
+    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
     summaries = db.get_summaries(
         limit=limit, channel_name=channel_name,
         transcript_source=transcript_source, telegram_sent=telegram_sent,
         date_from=date_from, date_to=date_to,
+        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids,
     )
     return {"status": "ok", "summaries": summaries}
 

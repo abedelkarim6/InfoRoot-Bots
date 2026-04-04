@@ -85,12 +85,24 @@ async def _yt_telegram_send(target: str, text: str):
     )
     try:
         await client.connect()
-        await client.send_message(target, text, parse_mode='md')
+        # Split into ≤4096-char chunks so long summaries don't get silently dropped
+        chunk_size = 4096
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        for chunk in chunks:
+            try:
+                await client.send_message(target, chunk, parse_mode='md')
+            except Exception as md_err:
+                # Markdown parse error — retry as plain text
+                logger.warning(f"[YT-TG] Markdown send failed ({md_err}), retrying as plain text")
+                await client.send_message(target, chunk, parse_mode=None)
+        logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")
     finally:
         await client.disconnect()
 
+_gemini_cfg = _cfg.get("gemini", {})
 init_worker(
-    youtube_gemini_api_key=_yt_cfg.get("gemini_api_key", ""),
+    gemini_project=_yt_cfg.get("gemini_project", "") or _gemini_cfg.get("project", ""),
+    gemini_location=_yt_cfg.get("gemini_location", "") or _gemini_cfg.get("location", "us-central1"),
     youtube_data_api_key=_yt_cfg.get("data_api_key", ""),
     telegram_send_fn=_yt_telegram_send,
 )
@@ -164,14 +176,25 @@ async def lifespan(app):
     yt_scheduler.add_job(_purge_recycle_bin, IntervalTrigger(hours=12),
                          id='recycle_bin_purge', replace_existing=True)
 
+    # Chatbot suggestion refresh — runs once at startup, then every hour
+    from chatbot.service import refresh_suggestions as _refresh_suggestions
+
+    async def _refresh_suggestions_job():
+        try:
+            await _refresh_suggestions(db)
+            logger.info("[CHATBOT] Suggestions refreshed")
+        except Exception as e:
+            logger.warning(f"[CHATBOT] Suggestion refresh failed: {e}")
+
+    yt_scheduler.add_job(_refresh_suggestions_job, IntervalTrigger(hours=1),
+                         id='chatbot_suggestions', replace_existing=True)
+
     yt_scheduler.start()
     logger.info("[YT-SCHEDULER] YouTube auto-processing scheduler started")
 
-    # Pre-generate chatbot suggestions so they're cached for the first visitor
+    # Warm the suggestion cache immediately at startup (non-blocking)
     import asyncio
-    from chatbot.service import generate_suggestions as _gen_suggestions
-    asyncio.create_task(_gen_suggestions(db))
-    logger.info("[CHATBOT] Suggestion pre-generation started in background")
+    asyncio.create_task(_refresh_suggestions_job())
 
     yield
 
@@ -231,6 +254,13 @@ def register_page():
 def main_page():
     return FileResponse("static/index.html")
 
+@app.get("/api/warnings")
+def get_warnings(request: Request):
+    """Return all system dependency warnings (orphaned prompts, orphaned collections)."""
+    db = get_db()
+    return {"warnings": db.get_all_dependency_warnings()}
+
+
 @app.get("/api/config")
 def get_config(request: Request):
     db = get_db()
@@ -244,5 +274,5 @@ def get_config(request: Request):
     return {
         'system': {'enabled': db.get_system_enabled()},
         'bots': bots,
-        'collections': db.get_all_collections(),
+        'collections': db.get_user_collections(user_id),
     }
