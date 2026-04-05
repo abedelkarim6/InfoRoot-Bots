@@ -6,6 +6,7 @@ Uses PostgreSQL via psycopg2.
 import json
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from typing import List
 
@@ -41,26 +42,45 @@ class Database:
              "postgresql://user:password@localhost:5432/botdb"
         """
         self.dsn = dsn
-        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=dsn)
-        # Keep self.connection for backwards compat (commit calls throughout the class)
-        self.connection = None
+        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=20, dsn=dsn)
+        self._local = threading.local()
         self._create_tables()
 
     def _connect(self):
         """Fallback: only used if pool is unavailable."""
-        self.connection = psycopg2.connect(self.dsn)
-        self.connection.autocommit = False
+        conn = psycopg2.connect(self.dsn)
+        conn.autocommit = False
+        self._local.connection = conn
+
+    @property
+    def connection(self):
+        return getattr(self._local, 'connection', None)
+
+    @connection.setter
+    def connection(self, value):
+        self._local.connection = value
 
     def _get_cursor(self):
-        # Get a fresh connection from the pool each time — never holds an idle connection
-        if self.connection is not None:
+        # Return the existing per-thread connection if already open; otherwise get a new one.
+        conn = getattr(self._local, 'connection', None)
+        if conn is None or conn.closed:
+            conn = self.pool.getconn()
+            conn.autocommit = False
+            self._local.connection = conn
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def _commit(self):
+        """Commit the current thread-local transaction and return the connection to the pool."""
+        conn = getattr(self._local, 'connection', None)
+        if conn is not None:
             try:
-                self.pool.putconn(self.connection)
-            except Exception:
-                pass
-        self.connection = self.pool.getconn()
-        self.connection.autocommit = False
-        return self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                conn.commit()
+            finally:
+                try:
+                    self.pool.putconn(conn)
+                except Exception:
+                    pass
+                self._local.connection = None
 
     def _create_tables(self):
         cursor = self._get_cursor()
@@ -489,7 +509,7 @@ class Database:
             )
         """)
 
-        self.connection.commit()
+        self._commit()
         self._migrate_comma_keywords()
 
     def _migrate_comma_keywords(self):
@@ -511,7 +531,7 @@ class Database:
                     VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
                 """, (row['bot_name'], row['category_name'], row['topic_name'], part))
             fixed += 1
-        self.connection.commit()
+        self._commit()
         if fixed:
             logger.info(f"[KEYWORDS] Migrated {fixed} comma-separated keyword rows into individual entries")
 
@@ -524,7 +544,7 @@ class Database:
             (username, password_hash)
         )
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['id']
 
     def get_user_by_username(self, username: str):
@@ -539,7 +559,7 @@ class Database:
             "UPDATE users SET telegram_phone = %s, telegram_session = %s WHERE id = %s",
             (phone, session_string, user_id)
         )
-        self.connection.commit()
+        self._commit()
 
     def get_admin_user(self):
         cursor = self._get_cursor()
@@ -556,7 +576,7 @@ class Database:
             (username, password_hash)
         )
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['id']
 
     def get_all_users(self):
@@ -590,12 +610,12 @@ class Database:
             vals.append(json.dumps(v) if isinstance(v, (dict, list)) else v)
         vals.append(user_id)
         cursor.execute(f"UPDATE users SET {set_clause} WHERE id = %s", vals)
-        self.connection.commit()
+        self._commit()
 
     def delete_user(self, user_id: int):
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
-        self.connection.commit()
+        self._commit()
 
     # ── AI Plans ──────────────────────────────────────────────────────────────
 
@@ -617,7 +637,7 @@ class Database:
             (name, description, monthly_limit)
         )
         plan_id = cursor.fetchone()['id']
-        self.connection.commit()
+        self._commit()
         return plan_id
 
     def update_ai_plan(self, plan_id: int, **fields):
@@ -629,14 +649,14 @@ class Database:
         set_clause = ', '.join(f"{k} = %s" for k in updates)
         vals = list(updates.values()) + [plan_id]
         cursor.execute(f"UPDATE ai_plans SET {set_clause} WHERE id = %s", vals)
-        self.connection.commit()
+        self._commit()
 
     def delete_ai_plan(self, plan_id: int):
         cursor = self._get_cursor()
         # Unassign from users first
         cursor.execute("UPDATE users SET ai_plan_id = NULL WHERE ai_plan_id = %s", (plan_id,))
         cursor.execute("DELETE FROM ai_plans WHERE id = %s", (plan_id,))
-        self.connection.commit()
+        self._commit()
 
     def get_plan_for_user(self, user_id: int):
         cursor = self._get_cursor()
@@ -676,7 +696,7 @@ class Database:
             RETURNING request_count
         """, (user_id, year_month))
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['request_count'] if row else 1
 
     def get_ai_usage(self, user_id: int, year_month: str = None) -> int:
@@ -764,7 +784,7 @@ class Database:
                 settings.get('include_prompts', True),
                 settings.get('keyword_pct', 100),
             ))
-        self.connection.commit()
+        self._commit()
 
     def delete_topic_settings(self, inheritance_id: int, topic_id: int):
         cursor = self._get_cursor()
@@ -772,7 +792,7 @@ class Database:
             "DELETE FROM user_bot_topic_settings WHERE inheritance_id = %s AND topic_id = %s",
             (inheritance_id, topic_id)
         )
-        self.connection.commit()
+        self._commit()
 
     def get_bot_inheritance_id(self, user_id: int, bot_id: int):
         cursor = self._get_cursor()
@@ -818,7 +838,7 @@ class Database:
                 settings.get('inherit_prompts', True),
                 settings.get('inherit_messages_db', False),
             ))
-        self.connection.commit()
+        self._commit()
 
     def delete_user_bot_inheritance(self, user_id: int, bot_id: int):
         cursor = self._get_cursor()
@@ -826,7 +846,7 @@ class Database:
             "DELETE FROM user_bot_inheritance WHERE user_id = %s AND bot_id = %s",
             (user_id, bot_id)
         )
-        self.connection.commit()
+        self._commit()
 
     # ── Collection inheritance ────────────────────────────────────────────────
 
@@ -861,7 +881,7 @@ class Database:
                 json.dumps([]),   # users set their own target channels
                 coll_data.get('enabled', True),
             ))
-        self.connection.commit()
+        self._commit()
 
     def revoke_collection_inheritance(self, user_id: int, collection_name: str):
         cursor = self._get_cursor()
@@ -873,7 +893,7 @@ class Database:
             "DELETE FROM user_collections WHERE user_id = %s AND name = %s",
             (user_id, collection_name)
         )
-        self.connection.commit()
+        self._commit()
 
     # ── Per-user owned collections ────────────────────────────────────────────
 
@@ -908,7 +928,7 @@ class Database:
             json.dumps(data.get('target_channels', [])),
             data.get('enabled', True),
         ))
-        self.connection.commit()
+        self._commit()
 
     def delete_user_collection(self, user_id: int, name: str) -> bool:
         cursor = self._get_cursor()
@@ -917,7 +937,7 @@ class Database:
             (user_id, name)
         )
         deleted = cursor.rowcount > 0
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def toggle_user_collection(self, user_id: int, name: str, enabled: bool) -> bool:
@@ -927,7 +947,7 @@ class Database:
             (enabled, user_id, name)
         )
         updated = cursor.rowcount > 0
-        self.connection.commit()
+        self._commit()
         return updated
 
     # ── YouTube inheritance ───────────────────────────────────────────────────
@@ -953,7 +973,7 @@ class Database:
             RETURNING id
         """, (user_id, source_type, source_id, source_name, continuous))
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['id']
 
     def update_yt_inheritance(self, inh_id: int, **fields):
@@ -976,12 +996,12 @@ class Database:
         cursor.execute(
             f"UPDATE user_yt_inheritance SET {', '.join(parts)} WHERE id = %s", vals
         )
-        self.connection.commit()
+        self._commit()
 
     def delete_yt_inheritance(self, inh_id: int):
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM user_yt_inheritance WHERE id = %s", (inh_id,))
-        self.connection.commit()
+        self._commit()
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1005,7 +1025,7 @@ class Database:
              bot_name, original_text, replaced_text, channel_username, collection_name)
         )
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['id']
 
     def get_messages_for_schedule(self, schedule_type: str, bot_name: str, topic_name: str):
@@ -1039,7 +1059,7 @@ class Database:
                    ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO NOTHING""",
                 (mid, bot_name, topic_name, schedule_type, status)
             )
-        self.connection.commit()
+        self._commit()
 
     def mark_as_missed(self, message_ids: List[int], schedule_type: str,
                        bot_name: str, topic_name: str):
@@ -1061,7 +1081,7 @@ class Database:
             (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str)
         )
         row = cursor.fetchone()
-        self.connection.commit()
+        self._commit()
         return row['id']
 
     def get_pending_counts(self, allowed_bot_names: list = None):
@@ -1178,7 +1198,7 @@ class Database:
         cursor.execute(
             "DELETE FROM messages WHERE collection_name IS NULL OR collection_name = ''"
         )
-        self.connection.commit()
+        self._commit()
 
     def get_recent_messages(self, limit: int = 200, offset: int = 0, allowed_bot_names: list = None,
                             topic: str = None, bot_name: str = None, days: int = None,
@@ -1479,7 +1499,7 @@ class Database:
                 VALUES (%s, %s, %s, %s, %s, NOW())
             """, (ch['id'], ch['title'], ch.get('username'),
                   ch.get('is_broadcast', False), ch.get('is_megagroup', False)))
-        self.connection.commit()
+        self._commit()
 
     def get_userbot_dialogs(self) -> dict:
         """Return cached dialogs + when they were last saved."""
@@ -1492,8 +1512,13 @@ class Database:
         return {'channels': channels, 'updated_at': updated_at}
 
     def close(self):
-        if self.connection:
-            self.connection.close()
+        conn = getattr(self._local, 'connection', None)
+        if conn:
+            try:
+                self.pool.putconn(conn)
+            except Exception:
+                pass
+            self._local.connection = None
 
     def get_stats(self):
         cursor = self._get_cursor()
@@ -1530,7 +1555,7 @@ class Database:
                             ON CONFLICT DO NOTHING
                         """, (bot_name, category_name, topic_name, kw))
                         inserted += 1
-        self.connection.commit()
+        self._commit()
         logger.info(f"[KEYWORDS] Seeded {inserted} keywords from config into DB")
 
     def migrate_config_to_db(self, config):
@@ -1635,7 +1660,7 @@ class Database:
             ))
             migrated_colls += 1
 
-        self.connection.commit()
+        self._commit()
         logger.info(f"[MIGRATE] Migrated {migrated_bots} bots, {migrated_cats} categories, "
                    f"{migrated_topics} topics, {migrated_scheds} schedules, {migrated_colls} collections")
 
@@ -1676,7 +1701,7 @@ class Database:
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (bot_name, category_name, topic_name, kw))
-        self.connection.commit()
+        self._commit()
 
     def add_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
         """Add one or more keywords (splits comma-separated input). Returns True if any were inserted."""
@@ -1691,7 +1716,7 @@ class Database:
             total_inserted += cursor.rowcount
         if total_inserted > 0:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return total_inserted > 0
 
     def delete_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
@@ -1704,7 +1729,7 @@ class Database:
         deleted = cursor.rowcount
         if deleted > 0:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted > 0
 
 
@@ -1713,7 +1738,7 @@ class Database:
     def _bump_config_version(self, cursor=None):
         """Increment the config version counter so watchers detect changes."""
         if cursor is None:
-            cursor = self.connection.cursor()
+            cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO system_settings (key, value, updated_at)
             VALUES ('config_version', '1', NOW())
@@ -1744,7 +1769,7 @@ class Database:
             VALUES (%s, %s, NOW())
             ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()
         """, (key, json.dumps(value), json.dumps(value)))
-        self.connection.commit()
+        self._commit()
 
     def get_system_enabled(self) -> bool:
         cursor = self._get_cursor()
@@ -1760,7 +1785,7 @@ class Database:
             ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()
         """, (json.dumps(enabled), json.dumps(enabled)))
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
 
     def get_global_rules(self) -> dict:
         cursor = self._get_cursor()
@@ -1776,7 +1801,7 @@ class Database:
             ON CONFLICT (key) DO UPDATE SET value = %s, updated_at = NOW()
         """, (json.dumps(rules), json.dumps(rules)))
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
 
     # --- Collections ---
     def get_all_collections(self) -> dict:
@@ -1810,7 +1835,7 @@ class Database:
             data.get('enabled', True),
         ))
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
 
     def delete_collection(self, name: str) -> bool:
         cursor = self._get_cursor()
@@ -1818,7 +1843,7 @@ class Database:
         deleted = cursor.rowcount > 0
         if deleted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def toggle_collection(self, name: str, enabled: bool) -> bool:
@@ -1827,7 +1852,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def get_bots_flat(self):
@@ -2048,7 +2073,7 @@ class Database:
             owner_id,
         ))
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
 
     def get_bot_owner_id(self, name: str):
         """Return owner_id for the given bot name, or None."""
@@ -2073,7 +2098,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def delete_bot(self, name: str) -> bool:
@@ -2082,7 +2107,7 @@ class Database:
         deleted = cursor.rowcount > 0
         if deleted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def rename_bot(self, old_name: str, new_name: str) -> bool:
@@ -2097,7 +2122,7 @@ class Database:
             cursor.execute("UPDATE summaries SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
             cursor.execute("UPDATE message_summarizations SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def _get_bot_id(self, bot_name: str):
@@ -2119,7 +2144,7 @@ class Database:
         inserted = cursor.rowcount > 0
         if inserted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return inserted
 
     def delete_category(self, bot_name: str, category_name: str) -> bool:
@@ -2131,7 +2156,7 @@ class Database:
         deleted = cursor.rowcount > 0
         if deleted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def toggle_category(self, bot_name: str, category_name: str, enabled: bool) -> bool:
@@ -2144,7 +2169,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def _get_category_id(self, bot_name: str, category_name: str):
@@ -2206,7 +2231,7 @@ class Database:
                     if ds.get('telegram_targets'):
                         logger.info(f"[DEFAULT-SCH] Applied schedule '{ds.get('name')}' to topic '{topic_name}' with targets: {ds.get('telegram_targets')}")
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return inserted
 
     def delete_topic(self, bot_name: str, category_name: str, topic_name: str) -> bool:
@@ -2218,7 +2243,7 @@ class Database:
         deleted = cursor.rowcount > 0
         if deleted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def rename_topic(self, bot_name: str, category_name: str, old_name: str, new_name: str) -> bool:
@@ -2231,7 +2256,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def rename_prompt_key_in_schedules(self, bot_name: str, old_key: str, new_key: str) -> int:
@@ -2250,7 +2275,7 @@ class Database:
         count = cursor.rowcount
         if count > 0:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return count
 
     def toggle_topic(self, bot_name: str, category_name: str, topic_name: str, enabled: bool) -> bool:
@@ -2263,7 +2288,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def set_topic_catch_all(self, bot_name: str, category_name: str, topic_name: str, value: bool) -> bool:
@@ -2276,7 +2301,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def update_topic_linked(self, bot_name: str, category_name: str, topic_name: str, linked_topics: list):
@@ -2287,7 +2312,7 @@ class Database:
         cursor.execute("UPDATE topics SET linked_topics = %s WHERE category_id = %s AND name = %s",
                        (json.dumps(linked_topics), cat_id, topic_name))
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
 
     def _get_topic_id(self, bot_name: str, category_name: str, topic_name: str):
         cat_id = self._get_category_id(bot_name, category_name)
@@ -2332,7 +2357,7 @@ class Database:
         ))
         row = cursor.fetchone()
         self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return row['id'] if row else None
 
     def update_schedule(self, schedule_id: int, schedule: dict) -> bool:
@@ -2353,7 +2378,7 @@ class Database:
         updated = cursor.rowcount > 0
         if updated:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return updated
 
     def delete_schedule(self, schedule_id: int) -> bool:
@@ -2362,7 +2387,7 @@ class Database:
         deleted = cursor.rowcount > 0
         if deleted:
             self._bump_config_version()
-        self.connection.commit()
+        self._commit()
         return deleted
 
     # --- Prompts ---
@@ -2389,13 +2414,13 @@ class Database:
             INSERT INTO prompts (bot_name, key, text) VALUES (%s, %s, %s)
             ON CONFLICT (bot_name, key) DO UPDATE SET text = EXCLUDED.text
         """, (bot_name, key, text))
-        self.connection.commit()
+        self._commit()
 
     def delete_prompt(self, bot_name: str, key: str) -> bool:
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s", (bot_name, key))
         deleted = cursor.rowcount > 0
-        self.connection.commit()
+        self._commit()
         return deleted
 
     # ── Dependency checks ────────────────────────────────────────────────────
@@ -2532,7 +2557,7 @@ class Database:
             INSERT INTO recycle_bin (entity_type, entity_name, entity_data, owner_id)
             VALUES (%s, %s, %s, %s)
         """, (entity_type, entity_name, json.dumps(entity_data), owner_id))
-        self.connection.commit()
+        self._commit()
 
     def recycle_bin_list(self, owner_id: int = None) -> list:
         """Return recycle bin items. Admin (owner_id=None) sees all; users see only their own."""
@@ -2567,7 +2592,7 @@ class Database:
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM recycle_bin WHERE id = %s", (item_id,))
         deleted = cursor.rowcount > 0
-        self.connection.commit()
+        self._commit()
         return deleted
 
     def recycle_bin_purge(self, days: int = 5) -> int:
@@ -2578,7 +2603,7 @@ class Database:
             (days,)
         )
         count = cursor.rowcount
-        self.connection.commit()
+        self._commit()
         return count
 
     def recycle_bin_restore_bot(self, data: dict):
