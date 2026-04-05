@@ -367,3 +367,94 @@ async def test_receive(request: Request, data: dict = Body(...)):
         await client.disconnect()
         logger.error(f"[TG-TEST-RECV] {e}")
         return {"status": "error", "message": str(e)}
+
+
+# ── Summary generator tester ──────────────────────────────────────────────────
+
+@router.post("/tester/summary/generate")
+async def tester_generate_summary(request: Request, data: dict = Body(...)):
+    """Test summary generation for a bot/topic/schedule without sending to Telegram."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+
+    bot_name      = (data.get("bot_name")      or "").strip()
+    topic_name    = (data.get("topic_name")     or "").strip()
+    schedule_type = (data.get("schedule_type")  or "").strip()
+
+    if not all([bot_name, topic_name, schedule_type]):
+        return {"status": "error", "message": "Missing bot_name, topic_name or schedule_type"}
+
+    from utils.database import get_db
+    from utils.helpers import load_config
+
+    db  = get_db()
+    cfg = load_config()
+
+    # Build LLM client
+    try:
+        if cfg.get("gemini"):
+            from utils.gemini_client import GeminiClient
+            llm = GeminiClient(
+                project=cfg["gemini"]["project"],
+                location=cfg["gemini"].get("location", "us-central1"),
+                model=cfg["gemini"].get("model", "gemini-2.5-flash"),
+            )
+        else:
+            from utils.openai_client import OpenAIClient
+            oa = cfg["openai"]
+            llm = OpenAIClient(
+                api_key=oa["api_key"],
+                model=oa["model"],
+                max_tokens=oa["max_tokens"],
+                temperature=oa["temperature"],
+            )
+    except Exception as e:
+        return {"status": "error", "message": str(e), "stage": "init"}
+
+    # Fetch pending messages
+    try:
+        messages = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
+        topic_messages = [
+            m for m in messages
+            if topic_name in [t.strip() for t in (m.get("topics") or "").split(",")]
+        ]
+    except Exception as e:
+        return {"status": "error", "message": str(e), "stage": "fetch"}
+
+    if not topic_messages:
+        return {
+            "status": "ok",
+            "warning": "No pending messages found for this combination",
+            "message_count": 0,
+        }
+
+    # Resolve prompt_key from schedule config
+    try:
+        bots_cfg  = db.get_all_bots_config()
+        prompt_key = "default"
+        for cat in bots_cfg.get(bot_name, {}).get("categories", {}).values():
+            topic_cfg = cat.get("topics", {}).get(topic_name)
+            if topic_cfg:
+                for sched in topic_cfg.get("schedules", []):
+                    if sched.get("type") == schedule_type:
+                        prompt_key = sched.get("prompt_key") or "default"
+                        break
+    except Exception:
+        prompt_key = "default"
+
+    # Generate
+    try:
+        from utils.prompts import get_summary_prompt
+        texts  = [m["text"] for m in topic_messages]
+        prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+        summary = llm.generate_summary(prompt)
+        return {
+            "status": "ok",
+            "summary": summary,
+            "message_count": len(topic_messages),
+            "prompt_key": prompt_key,
+        }
+    except Exception as e:
+        logger.error(f"[TESTER-SUMMARY] {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "stage": "generate"}

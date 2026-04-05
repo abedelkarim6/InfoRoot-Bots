@@ -131,11 +131,12 @@ _ITEM_TIMEOUT_SECS = 180
 def _fetch_video_metadata(video_id: str) -> dict:
     """Fetch video snippet from YouTube Data API for metadata fallback."""
     from googleapiclient.discovery import build
+    from youtube_monitor import yt_memory_cache
     api_key = _youtube_data_api_key
     if not api_key:
         logger.warning("[YT-WORKER] youtube.data_api_key not set — cannot fetch metadata")
         return {}
-    youtube = build('youtube', 'v3', developerKey=api_key)
+    youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
     resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
     items = resp.get('items', [])
     if items:

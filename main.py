@@ -711,7 +711,7 @@ async def schedule_summaries():
     if SCHEDULER and SCHEDULER.running:
         SCHEDULER.remove_all_jobs()
     else:
-        SCHEDULER = AsyncIOScheduler()
+        SCHEDULER = AsyncIOScheduler(job_defaults={'misfire_grace_time': 60})
         SCHEDULER.start()
 
     bots_cfg = db.get_all_bots_config()

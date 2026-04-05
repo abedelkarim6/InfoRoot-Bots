@@ -35,7 +35,8 @@ def _fetch_video_info(video_id: str) -> dict:
         return {"video_id": video_id, "title": video_id, "channel_name": "", "thumbnail": ""}
     try:
         from googleapiclient.discovery import build
-        youtube = build('youtube', 'v3', developerKey=api_key)
+        from youtube_monitor import yt_memory_cache
+        youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
         resp = youtube.videos().list(part='snippet', id=video_id).execute()
         items = resp.get('items', [])
         if items:

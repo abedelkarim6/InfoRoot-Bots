@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.discovery import build
 
+from youtube_monitor import yt_memory_cache
 from youtube_monitor.db import get_yt_db
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _parse_duration(iso_duration: str) -> int:
 def _build_youtube_service():
     if not _youtube_data_api_key:
         raise RuntimeError("youtube.data_api_key not set in config.yaml")
-    return build('youtube', 'v3', developerKey=_youtube_data_api_key)
+    return build('youtube', 'v3', developerKey=_youtube_data_api_key, cache=yt_memory_cache)
 
 
 def run_keyword_search(keyword_config: dict, global_blocked_ids: set = None) -> int:
