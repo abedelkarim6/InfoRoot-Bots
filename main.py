@@ -381,12 +381,13 @@ def _compute_window_start(job_data) -> datetime.datetime:
             return window_start
 
         elif schedule_type == 'hourly':
-            # Every hour at :MM
+            # Every hour at :MM — window_start = previous fire = this hour's :MM minus 1 hour
             target_m = int(job_data.get('sch_minute') or 0)
             candidate = now.replace(minute=target_m, second=0, microsecond=0)
             if candidate > now:
                 candidate -= datetime.timedelta(hours=1)
-            return candidate
+            # candidate is the current fire time; go back one period to get the previous fire
+            return candidate - datetime.timedelta(hours=1)
 
         elif schedule_type == 'daily':
             target_h = int(job_data.get('sch_hour') or 0)
@@ -394,7 +395,8 @@ def _compute_window_start(job_data) -> datetime.datetime:
             candidate = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
             if candidate > now:
                 candidate -= datetime.timedelta(days=1)
-            return candidate
+            # candidate is the current fire time; go back one period to get the previous fire
+            return candidate - datetime.timedelta(days=1)
 
         elif schedule_type == 'minute':
             # Every N minutes — floor current minutes to nearest N
