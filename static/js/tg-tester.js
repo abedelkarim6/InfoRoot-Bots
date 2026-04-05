@@ -13,6 +13,7 @@ function tgTesterInit() {
         <div class="tgt-tabs" style="display:flex;gap:0;border-bottom:2px solid var(--border-color);margin-bottom:4px">
             <button class="tgt-tab tgt-tab--active" data-tab="telegram" onclick="tgTesterSwitchTab('telegram')">📡 Telegram</button>
             <button class="tgt-tab" data-tab="summaries" onclick="tgTesterSwitchTab('summaries')">📝 Summaries</button>
+            <button class="tgt-tab" data-tab="manual" onclick="tgTesterSwitchTab('manual')">✏️ Manual Test</button>
         </div>
 
         <!-- ── Telegram tab ── -->
@@ -80,6 +81,80 @@ function tgTesterInit() {
                 </div>
                 <div class="card-body">
                     <pre id="tgt-logs" style="margin:0;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:300px;overflow-y:auto"></pre>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ── Manual Test tab ── -->
+        <div id="tgt-panel-manual" class="tgt-panel" style="display:none;flex-direction:column;gap:16px">
+
+            <!-- Step 1: Messages -->
+            <div class="card">
+                <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                    <span style="font-weight:600">1️⃣ Messages</span>
+                    <span style="font-size:12px;color:var(--color-muted)" id="tgt-man-msg-count">0 message(s)</span>
+                </div>
+                <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+                    <div style="display:flex;gap:8px;align-items:flex-end">
+                        <textarea class="input" id="tgt-man-msg-input" rows="3"
+                            style="flex:1;resize:vertical;font-size:13px;line-height:1.5"
+                            placeholder="Type a message here and click Add… (Ctrl+Enter to add)"
+                            onkeydown="if(event.ctrlKey&&event.key==='Enter'){event.preventDefault();tgManAddMessage();}"></textarea>
+                        <button class="btn btn-secondary" style="align-self:flex-end" onclick="tgManAddMessage()">+ Add</button>
+                    </div>
+                    <div id="tgt-man-msg-list" style="display:flex;flex-direction:column;gap:6px"></div>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn btn-secondary btn-sm" onclick="tgManClearMessages()">✕ Clear all</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 2: Summary config -->
+            <div class="card">
+                <div class="card-header"><span style="font-weight:600">2️⃣ Summary Config</span></div>
+                <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+                        <div style="flex:1;min-width:140px">
+                            <label class="form-label">Bot <span style="color:var(--color-muted);font-weight:400">(optional)</span></label>
+                            <select class="select" id="tgt-man-bot" onchange="tgManBotChanged()">
+                                <option value="">— none / manual —</option>
+                            </select>
+                        </div>
+                        <div style="flex:1;min-width:140px">
+                            <label class="form-label">Topic <span style="color:var(--color-muted);font-weight:400">(optional)</span></label>
+                            <select class="select" id="tgt-man-topic" onchange="tgManTopicChanged()">
+                                <option value="">— none —</option>
+                            </select>
+                        </div>
+                        <div style="flex:1;min-width:130px">
+                            <label class="form-label">Prompt key</label>
+                            <input class="input" id="tgt-man-prompt-key" value="default" placeholder="default" />
+                        </div>
+                        <button class="btn btn-primary" onclick="tgManGenerate()">▶ Generate Summary</button>
+                    </div>
+                    <div id="tgt-man-gen-status" style="display:none"></div>
+                </div>
+            </div>
+
+            <!-- Step 3: Result + Send -->
+            <div class="card" id="tgt-man-result-card" style="display:none">
+                <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                    <span style="font-weight:600">3️⃣ Summary Result</span>
+                    <span style="font-size:11px;color:var(--color-muted)" id="tgt-man-result-meta"></span>
+                </div>
+                <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+                    <textarea class="input" id="tgt-man-result-text" rows="8"
+                        style="resize:vertical;font-size:13px;line-height:1.6;white-space:pre-wrap"
+                        placeholder="Generated summary will appear here…"></textarea>
+                    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+                        <div style="flex:1;min-width:180px">
+                            <label class="form-label">Send to channel / user</label>
+                            <input class="input" id="tgt-man-send-target" placeholder="@channel or -100xxxx" />
+                        </div>
+                        <button class="btn btn-primary" onclick="tgManSend()">📤 Send to Telegram</button>
+                    </div>
+                    <div id="tgt-man-send-status" style="display:none"></div>
                 </div>
             </div>
 
@@ -159,6 +234,7 @@ function tgTesterInit() {
     }
 
     tgSumLoadBots();
+    _tgtManRefreshMsgList();
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
@@ -272,10 +348,18 @@ async function tgSumLoadBots() {
     if (res.status !== 'ok') return;
     _tgtBotsConfig = res.bots || {};
 
-    const botSel = document.getElementById('tgt-sum-bot');
-    if (!botSel) return;
-    botSel.innerHTML = '<option value="">— select bot —</option>' +
+    const opts = '<option value="">— select bot —</option>' +
         Object.keys(_tgtBotsConfig).map(b => `<option value="${escapeHtmlSys(b)}">${escapeHtmlSys(b)}</option>`).join('');
+
+    const botSel = document.getElementById('tgt-sum-bot');
+    if (botSel) botSel.innerHTML = opts;
+
+    // Also populate manual-test bot selector
+    const manBotSel = document.getElementById('tgt-man-bot');
+    if (manBotSel) {
+        manBotSel.innerHTML = '<option value="">— none / manual —</option>' +
+            Object.keys(_tgtBotsConfig).map(b => `<option value="${escapeHtmlSys(b)}">${escapeHtmlSys(b)}</option>`).join('');
+    }
 }
 
 function tgSumBotChanged() {
@@ -364,6 +448,154 @@ async function tgSumGenerate() {
             <span style="color:var(--color-success);font-weight:600">✔ Generated successfully</span>
         </div>
         <pre style="background:var(--bg-secondary,#f8f9fa);padding:12px;border-radius:6px;font-size:13px;line-height:1.6;white-space:pre-wrap;margin:0;max-height:400px;overflow-y:auto">${escapeHtmlSys(res.summary)}</pre>`;
+}
+
+// ── Manual Test tab ──────────────────────────────────────────────────────────
+
+let _tgtManMessages = [];
+
+function _tgtManRefreshMsgList() {
+    const listEl  = document.getElementById('tgt-man-msg-list');
+    const countEl = document.getElementById('tgt-man-msg-count');
+    if (!listEl) return;
+
+    countEl.textContent = `${_tgtManMessages.length} message(s)`;
+
+    if (!_tgtManMessages.length) {
+        listEl.innerHTML = '<span class="text-muted" style="font-size:12px">No messages added yet.</span>';
+        return;
+    }
+
+    listEl.innerHTML = _tgtManMessages.map((txt, i) => `
+        <div style="display:flex;gap:8px;align-items:flex-start;background:var(--bg-secondary,#f8f9fa);
+                    border-radius:6px;padding:8px 10px;font-size:12px;line-height:1.5">
+            <span style="color:var(--color-muted);min-width:22px;padding-top:1px">#${i + 1}</span>
+            <span style="flex:1;white-space:pre-wrap;word-break:break-word">${escapeHtmlSys(txt)}</span>
+            <button onclick="tgManRemoveMessage(${i})"
+                style="background:none;border:none;cursor:pointer;color:var(--color-muted);font-size:14px;padding:0 2px;line-height:1"
+                title="Remove">✕</button>
+        </div>`).join('');
+}
+
+function tgManAddMessage() {
+    const input = document.getElementById('tgt-man-msg-input');
+    const txt = (input.value || '').trim();
+    if (!txt) return;
+    _tgtManMessages.push(txt);
+    input.value = '';
+    input.focus();
+    _tgtManRefreshMsgList();
+}
+
+function tgManRemoveMessage(idx) {
+    _tgtManMessages.splice(idx, 1);
+    _tgtManRefreshMsgList();
+}
+
+function tgManClearMessages() {
+    _tgtManMessages = [];
+    _tgtManRefreshMsgList();
+}
+
+function tgManBotChanged() {
+    const botName  = document.getElementById('tgt-man-bot').value;
+    const topicSel = document.getElementById('tgt-man-topic');
+    topicSel.innerHTML = '<option value="">— none —</option>';
+    document.getElementById('tgt-man-prompt-key').value = 'default';
+
+    if (!botName || !_tgtBotsConfig) return;
+    const bot    = _tgtBotsConfig[botName];
+    const topics = new Set();
+    for (const cat of Object.values(bot.categories || {}))
+        for (const tName of Object.keys(cat.topics || {}))
+            topics.add(tName);
+
+    topicSel.innerHTML = '<option value="">— none —</option>' +
+        [...topics].map(t => `<option value="${escapeHtmlSys(t)}">${escapeHtmlSys(t)}</option>`).join('');
+}
+
+function tgManTopicChanged() {
+    const botName   = document.getElementById('tgt-man-bot').value;
+    const topicName = document.getElementById('tgt-man-topic').value;
+    if (!botName || !topicName || !_tgtBotsConfig) return;
+
+    // Auto-fill first prompt_key found for this bot/topic
+    const bot = _tgtBotsConfig[botName];
+    for (const cat of Object.values(bot.categories || {})) {
+        const topicCfg = (cat.topics || {})[topicName];
+        if (topicCfg) {
+            const firstKey = ((topicCfg.schedules || [])[0] || {}).prompt_key;
+            if (firstKey) document.getElementById('tgt-man-prompt-key').value = firstKey;
+            break;
+        }
+    }
+}
+
+async function tgManGenerate() {
+    const statusEl = document.getElementById('tgt-man-gen-status');
+    const resultCard = document.getElementById('tgt-man-result-card');
+
+    if (!_tgtManMessages.length) {
+        statusEl.style.display = '';
+        statusEl.innerHTML = '<span style="color:var(--color-error)">⚠ Add at least one message first.</span>';
+        return;
+    }
+
+    const bot_name   = document.getElementById('tgt-man-bot').value;
+    const topic_name = document.getElementById('tgt-man-topic').value;
+    const prompt_key = (document.getElementById('tgt-man-prompt-key').value || 'default').trim();
+
+    statusEl.style.display = '';
+    statusEl.innerHTML = '<span class="text-muted">Generating… this may take a few seconds</span>';
+    resultCard.style.display = 'none';
+
+    const res = await api('/api/telegram/tester/summary/manual', {
+        texts: _tgtManMessages,
+        bot_name,
+        topic_name,
+        prompt_key,
+    });
+
+    if (res.status === 'error') {
+        const stage = res.stage ? ` [${escapeHtmlSys(res.stage)}]` : '';
+        statusEl.innerHTML = `<span style="color:var(--color-error)">✘ ${escapeHtmlSys(res.message || 'Generation failed')}${stage}</span>`;
+        return;
+    }
+
+    statusEl.innerHTML = `<span style="color:var(--color-success)">✔ Generated from ${res.message_count} message(s) · prompt: <strong>${escapeHtmlSys(res.prompt_key)}</strong></span>`;
+
+    document.getElementById('tgt-man-result-text').value  = res.summary || '';
+    document.getElementById('tgt-man-result-meta').textContent = `${res.message_count} msg(s) · key: ${res.prompt_key}`;
+    document.getElementById('tgt-man-send-status').style.display = 'none';
+    resultCard.style.display = '';
+}
+
+async function tgManSend() {
+    const sendStatusEl = document.getElementById('tgt-man-send-status');
+    const target  = (document.getElementById('tgt-man-send-target').value || '').trim();
+    const message = (document.getElementById('tgt-man-result-text').value  || '').trim();
+
+    if (!target) {
+        sendStatusEl.style.display = '';
+        sendStatusEl.innerHTML = '<span style="color:var(--color-error)">⚠ Enter a target channel.</span>';
+        return;
+    }
+    if (!message) {
+        sendStatusEl.style.display = '';
+        sendStatusEl.innerHTML = '<span style="color:var(--color-error)">⚠ Summary is empty.</span>';
+        return;
+    }
+
+    sendStatusEl.style.display = '';
+    sendStatusEl.innerHTML = '<span class="text-muted">Sending…</span>';
+
+    const res = await api('/api/telegram/tester/summary/send', { target, message });
+
+    if (res.status === 'ok') {
+        sendStatusEl.innerHTML = `<span style="color:var(--color-success)">✔ ${escapeHtmlSys(res.message)}</span>`;
+    } else {
+        sendStatusEl.innerHTML = `<span style="color:var(--color-error)">✘ ${escapeHtmlSys(res.message || 'Send failed')}</span>`;
+    }
 }
 
 // ── Recent summaries ──────────────────────────────────────────────────────────

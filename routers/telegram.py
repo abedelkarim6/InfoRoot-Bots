@@ -371,7 +371,7 @@ async def test_receive(request: Request, data: dict = Body(...)):
 
 # ── Summary generator tester ──────────────────────────────────────────────────
 
-@router.post("/tester/summary/generate")
+@router.post("/telegram/tester/summary/generate")
 async def tester_generate_summary(request: Request, data: dict = Body(...)):
     """Test summary generation for a bot/topic/schedule without sending to Telegram."""
     from routers.auth import is_admin_request
@@ -458,3 +458,102 @@ async def tester_generate_summary(request: Request, data: dict = Body(...)):
     except Exception as e:
         logger.error(f"[TESTER-SUMMARY] {e}", exc_info=True)
         return {"status": "error", "message": str(e), "stage": "generate"}
+
+
+# ── Manual summary tester ─────────────────────────────────────────────────────
+
+@router.post("/telegram/tester/summary/manual")
+async def tester_manual_summary(request: Request, data: dict = Body(...)):
+    """Generate a summary from manually provided message texts (no DB reads)."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+
+    texts      = data.get("texts") or []
+    bot_name   = (data.get("bot_name")   or "").strip()
+    topic_name = (data.get("topic_name") or "").strip()
+    prompt_key = (data.get("prompt_key") or "default").strip()
+
+    if not texts or not any(t.strip() for t in texts):
+        return {"status": "error", "message": "No message texts provided"}
+
+    texts = [t for t in texts if t.strip()]
+
+    from utils.helpers import load_config
+    from utils.database import get_db
+    cfg = load_config()
+
+    # Build LLM client
+    try:
+        if cfg.get("gemini"):
+            from utils.gemini_client import GeminiClient
+            llm = GeminiClient(
+                project=cfg["gemini"]["project"],
+                location=cfg["gemini"].get("location", "us-central1"),
+                model=cfg["gemini"].get("model", "gemini-2.5-flash"),
+            )
+        else:
+            from utils.openai_client import OpenAIClient
+            oa = cfg["openai"]
+            llm = OpenAIClient(
+                api_key=oa["api_key"],
+                model=oa["model"],
+                max_tokens=oa["max_tokens"],
+                temperature=oa["temperature"],
+            )
+    except Exception as e:
+        return {"status": "error", "message": str(e), "stage": "init"}
+
+    # If bot_name/topic_name given, try to resolve a better prompt_key from config
+    if bot_name and topic_name and prompt_key == "default":
+        try:
+            db = get_db()
+            bots_cfg = db.get_all_bots_config()
+            for cat in bots_cfg.get(bot_name, {}).get("categories", {}).values():
+                topic_cfg = cat.get("topics", {}).get(topic_name)
+                if topic_cfg:
+                    first_sched = (topic_cfg.get("schedules") or [{}])[0]
+                    if first_sched.get("prompt_key"):
+                        prompt_key = first_sched["prompt_key"]
+                    break
+        except Exception:
+            pass
+
+    try:
+        from utils.prompts import get_summary_prompt
+        prompt  = get_summary_prompt(texts, bot_name or "manual", prompt_key, topic_name=topic_name or None)
+        summary = llm.generate_summary(prompt)
+        return {
+            "status": "ok",
+            "summary": summary,
+            "message_count": len(texts),
+            "prompt_key": prompt_key,
+        }
+    except Exception as e:
+        logger.error(f"[TESTER-MANUAL] {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "stage": "generate"}
+
+
+@router.post("/telegram/tester/summary/send")
+async def tester_send_summary(request: Request, data: dict = Body(...)):
+    """Send an arbitrary text to a Telegram channel via the userbot session."""
+    target  = (data.get("target")  or "").strip()
+    message = (data.get("message") or "").strip()
+    if not target:
+        return {"status": "error", "message": "Missing target channel"}
+    if not message:
+        return {"status": "error", "message": "Missing message text"}
+
+    client, err = await _get_test_client(request)
+    if err:
+        return err
+
+    try:
+        await client.send_message(target, message, parse_mode='md')
+        await client.disconnect()
+        logger.info(f"[TESTER-SEND] Sent summary to {target}")
+        return {"status": "ok", "message": f"Sent to {target}"}
+    except Exception as e:
+        await client.disconnect()
+        logger.error(f"[TESTER-SEND] {e}")
+        return {"status": "error", "message": str(e)}

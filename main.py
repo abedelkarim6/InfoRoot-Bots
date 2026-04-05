@@ -521,7 +521,7 @@ async def generate_and_send_summary(job_data):
 
                 dt_line = f"{day_name} {date_str}  ؛  {time_str}"
                 header_text = f"{header_text}\n{dt_line}"
-            message_text = f"{header_text}\n{'—'*20}\n\n{summary_text}"
+            message_text = f"{header_text}\n\n{summary_text}"
         else:
             message_text = summary_text
 
@@ -604,7 +604,7 @@ async def _send_speech_buckets(job_id: str, job_data: dict, buckets: list,
 
         for bucket_text in buckets:
             if header_text:
-                full_text = f"{header_text}\n{'—'*20}\n\n{bucket_text}"
+                full_text = f"{header_text}\n\n{bucket_text}"
             else:
                 full_text = bucket_text
 
