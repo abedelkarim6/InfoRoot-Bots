@@ -169,12 +169,26 @@ async def save_dialogs_to_db():
             entity = dialog.entity
             if not isinstance(entity, TelegramChannel):
                 continue
+            is_broadcast = bool(getattr(entity, 'broadcast', False))
+            is_megagroup = bool(getattr(entity, 'megagroup', False))
+            is_creator   = bool(getattr(entity, 'creator', False))
+            admin_rights = getattr(entity, 'admin_rights', None)
+            if is_broadcast:
+                # Broadcast channel: need post_messages admin right
+                can_post = is_creator or (
+                    admin_rights is not None and
+                    bool(getattr(admin_rights, 'post_messages', False))
+                )
+            else:
+                # Supergroup/megagroup/group: any member can send
+                can_post = True
             channels.append({
                 'id':           entity.id,
                 'title':        entity.title,
                 'username':     getattr(entity, 'username', None),
-                'is_broadcast': bool(getattr(entity, 'broadcast', False)),
-                'is_megagroup': bool(getattr(entity, 'megagroup', False)),
+                'is_broadcast': is_broadcast,
+                'is_megagroup': is_megagroup,
+                'can_post':     can_post,
             })
         db.save_userbot_dialogs(channels)
         # logger.info(f"[DIALOGS] Cached {len(channels)} dialogs to DB")

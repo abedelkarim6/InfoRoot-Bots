@@ -108,6 +108,8 @@ let globalPrompts = null;
 let modalSources = [];
 let modalTargets = [];
 let _channelValidation = {}; // { '@channel': 'ok'|'warn'|'pending' }
+let _pickerChannels = [];    // cached joined channels for the picker dropdown
+let _pickerCloser  = null;   // document click handler to close picker
 
 // ==================== Sidebar collapse & resize ====================
 function initSidebar() {
@@ -1060,6 +1062,183 @@ function removeChannelTag(channel, type) {
     renderChannelTags(type);
 }
 
+// ==================== Channel Picker Dropdown ====================
+function closeChannelPicker() {
+    const el = document.getElementById('ch-picker');
+    if (el) el.remove();
+    if (_pickerCloser) {
+        document.removeEventListener('click', _pickerCloser);
+        _pickerCloser = null;
+    }
+}
+
+async function openChannelPicker(event, type) {
+    event.stopPropagation();
+    // Toggle off if already open for the same type
+    const existing = document.getElementById('ch-picker');
+    if (existing) {
+        if (existing.dataset.pickerType === type) { closeChannelPicker(); return; }
+        closeChannelPicker();
+    }
+
+    // Lazy-load channels from API
+    if (!_pickerChannels.length) {
+        const res = await api('/api/telegram/admin_channels');
+        if (res && res.status === 'ok') _pickerChannels = res.channels || [];
+    }
+
+    const picker = document.createElement('div');
+    picker.className = 'ch-picker';
+    picker.id = 'ch-picker';
+    picker.dataset.pickerType = type;
+    _rebuildPickerContent(picker, '', type);
+    document.body.appendChild(picker);
+
+    // Position below the button
+    const btn = event.currentTarget;
+    const rect = btn.getBoundingClientRect();
+    picker.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 318)) + 'px';
+    picker.style.top  = (rect.bottom + 6) + 'px';
+
+    // Flip above if clipped at bottom
+    requestAnimationFrame(() => {
+        const pr = picker.getBoundingClientRect();
+        if (pr.bottom > window.innerHeight - 16) {
+            picker.style.top = (rect.top - pr.height - 6) + 'px';
+        }
+    });
+
+    picker.querySelector('.ch-picker-search')?.focus();
+
+    _pickerCloser = (e) => { if (!picker.contains(e.target)) closeChannelPicker(); };
+    setTimeout(() => document.addEventListener('click', _pickerCloser), 0);
+}
+
+function _pickerChannelsForType(type) {
+    return type === 'source'
+        ? _pickerChannels
+        : _pickerChannels.filter(ch => ch.can_post);
+}
+
+function _pickerCurrentArr(type) {
+    return type === 'source' ? modalSources : modalTargets;
+}
+
+function _isInArr(arr, ch) {
+    return arr.some(c => {
+        const s = c.replace(/^@/, '').toLowerCase();
+        return (ch.username && s === ch.username.toLowerCase()) || s === String(ch.id);
+    });
+}
+
+function _renderPickerItem(ch, currentArr) {
+    const display  = ch.username ? '@' + ch.username : '#' + ch.id;
+    const selected = _isInArr(currentArr, ch);
+    const icon     = ch.is_broadcast ? '📢' : '👥';
+    return `<div class="ch-picker-item${selected ? ' selected' : ''}"
+                 onclick="togglePickerChannel(${ch.id}, '${(ch.username||'').replace(/'/g,"\\'")}', event)"
+                 data-id="${ch.id}" data-username="${ch.username || ''}">
+        <div class="ch-picker-check">${selected ? '✓' : ''}</div>
+        <div class="ch-picker-info">
+            <div class="ch-picker-title">${escapeHtmlSys(ch.title)}</div>
+            <div class="ch-picker-sub">${display} ${icon}</div>
+        </div>
+    </div>`;
+}
+
+function _rebuildPickerContent(picker, query, type) {
+    const all      = _pickerChannelsForType(type);
+    const q        = (query || '').toLowerCase();
+    const filtered = q ? all.filter(ch =>
+        ch.title.toLowerCase().includes(q) ||
+        (ch.username && ch.username.toLowerCase().includes(q))
+    ) : all;
+    const arr = _pickerCurrentArr(type);
+    const label = type === 'source' ? 'all readable' : 'all writable';
+    picker.innerHTML = `
+        <div class="ch-picker-header">
+            <input class="ch-picker-search" type="text" placeholder="Search channels…"
+                   value="${escapeHtmlSys(query)}"
+                   oninput="filterChannelPicker(this.value)">
+        </div>
+        <div class="ch-picker-list">
+            ${filtered.length
+                ? filtered.map(ch => _renderPickerItem(ch, arr)).join('')
+                : '<p class="ch-picker-empty">No channels found.<br>Make sure the bot is running.</p>'}
+        </div>
+        <div class="ch-picker-footer">
+            <span>${filtered.length} channel${filtered.length !== 1 ? 's' : ''}</span>
+            <button class="btn btn-xs btn-secondary" onclick="addAllFromPicker()">Add ${label}</button>
+        </div>`;
+}
+
+function filterChannelPicker(query) {
+    const picker = document.getElementById('ch-picker');
+    if (!picker) return;
+    const type = picker.dataset.pickerType;
+    _rebuildPickerContent(picker, query, type);
+    // Re-focus search after re-render
+    const s = picker.querySelector('.ch-picker-search');
+    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+}
+
+function togglePickerChannel(id, username, event) {
+    event.stopPropagation();
+    const picker = document.getElementById('ch-picker');
+    const type   = picker ? picker.dataset.pickerType : null;
+    if (!type) return;
+
+    const arr   = _pickerCurrentArr(type);
+    const value = username ? '@' + username : String(id);
+    const ch    = { id, username };
+    const idx   = arr.findIndex(c => {
+        const s = c.replace(/^@/, '').toLowerCase();
+        return (username && s === username.toLowerCase()) || s === String(id);
+    });
+
+    if (idx >= 0) {
+        const removed = arr.splice(idx, 1)[0];
+        delete _channelValidation[removed];
+    } else {
+        arr.push(value);
+        validateChannelTag(value, type);
+    }
+    renderChannelTags(type);
+
+    // Update just this item in the picker without full re-render
+    const item      = event.currentTarget;
+    const isNow     = _isInArr(arr, ch);
+    item.classList.toggle('selected', isNow);
+    const check = item.querySelector('.ch-picker-check');
+    if (check) check.textContent = isNow ? '✓' : '';
+}
+
+function addAllFromPicker() {
+    const picker = document.getElementById('ch-picker');
+    if (!picker) return;
+    const type  = picker.dataset.pickerType;
+    const query = picker.querySelector('.ch-picker-search')?.value || '';
+    const all   = _pickerChannelsForType(type);
+    const q     = query.toLowerCase();
+    const filtered = q ? all.filter(ch =>
+        ch.title.toLowerCase().includes(q) ||
+        (ch.username && ch.username.toLowerCase().includes(q))
+    ) : all;
+    const arr = _pickerCurrentArr(type);
+
+    filtered.forEach(ch => {
+        if (!_isInArr(arr, ch)) {
+            const value = ch.username ? '@' + ch.username : String(ch.id);
+            arr.push(value);
+            validateChannelTag(value, type);
+        }
+    });
+    renderChannelTags(type);
+    _rebuildPickerContent(picker, query, type);
+    const s = picker.querySelector('.ch-picker-search');
+    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+}
+
 // ==================== Collection Modal ====================
 function showAddCollectionModal(existingName = null) {
     const existing = existingName ? globalConfig.collections[existingName] : null;
@@ -1069,10 +1248,15 @@ function showAddCollectionModal(existingName = null) {
         ? [...(existing.target_channels || (existing.target_channel ? [existing.target_channel] : []))]
         : [];
     _channelValidation = {};
+    _pickerChannels = [];
     // Pre-validate existing channels in the background
     [...modalSources, ...modalTargets].forEach(ch => {
         const type = modalSources.includes(ch) ? 'source' : 'target';
         validateChannelTag(ch, type);
+    });
+    // Preload joined channels for the picker
+    api('/api/telegram/admin_channels').then(res => {
+        if (res && res.status === 'ok') _pickerChannels = res.channels || [];
     });
 
     const modal = document.createElement('div');
@@ -1100,14 +1284,20 @@ function showAddCollectionModal(existingName = null) {
                            value="${existing ? (existing.name || '') : ''}">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Source Channels</label>
+                    <div class="form-label-row">
+                        <label class="form-label">Source Channels</label>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="openChannelPicker(event, 'source')">📋 Browse joined</button>
+                    </div>
                     <div class="tags-container" id="source-tags"></div>
-                    <small class="form-hint">Type @channel and press Enter. Userbot must be a member to receive messages.</small>
+                    <small class="form-hint">Choose from joined channels or type @channel and press Enter.</small>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Target Channels</label>
+                    <div class="form-label-row">
+                        <label class="form-label">Target Channels</label>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="openChannelPicker(event, 'target')">📋 Browse writable</button>
+                    </div>
                     <div class="tags-container" id="target-tags"></div>
-                    <small class="form-hint">Type @channel and press Enter. Userbot must be a member and have send permission.</small>
+                    <small class="form-hint">Only channels where the userbot has write access are shown in Browse.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -3365,6 +3555,7 @@ function restoreBotsPageScrollPosition() {
 window.addEventListener('beforeunload', saveBotsPageScrollPosition);
 
 function closeModal(id) {
+    closeChannelPicker();
     const modal = document.getElementById(id);
     if (modal) modal.remove();
 }

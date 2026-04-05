@@ -1733,6 +1733,128 @@ body.chat-page-active .main-content {
     margin-bottom: 6px;
 }
 
+/* ==================== Channel Picker Dropdown ==================== */
+.form-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.form-label-row .form-label {
+    margin-bottom: 0;
+}
+
+.btn-xs {
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: var(--radius-sm);
+}
+
+.ch-picker {
+    position: fixed;
+    z-index: 99999;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+    width: 310px;
+    max-height: 370px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.ch-picker-header {
+    display: flex;
+    gap: 8px;
+    padding: 10px 10px 8px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+.ch-picker-search {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    padding: 5px 10px;
+    font-size: 13px;
+    outline: none;
+    min-width: 0;
+}
+.ch-picker-search:focus {
+    border-color: var(--accent-primary);
+}
+.ch-picker-list {
+    overflow-y: auto;
+    flex: 1;
+}
+.ch-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.12s;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.ch-picker-item:hover {
+    background: rgba(255,255,255,0.06);
+}
+.ch-picker-item.selected {
+    background: rgba(59,130,246,0.1);
+}
+.ch-picker-check {
+    width: 17px;
+    height: 17px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+    color: transparent;
+    transition: all 0.12s;
+}
+.ch-picker-item.selected .ch-picker-check {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: white;
+}
+.ch-picker-info {
+    flex: 1;
+    min-width: 0;
+}
+.ch-picker-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ch-picker-sub {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+.ch-picker-empty {
+    padding: 18px 16px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+.ch-picker-footer {
+    padding: 7px 12px;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
 .collection-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);

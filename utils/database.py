@@ -171,6 +171,10 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cursor.execute("""
+                ALTER TABLE userbot_dialogs
+                ADD COLUMN IF NOT EXISTS can_post BOOLEAN DEFAULT FALSE
+            """)
 
             # Tracking generated summaries
             cursor.execute("""
@@ -1657,10 +1661,11 @@ class Database:
             cursor.execute("DELETE FROM userbot_dialogs")
             for ch in channels:
                 cursor.execute("""
-                    INSERT INTO userbot_dialogs (id, title, username, is_broadcast, is_megagroup, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    INSERT INTO userbot_dialogs (id, title, username, is_broadcast, is_megagroup, can_post, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
                 """, (ch['id'], ch['title'], ch.get('username'),
-                      ch.get('is_broadcast', False), ch.get('is_megagroup', False)))
+                      ch.get('is_broadcast', False), ch.get('is_megagroup', False),
+                      ch.get('can_post', False)))
         finally:
             self._commit()
 
