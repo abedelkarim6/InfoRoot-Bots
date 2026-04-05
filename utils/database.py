@@ -59,19 +59,20 @@ class Database:
     @connection.setter
     def connection(self, value):
         self._local.connection = value
+        if value is None:
+            self._local.depth = 0
 
     def _get_cursor(self):
-        # Get a fresh connection from the pool, discarding any that are broken/stale.
+        # If this thread already holds a connection (nested call), reuse it.
+        depth = getattr(self._local, 'depth', 0)
+        if depth > 0 and getattr(self._local, 'connection', None) is not None:
+            self._local.depth = depth + 1
+            return self._local.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Outer call — get a fresh connection from the pool, discarding stale ones.
         for attempt in range(3):
             conn = self.pool.getconn()
-            # conn.closed == 0 means psycopg2 thinks it's open, but the TCP socket
-            # may have been dropped by PostgreSQL (idle timeout, server restart, etc.).
-            # A lightweight poll() detects that without a real query.
-            if conn.closed or conn.status == psycopg2.extensions.STATUS_IN_TRANSACTION:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+            if conn.closed:
                 try:
                     self.pool.putconn(conn, close=True)
                 except Exception:
@@ -80,7 +81,6 @@ class Database:
             try:
                 conn.poll()
             except psycopg2.OperationalError:
-                # Stale/dead connection — discard it and try again
                 try:
                     self.pool.putconn(conn, close=True)
                 except Exception:
@@ -88,16 +88,26 @@ class Database:
                 continue
             conn.autocommit = False
             self._local.connection = conn
+            self._local.depth = 1
             return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        # All attempts exhausted — let pool raise PoolError naturally
+        # All health-check attempts exhausted — get one last time and let it fail naturally
         conn = self.pool.getconn()
         conn.autocommit = False
         self._local.connection = conn
+        self._local.depth = 1
         return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     def _commit(self):
-        """Commit the current thread-local transaction and return the connection to the pool."""
+        """Commit and release — but only when the outermost caller finishes (depth → 0)."""
+        depth = getattr(self._local, 'depth', 0)
+        if depth > 1:
+            # Still inside a nested call chain — just decrement and leave connection open.
+            self._local.depth = depth - 1
+            return
+        # Outermost caller: actually commit and return the connection to the pool.
         conn = getattr(self._local, 'connection', None)
+        self._local.depth = 0
+        self._local.connection = None
         if conn is not None:
             try:
                 conn.commit()
@@ -112,7 +122,6 @@ class Database:
                     self.pool.putconn(conn)
                 except Exception:
                     pass
-                self._local.connection = None
 
     def _create_tables(self):
         try:

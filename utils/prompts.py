@@ -38,6 +38,14 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_n
     else:
         template = prompt_val
 
-    final_prompt = template.format(messages=combined_news, topic_name=topic_name)
+    import string
+
+    class _SafeDict(dict):
+        def __missing__(self, key):
+            return '{' + key + '}'
+
+    final_prompt = string.Formatter().vformat(
+        template, (), _SafeDict(messages=combined_news, topic_name=topic_name)
+    )
 
     return final_prompt
