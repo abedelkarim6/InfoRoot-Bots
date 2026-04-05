@@ -274,6 +274,11 @@ class YouTubeDB:
         cursor.execute("UPDATE yt_channels SET active = %s WHERE channel_id = %s", (active, channel_id))
         self.connection.commit()
 
+    def toggle_all_channels(self, active: bool):
+        cursor = self._get_cursor()
+        cursor.execute("UPDATE yt_channels SET active = %s", (active,))
+        self.connection.commit()
+
     def delete_channel(self, channel_id: str):
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM yt_channels WHERE channel_id = %s", (channel_id,))
@@ -425,6 +430,11 @@ class YouTubeDB:
     def toggle_keyword(self, kw_id: int, active: bool):
         cursor = self._get_cursor()
         cursor.execute("UPDATE yt_keywords SET active = %s WHERE id = %s", (active, kw_id))
+        self.connection.commit()
+
+    def toggle_all_keywords(self, active: bool):
+        cursor = self._get_cursor()
+        cursor.execute("UPDATE yt_keywords SET active = %s", (active,))
         self.connection.commit()
 
     def get_keyword_by_id(self, kw_id: int):

@@ -431,34 +431,36 @@ async def generate_and_send_summary(job_data):
         # Only messages received within the schedule's interval window are eligible.
         # window_start is anchored to the PREVIOUS scheduled fire time so the window
         # is always [prev_fire_time, now], not a rolling "last N seconds".
-        window_start = _compute_window_start(job_data)
+        # 'minute' schedules accumulate all pending messages (no window cutoff).
+        if schedule_type != 'minute':
+            window_start = _compute_window_start(job_data)
 
-        in_window = []
-        expired   = []
-        for msg in topic_messages:
-            ts = msg.get('timestamp')
-            if ts:
-                # timestamp may be a string (ISO) or datetime object
-                if isinstance(ts, str):
-                    try:
-                        ts = datetime.datetime.fromisoformat(ts)
-                    except ValueError:
-                        ts = None
-                if ts and ts < window_start:
-                    expired.append(msg)
-                    continue
-            in_window.append(msg)
+            in_window = []
+            expired   = []
+            for msg in topic_messages:
+                ts = msg.get('timestamp')
+                if ts:
+                    # timestamp may be a string (ISO) or datetime object
+                    if isinstance(ts, str):
+                        try:
+                            ts = datetime.datetime.fromisoformat(ts)
+                        except ValueError:
+                            ts = None
+                    if ts and ts < window_start:
+                        expired.append(msg)
+                        continue
+                in_window.append(msg)
 
-        # Permanently mark expired messages so they are never reconsidered
-        if expired:
-            expired_ids = [m['id'] for m in expired]
-            db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
-            logger.info(f"[MISSED] {len(expired_ids)} messages outside window marked as missed | "
-                        f"Bot: {bot_name} | Topic: {topic_name} | window_start: {window_start}")
+            # Permanently mark expired messages so they are never reconsidered
+            if expired:
+                expired_ids = [m['id'] for m in expired]
+                db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
+                logger.info(f"[MISSED] {len(expired_ids)} messages outside window marked as missed | "
+                            f"Bot: {bot_name} | Topic: {topic_name} | window_start: {window_start}")
 
-        topic_messages = in_window
-        if not topic_messages:
-            return
+            topic_messages = in_window
+            if not topic_messages:
+                return
 
         # Check minimum messages requirement
         bots_cfg = db.get_all_bots_config()

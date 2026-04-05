@@ -128,6 +128,13 @@ async function loadYtChannelsData() {
     }
     html += '</div>';
     container.innerHTML = html;
+
+    // Sync master toggle: ON if all active, OFF if any inactive
+    const allActive = channels.every(c => c.active);
+    const masterToggle = document.getElementById('yt-channels-master-toggle');
+    const masterLabel = document.getElementById('yt-channels-master-label');
+    if (masterToggle) masterToggle.checked = allActive;
+    if (masterLabel) masterLabel.textContent = allActive ? 'All Active' : 'All Paused';
 }
 
 function showYtAddChannelModal() {
@@ -276,6 +283,12 @@ function _showYtChannelModal(ch) {
 async function ytToggleChannel(channelId, active) {
     await api('/api/youtube/channels/toggle', { channel_id: channelId, active });
     ytToast(active ? 'Channel enabled' : 'Channel disabled', 'info');
+}
+
+async function ytToggleAllChannels(active) {
+    await api('/api/youtube/channels/toggle-all', { active });
+    ytToast(active ? 'All channels enabled' : 'All channels disabled', 'info');
+    loadYtChannelsData();
 }
 
 async function ytDeleteChannel(channelId) {
@@ -499,6 +512,13 @@ async function loadYtKeywordsData() {
     }
     html += '</div>';
     container.innerHTML = html;
+
+    // Sync master toggle: ON if all active, OFF if any inactive
+    const allActive = keywords.every(k => k.active);
+    const masterToggle = document.getElementById('yt-trackers-master-toggle');
+    const masterLabel = document.getElementById('yt-trackers-master-label');
+    if (masterToggle) masterToggle.checked = allActive;
+    if (masterLabel) masterLabel.textContent = allActive ? 'All Active' : 'All Paused';
 }
 
 function ytFilterKeywords() {
@@ -744,6 +764,12 @@ function _kwFieldsToIntervalMinutes() {
 async function ytToggleKeyword(id, active) {
     await api('/api/youtube/keywords/toggle', { id, active });
     ytToast(active ? 'Keyword enabled' : 'Keyword disabled', 'info');
+}
+
+async function ytToggleAllKeywords(active) {
+    await api('/api/youtube/keywords/toggle-all', { active });
+    ytToast(active ? 'All trackers enabled' : 'All trackers disabled', 'info');
+    loadYtKeywordsData();
 }
 
 async function ytDeleteKeyword(id) {

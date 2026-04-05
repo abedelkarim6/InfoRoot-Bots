@@ -481,9 +481,18 @@
                     <h2>YouTube Channels</h2>
                     <p class="subtitle">WebSub-monitored channel subscriptions</p>
                 </div>
-                <button class="btn btn-primary" onclick="showYtAddChannelModal()">
-                    <span>➕</span> Add Channel
-                </button>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
+                        <span id="yt-channels-master-label">All Active</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="yt-channels-master-toggle" checked onchange="ytToggleAllChannels(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </label>
+                    <button class="btn btn-primary" onclick="showYtAddChannelModal()">
+                        <span>➕</span> Add Channel
+                    </button>
+                </div>
             </header>
 
             <!-- Blocked Keywords Section -->
@@ -516,6 +525,13 @@
                     <p class="subtitle">Keyword search configs with filtering rules</p>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
+                        <span id="yt-trackers-master-label">All Active</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="yt-trackers-master-toggle" checked onchange="ytToggleAllKeywords(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </label>
                     <input type="text" class="input" id="yt-kw-search" placeholder="Search trackers…" oninput="ytFilterKeywords()" style="width:180px;">
                     <button class="btn btn-secondary" id="yt-kw-run-selected" onclick="ytRunSelectedKeywords()" style="display:none;">▶ Run Selected (<span id="yt-kw-sel-count">0</span>)</button>
                     <button class="btn btn-secondary" onclick="ytRunAllKeywords()">▶ Run All</button>

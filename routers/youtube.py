@@ -287,6 +287,14 @@ async def toggle_channel(request: Request):
     return {"status": "ok"}
 
 
+@router.post("/channels/toggle-all")
+async def toggle_all_channels(request: Request):
+    data = await request.json()
+    db = get_yt_db()
+    db.toggle_all_channels(data.get("active", True))
+    return {"status": "ok"}
+
+
 @router.post("/channels/delete")
 async def delete_channel(request: Request):
     data = await request.json()
@@ -379,6 +387,14 @@ async def toggle_keyword(request: Request):
     data = await request.json()
     db = get_yt_db()
     db.toggle_keyword(data.get("id"), data.get("active", True))
+    return {"status": "ok"}
+
+
+@router.post("/keywords/toggle-all")
+async def toggle_all_keywords(request: Request):
+    data = await request.json()
+    db = get_yt_db()
+    db.toggle_all_keywords(data.get("active", True))
     return {"status": "ok"}
 
 
