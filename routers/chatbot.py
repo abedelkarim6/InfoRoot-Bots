@@ -18,13 +18,55 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chatbot", tags=["chatbot"])
 
 
+def _get_user_id(request: Request):
+    """Return user_id from Bearer token, or None."""
+    try:
+        from routers.auth import _get_bearer, validate_token, get_token_user_id
+        token = _get_bearer(request)
+        if not token or not validate_token(token):
+            return None
+        return get_token_user_id(token)
+    except Exception:
+        return None
+
+
+def _check_limit(request: Request):
+    """Return (allowed: bool, error_msg: str|None)."""
+    user_id = _get_user_id(request)
+    if user_id is None:
+        return True, None   # unauthenticated / legacy admin — no limit
+    try:
+        db = get_db()
+        result = db.check_ai_limit(user_id)
+        if not result["allowed"]:
+            used  = result["used"]
+            limit = result["limit"]
+            return False, f"Monthly AI request limit reached ({used}/{limit}). Your plan allows {limit} requests per month."
+        return True, None
+    except Exception as e:
+        logger.warning(f"[CHATBOT] Limit check failed: {e}")
+        return True, None   # fail open
+
+
+def _track_usage(request: Request):
+    """Increment AI request count for the authenticated user."""
+    user_id = _get_user_id(request)
+    if user_id is None:
+        return
+    try:
+        get_db().track_ai_request(user_id)
+    except Exception as e:
+        logger.warning(f"[CHATBOT] Usage tracking failed: {e}")
+
+
 @router.post("/start")
-async def chatbot_start():
-    """Create a new chatbot session."""
+async def chatbot_start(request: Request):
+    """Create a new chatbot session scoped to the authenticated user's bots."""
     try:
         db = get_db()
         yt_db = get_yt_db()
-        session_id = create_session(db, yt_db)
+        user_id = _get_user_id(request)
+        session_id = create_session(db, yt_db, user_id=user_id)
         return {"status": "ok", "session_id": session_id}
     except Exception as e:
         logger.error(f"[CHATBOT] Failed to create session: {e}")
@@ -55,8 +97,13 @@ async def chatbot_send(request: Request):
     if not session_id or not message:
         return {"status": "error", "message": "session_id and message are required"}
 
+    allowed, err = _check_limit(request)
+    if not allowed:
+        return {"status": "error", "message": err, "limit_reached": True}
+
     try:
         reply = await send_message(session_id, message, context=context)
+        _track_usage(request)
         return {"status": "ok", "reply": reply}
     except ValueError as e:
         return {"status": "error", "message": str(e)}
@@ -76,6 +123,14 @@ async def chatbot_stream(request: Request):
             yield f'data: {json.dumps({"type": "error", "message": "session_id and message are required"})}\n\n'
         return StreamingResponse(_err(), media_type="text/event-stream")
     context = data.get("context")
+
+    allowed, err = _check_limit(request)
+    if not allowed:
+        async def _limit_err():
+            yield f'data: {json.dumps({"type": "error", "message": err, "limit_reached": True})}\n\n'
+        return StreamingResponse(_limit_err(), media_type="text/event-stream")
+
+    _track_usage(request)
     return StreamingResponse(
         stream_message(session_id, message, context=context),
         media_type="text/event-stream",

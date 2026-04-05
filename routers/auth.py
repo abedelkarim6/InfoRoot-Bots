@@ -276,6 +276,8 @@ def me(request: Request):
         or db.get_owned_bots_config(user["id"])
     )
 
+    plan = db.get_plan_for_user(user["id"]) if user.get("ai_plan_id") else None
+
     return {
         "user_id": user["id"],
         "username": user["username"],
@@ -290,7 +292,35 @@ def me(request: Request):
         "telegram_session": user.get("telegram_session"),
         "created_at": str(user["created_at"]) if user.get("created_at") else None,
         "has_bot_access": has_bot_access,
+        "ai_plan": {
+            "id": plan["id"],
+            "name": plan["name"],
+            "monthly_limit": plan["monthly_limit"],
+            "description": plan.get("description", ""),
+        } if plan else None,
     }
+
+
+@router.get("/me/ai-usage")
+def me_ai_usage(request: Request):
+    """Return current month's AI usage + plan for the authenticated user."""
+    token = _get_bearer(request)
+    if not token or not validate_token(token):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    user_id = get_token_user_id(token)
+    db = get_db()
+
+    if user_id is None:
+        # Legacy admin token — no plan tracking
+        return {"has_plan": False, "used": 0, "limit": None, "remaining": None,
+                "plan_name": None, "plan_id": None, "year_month": None}
+
+    user = db.get_user_by_id(user_id)
+    if not user:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+
+    return db.get_ai_usage_with_plan(user_id)
 
 
 # ── Registration ─────────────────────────────────

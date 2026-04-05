@@ -85,7 +85,27 @@ def _load_gemini_config():
     return project, location, model_id
 
 
-def _build_team(db, yt_db):
+def _resolve_allowed_bots(db, user_id) -> list | None:
+    """Return allowed bot names for a user, or None for admin (unrestricted access).
+
+    None  → admin / unauthenticated — no restriction
+    []    → user with no bots assigned
+    [...]  → scoped list of bot names
+    """
+    if user_id is None:
+        return None  # unauthenticated / legacy admin
+    try:
+        user = db.get_user_by_id(user_id)
+        if user and user.get("role") == "admin":
+            return None  # DB admin — unrestricted
+        inheritances = db.get_user_bot_inheritances(user_id)
+        return [row["bot_name"] for row in inheritances] if inheritances else []
+    except Exception as e:
+        logger.warning(f"[CHATBOT] Could not resolve bot scope for user {user_id}: {e}")
+        return []  # fail safe — no access rather than full access
+
+
+def _build_team(db, yt_db, allowed_bot_names=None):
     """Construct an Agno Team with specialized agents."""
     project, location, model_id = _load_gemini_config()
 
@@ -103,7 +123,7 @@ def _build_team(db, yt_db):
         name="SummaryAgent",
         role="Summary analyst — fetches and analyzes AI-generated summaries of grouped topic messages, trends, and pending counts",
         model=model,
-        tools=[SummaryToolkit(db), DashboardToolkit(db)],
+        tools=[SummaryToolkit(db, allowed_bot_names=allowed_bot_names), DashboardToolkit(db, allowed_bot_names=allowed_bot_names)],
         instructions=[
             "You work with AI-generated summaries — these are digests produced after grouping multiple messages under a topic. They are NOT raw messages.",
             "ASSUME AND PROCEED: never claim you cannot filter by date — get_recent_summaries and search_summaries both accept a `days` parameter.",
@@ -122,7 +142,7 @@ def _build_team(db, yt_db):
         name="MessageAgent",
         role="Message analyst — searches raw Telegram messages by topic, source, or date; identifies missed/unclassified messages",
         model=model,
-        tools=[MessageToolkit(db)],
+        tools=[MessageToolkit(db, allowed_bot_names=allowed_bot_names)],
         instructions=[
             "You work with raw individual Telegram messages — the original content before summarization.",
             "ASSUME AND PROCEED: never ask which topic or channel to use — fetch broadly and filter from results.",
@@ -181,12 +201,13 @@ def _cleanup_old_sessions():
         logger.info(f"[CHATBOT] Cleaned up {len(expired)} expired session(s)")
 
 
-def create_session(db, yt_db) -> str:
-    """Create a new chatbot session with a fresh Team."""
+def create_session(db, yt_db, user_id=None) -> str:
+    """Create a new chatbot session with a fresh Team scoped to the user's bots."""
     _cleanup_old_sessions()
 
+    allowed_bot_names = _resolve_allowed_bots(db, user_id)
     session_id = str(uuid.uuid4())[:8]
-    team = _build_team(db, yt_db)
+    team = _build_team(db, yt_db, allowed_bot_names=allowed_bot_names)
     _sessions[session_id] = {
         "team": team,
         "messages": [],

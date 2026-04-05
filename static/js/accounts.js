@@ -2,6 +2,7 @@
 
 // ── Global state ──────────────────────────────────────────────────────────────
 let _acctData   = null;
+let _acctPlans  = [];
 let currentUser = null;
 
 // ── Bootstrap: fetch current user role on page load ──────────────────────────
@@ -95,17 +96,19 @@ async function loadAccountsData() {
         el.innerHTML = `<p style="color:var(--danger)">${data.error || data.detail}</p>`;
         return;
     }
-    _acctData = data;
+    _acctData  = data;
+    _acctPlans = data.ai_plans || [];
     renderAccounts(data, el);
 }
 
 function renderAccounts(data, container) {
-    const users       = (data.users || []).filter(u => u.role !== 'admin');
-    const allBots     = data.available_bots       || [];
-    const allChans    = data.yt_channels           || [];
-    const allKws      = data.yt_keywords           || [];
-    const cats        = data.categories            || [];
-    const allColls    = data.available_collections || [];
+    const users    = (data.users || []).filter(u => u.role !== 'admin');
+    const allBots  = data.available_bots       || [];
+    const allChans = data.yt_channels           || [];
+    const allKws   = data.yt_keywords           || [];
+    const cats     = data.categories            || [];
+    const allColls = data.available_collections || [];
+    const plans    = _acctPlans;
 
     const badge = document.getElementById('accounts-count');
     if (badge) {
@@ -113,45 +116,70 @@ function renderAccounts(data, container) {
         badge.style.display = users.length ? '' : 'none';
     }
 
-    if (!users.length) {
-        container.innerHTML = `
-          <div class="card" style="text-align:center;padding:40px 20px">
-            <div style="font-size:32px;margin-bottom:12px">👥</div>
-            <p class="text-muted">No registered users yet.</p>
-            <p class="text-muted" style="font-size:12px;margin-top:6px">
-              Users register at <a href="/register" style="color:var(--accent-primary)">/register</a>
-            </p>
-          </div>`;
-        return;
-    }
+    const usersHtml = users.length
+        ? users.map(u => renderUserCard(u, allBots, allChans, allKws, cats, allColls)).join('')
+        : `<div class="card" style="text-align:center;padding:40px 20px">
+             <div style="font-size:32px;margin-bottom:12px">👥</div>
+             <p class="text-muted">No registered users yet.</p>
+             <p class="text-muted" style="font-size:12px;margin-top:6px">
+               Users register at <a href="/register" style="color:var(--accent-primary)">/register</a>
+             </p>
+           </div>`;
 
-    container.innerHTML = users.map(u =>
-        renderUserCard(u, allBots, allChans, allKws, cats, allColls)
-    ).join('');
+    container.innerHTML = `
+<div class="acct-tab-bar">
+  <button class="acct-tab active" id="acct-tab-users-btn" onclick="switchAcctTab('users')">
+    👥 Users <span class="ac-chip" style="margin-left:4px">${users.length}</span>
+  </button>
+  <button class="acct-tab" id="acct-tab-plans-btn" onclick="switchAcctTab('plans')">
+    📋 Plans <span class="ac-chip" style="margin-left:4px">${plans.length}</span>
+  </button>
+</div>
+<div id="acct-panel-users">${usersHtml}</div>
+<div id="acct-panel-plans" style="display:none">${renderPlansTab(plans)}</div>`;
+}
+
+function switchAcctTab(tab) {
+    const usersBtn   = document.getElementById('acct-tab-users-btn');
+    const plansBtn   = document.getElementById('acct-tab-plans-btn');
+    const usersPanel = document.getElementById('acct-panel-users');
+    const plansPanel = document.getElementById('acct-panel-plans');
+    if (!usersPanel || !plansPanel) return;
+    if (tab === 'users') {
+        usersBtn.classList.add('active');   plansBtn.classList.remove('active');
+        usersPanel.style.display = '';      plansPanel.style.display = 'none';
+    } else {
+        plansBtn.classList.add('active');   usersBtn.classList.remove('active');
+        plansPanel.style.display = '';      usersPanel.style.display = 'none';
+    }
 }
 
 // ── User card ─────────────────────────────────────────────────────────────────
 function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
     const pendingYt = (u.yt_inheritances || []).filter(i => i.status === 'pending').length;
+    const planPill  = u.ai_plan_name
+        ? `<span class="ac-plan-pill ac-plan-${u.ai_plan_name.toLowerCase().replace(/\s+/g,'-')}">${escapeHtmlSys(u.ai_plan_name)}</span>`
+        : `<span class="ac-chip" style="font-style:italic">No plan</span>`;
 
     return `
-<div class="card" id="acct-card-${u.id}" style="margin-bottom:16px">
+<div class="card acct-user-card" id="acct-card-${u.id}" style="margin-bottom:12px">
 
-  <!-- ── Header ── -->
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:14px;flex-wrap:wrap">
-    <div style="display:flex;align-items:center;gap:12px">
+  <!-- ── Collapsible Header ── -->
+  <div class="acct-card-hd" onclick="toggleUserCard(${u.id}, event)">
+    <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
       <div class="ac-avatar">${u.username[0].toUpperCase()}</div>
-      <div>
+      <div style="min-width:0">
         <div style="font-size:15px;font-weight:600">${escapeHtmlSys(u.username)}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
           ${u.telegram_phone
             ? `<span class="ac-chip ac-chip-tg">📱 ${escapeHtmlSys(u.telegram_phone)}</span>`
             : `<span class="ac-chip ac-chip-warn">⚠ No Telegram</span>`}
           <span class="ac-chip">Joined ${fmtDate(u.created_at)}</span>
+          ${planPill}
         </div>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+    <div style="display:flex;align-items:center;gap:10px;flex-shrink:0" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:7px">
         <label class="toggle-switch">
           <input type="checkbox" ${u.is_active ? 'checked' : ''}
@@ -164,7 +192,24 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
       </div>
       <button class="btn btn-danger btn-sm"
         onclick="deleteUser(${u.id}, '${escapeHtmlSys(u.username)}')">Delete</button>
+      <span class="ac-chevron acct-user-chevron" id="chevron-user-${u.id}">▶</span>
     </div>
+  </div>
+
+  <!-- ── Collapsible body ── -->
+  <div id="acct-body-${u.id}" style="display:none">
+
+  <!-- ── Plan selector ── -->
+  <div style="padding:10px 0 6px;border-top:1px solid var(--border-color);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span style="font-size:12px;color:var(--text-muted);white-space:nowrap">AI Plan:</span>
+    <select class="select" style="font-size:12px;padding:4px 8px;height:28px;min-width:150px"
+      onchange="assignPlan(${u.id}, this.value)">
+      <option value="">— No plan —</option>
+      ${_acctPlans.map(p =>
+        `<option value="${p.id}" ${u.ai_plan_id === p.id ? 'selected' : ''}>${escapeHtmlSys(p.name)} (${p.monthly_limit} req/mo)</option>`
+      ).join('')}
+    </select>
+    ${u.ai_plan_name ? `<span style="font-size:11px;color:var(--text-muted)">${u.ai_plan_monthly_limit} requests/month</span>` : ''}
   </div>
 
   <!-- ── Feature toggles ── -->
@@ -283,7 +328,7 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
     </div>
   </div>
 
-
+  </div><!-- /acct-body -->
 </div>`;
 }
 
@@ -746,6 +791,171 @@ async function removeYtInheritance(userId, inhId) {
     loadAccountsData();
 }
 
+// ── User card collapse ────────────────────────────────────────────────────────
+
+function toggleUserCard(userId, event) {
+    if (event) {
+        const t = event.target;
+        if (t.closest('button') || t.closest('label') || t.closest('select') || t.closest('input')) return;
+    }
+    const body    = document.getElementById(`acct-body-${userId}`);
+    const chevron = document.getElementById(`chevron-user-${userId}`);
+    if (!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : '';
+    if (chevron) chevron.textContent = open ? '▶' : '▼';
+}
+
+// ── Plan assignment ───────────────────────────────────────────────────────────
+
+async function assignPlan(userId, planId) {
+    await acctApi('POST', `/api/admin/accounts/${userId}/update`,
+        { ai_plan_id: planId ? parseInt(planId) : null });
+    // Update local state so plan pill refreshes on next render without full reload
+    const u = (_acctData?.users || []).find(u => u.id === userId);
+    if (u && _acctPlans) {
+        const plan = _acctPlans.find(p => p.id === parseInt(planId));
+        u.ai_plan_id            = plan ? plan.id : null;
+        u.ai_plan_name          = plan ? plan.name : null;
+        u.ai_plan_monthly_limit = plan ? plan.monthly_limit : null;
+        // Refresh plan pill in card header
+        const card = document.getElementById(`acct-card-${userId}`);
+        if (card) {
+            const pill = card.querySelector('.ac-plan-pill, .ac-chip[style*="font-style"]');
+            if (pill && plan) {
+                pill.className = `ac-plan-pill ac-plan-${plan.name.toLowerCase().replace(/\s+/g,'-')}`;
+                pill.textContent = plan.name;
+            } else if (pill) {
+                pill.textContent = 'No plan';
+            }
+        }
+    }
+}
+
+// ── Plans tab rendering ───────────────────────────────────────────────────────
+
+function renderPlansTab(plans) {
+    const defaultPlans = plans.filter(p => p.is_default);
+    const customPlans  = plans.filter(p => !p.is_default);
+
+    const planCard = (p) => `
+<div class="card" id="plan-card-${p.id}" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span class="ac-plan-pill ac-plan-${p.name.toLowerCase().replace(/\s+/g,'-')}">${escapeHtmlSys(p.name)}</span>
+        ${p.is_default ? `<span class="ac-chip" style="font-size:10px">Default</span>` : `<span class="ac-chip" style="font-size:10px;color:#a78bfa;border-color:rgba(167,139,250,.3)">Custom</span>`}
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${escapeHtmlSys(p.description || '')}</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:12px;color:var(--text-muted)">Monthly limit:</span>
+          <input type="number" class="ac-num-inp" id="plan-limit-${p.id}"
+            value="${p.monthly_limit}" min="1"
+            style="width:80px"
+            onblur="savePlanLimit(${p.id}, this.value)">
+          <span style="font-size:12px;color:var(--text-muted)">requests</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:12px;color:var(--text-muted)">Name:</span>
+          <input type="text" class="ac-num-inp" id="plan-name-${p.id}"
+            value="${escapeHtmlSys(p.name)}"
+            style="width:120px;font-size:12px"
+            ${p.is_default ? 'disabled title="Default plan names cannot be changed"' : ''}
+            onblur="savePlanName(${p.id}, this.value)">
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+      ${!p.is_default ? `<button class="btn btn-danger btn-sm" onclick="deletePlan(${p.id}, '${escapeHtmlSys(p.name)}')">Delete</button>` : ''}
+    </div>
+  </div>
+</div>`;
+
+    return `
+<div style="margin-bottom:16px">
+  <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+    Assign plans to users in the <strong>Users</strong> tab. Edit limits and names here dynamically — changes apply immediately to all assigned users.
+  </div>
+
+  <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-secondary)">Default Plans</div>
+  ${defaultPlans.map(planCard).join('') || '<p class="text-muted" style="font-size:12px">No default plans.</p>'}
+
+  <div style="font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--text-secondary)">Custom Plans</div>
+  ${customPlans.map(planCard).join('') || '<p class="text-muted" style="font-size:12px;margin-bottom:12px">No custom plans yet.</p>'}
+
+  <!-- Create custom plan -->
+  <div class="card" style="border:1px dashed var(--border-color)">
+    <div style="font-size:13px;font-weight:500;margin-bottom:12px">Create Custom Plan</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Plan name</div>
+        <input type="text" class="input" id="new-plan-name" placeholder="e.g. Enterprise"
+          style="font-size:12px;padding:5px 10px;height:32px;width:150px">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Monthly limit</div>
+        <input type="number" class="ac-num-inp" id="new-plan-limit"
+          placeholder="500" min="1" style="width:90px">
+      </div>
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Description (optional)</div>
+        <input type="text" class="input" id="new-plan-desc" placeholder="Brief description"
+          style="font-size:12px;padding:5px 10px;height:32px;width:100%">
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="createPlan()" style="height:32px">
+        + Create Plan
+      </button>
+    </div>
+  </div>
+</div>`;
+}
+
+async function savePlanLimit(planId, val) {
+    const limit = parseInt(val);
+    if (!limit || limit < 1) return;
+    await acctApi('POST', `/api/admin/plans/${planId}/update`, { monthly_limit: limit });
+    const p = _acctPlans.find(p => p.id === planId);
+    if (p) p.monthly_limit = limit;
+}
+
+async function savePlanName(planId, val) {
+    const name = val.trim();
+    if (!name) return;
+    await acctApi('POST', `/api/admin/plans/${planId}/update`, { name });
+    const p = _acctPlans.find(p => p.id === planId);
+    if (p) p.name = name;
+}
+
+async function createPlan() {
+    const nameEl  = document.getElementById('new-plan-name');
+    const limitEl = document.getElementById('new-plan-limit');
+    const descEl  = document.getElementById('new-plan-desc');
+    const name    = nameEl?.value.trim();
+    const limit   = parseInt(limitEl?.value);
+    const desc    = descEl?.value.trim() || '';
+    if (!name)  { showAlert('Plan name is required.'); return; }
+    if (!limit) { showAlert('Monthly limit must be a positive number.'); return; }
+    const res = await acctApi('POST', '/api/admin/plans', { name, monthly_limit: limit, description: desc });
+    if (res.status === 'ok') {
+        loadAccountsData();
+    } else {
+        showAlert(res.error || res.detail || 'Failed to create plan');
+    }
+}
+
+async function deletePlan(planId, planName) {
+    showConfirm(
+        `Delete plan "${planName}"? Users assigned to it will have their plan cleared.`,
+        async () => {
+            const res = await acctApi('POST', `/api/admin/plans/${planId}/delete`);
+            if (res.status === 'ok') loadAccountsData();
+            else showAlert(res.error || res.detail || 'Failed to delete plan');
+        },
+        { confirmLabel: 'Delete', confirmClass: 'btn-danger' }
+    );
+}
+
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 function toggleAcctSection(sectionId) {
@@ -866,6 +1076,33 @@ function fmtDate(iso) {
     .ac-check-sm input { accent-color:var(--accent-primary); cursor:pointer; }
     .ac-kw-pct { display:flex; align-items:center; gap:4px; }
     .ac-num-pct { width:52px !important; height:24px !important; font-size:11px !important; padding:2px 6px !important; }
+
+    /* Tab bar */
+    .acct-tab-bar {
+        display:flex; gap:4px; margin-bottom:16px;
+        border-bottom:1px solid var(--border-color); padding-bottom:0;
+    }
+    .acct-tab {
+        padding:8px 18px; font-size:13px; font-weight:500; cursor:pointer;
+        background:none; border:none; border-bottom:2px solid transparent;
+        color:var(--text-muted); border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+        transition:color .15s, border-color .15s;
+        display:flex; align-items:center; gap:6px;
+    }
+    .acct-tab:hover  { color:var(--text-primary); }
+    .acct-tab.active { color:var(--accent-primary); border-bottom-color:var(--accent-primary); }
+
+    /* Collapsible user card header */
+    .acct-user-card { padding:0; }
+    .acct-card-hd {
+        display:flex; justify-content:space-between; align-items:center;
+        gap:12px; padding:14px 16px; cursor:pointer; user-select:none;
+        transition:background .15s; flex-wrap:wrap;
+    }
+    .acct-card-hd:hover { background:rgba(255,255,255,.025); }
+    .acct-user-chevron  { font-size:11px; color:var(--text-muted); }
+    .acct-user-card > div[id^="acct-body-"] { padding:0 16px 14px; }
+
     `;
     document.head.appendChild(s);
 })();

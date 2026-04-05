@@ -25,6 +25,45 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/youtube", tags=["youtube"])
 
 
+def _get_yt_chat_user_id(request: Request):
+    try:
+        from routers.auth import _get_bearer, validate_token, get_token_user_id
+        token = _get_bearer(request)
+        if not token or not validate_token(token):
+            return None
+        return get_token_user_id(token)
+    except Exception:
+        return None
+
+
+def _check_yt_limit(request: Request):
+    user_id = _get_yt_chat_user_id(request)
+    if user_id is None:
+        return True, None
+    try:
+        from utils.database import get_db
+        result = get_db().check_ai_limit(user_id)
+        if not result["allowed"]:
+            used  = result["used"]
+            limit = result["limit"]
+            return False, f"Monthly AI request limit reached ({used}/{limit}). Your plan allows {limit} requests per month."
+        return True, None
+    except Exception as e:
+        logger.warning(f"[YT-CHAT] Limit check failed: {e}")
+        return True, None
+
+
+def _track_yt_usage(request: Request):
+    user_id = _get_yt_chat_user_id(request)
+    if user_id is None:
+        return
+    try:
+        from utils.database import get_db
+        get_db().track_ai_request(user_id)
+    except Exception as e:
+        logger.warning(f"[YT-CHAT] Usage tracking failed: {e}")
+
+
 def _get_yt_user_source_filter(request: Request):
     """Return (yt_ch_ids, kw_db_ids) scoped to the current user.
 
@@ -724,8 +763,13 @@ async def chat_send(request: Request):
     if not session_id or not message:
         return {"status": "error", "message": "session_id and message are required"}
 
+    allowed, err = _check_yt_limit(request)
+    if not allowed:
+        return {"status": "error", "message": err, "limit_reached": True}
+
     try:
         reply = await send_chat_message(session_id, message)
+        _track_yt_usage(request)
         return {"status": "ok", "reply": reply}
     except Exception as e:
         logger.error(f"[YT-CHAT] Chat error in {session_id}: {e}")

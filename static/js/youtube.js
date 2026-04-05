@@ -1233,6 +1233,8 @@ function ytChatInit() {
     const urlInput = document.getElementById('yt-chat-url');
     if (urlInput) setTimeout(() => urlInput.focus(), 100);
     _ytChatRestoreTgTarget();
+    // Show plan badge (helper defined in chatbot.js)
+    if (typeof _renderPlanBadge === 'function') _renderPlanBadge('yt-chat-plan-badge');
 }
 
 async function ytChatLoadVideo() {
@@ -1343,11 +1345,18 @@ async function ytChatSend(text) {
         if (res.status === 'ok') {
             placeholder.text = res.reply;
         } else {
-            placeholder.text = `Error: ${res.message || 'Failed to get response'}`;
-            placeholder.error = true;
+            _ytChatMessages = _ytChatMessages.filter(m => m.id !== replyId && m.id !== msgId);
+            if (res.limit_reached && typeof _showLimitBanner === 'function') {
+                _showLimitBanner('yt-chat-plan-badge', res.message);
+            } else {
+                ytToast(`Error: ${res.message || 'Failed to get response'}`, 'error');
+            }
+            _ytChatRenderMessages();
+            return;
         }
     }
     _ytChatRenderMessages();
+    if (typeof _usageWidgetDecrement === 'function') _usageWidgetDecrement('yt-chat-plan-badge');
 }
 
 function _ytChatRenderMessages() {

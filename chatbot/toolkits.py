@@ -1,6 +1,8 @@
 """
 Agno Toolkits for the Agent Chatbot.
 Each toolkit wraps existing DB methods as read-only tools.
+All toolkits accept allowed_bot_names to scope queries to the current user's bots.
+None = admin (unrestricted). [] = no bots (no data). [list] = scoped.
 """
 
 import json
@@ -17,8 +19,9 @@ logger = logging.getLogger(__name__)
 class SummaryToolkit(Toolkit):
     """Tools for querying generated summaries (digests of grouped messages per topic)."""
 
-    def __init__(self, db, **kwargs):
+    def __init__(self, db, allowed_bot_names=None, **kwargs):
         self.db = db
+        self.allowed_bot_names = allowed_bot_names
         super().__init__(
             name="summary_tools",
             tools=[
@@ -54,6 +57,7 @@ class SummaryToolkit(Toolkit):
             days=days or None,
             topic=topic or None,
             bot_name=bot_name or None,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -77,6 +81,7 @@ class SummaryToolkit(Toolkit):
             days=days,
             topic=topic or None,
             bot_name=bot_name or None,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -90,11 +95,16 @@ class SummaryToolkit(Toolkit):
             JSON object with full summary_text and all metadata, or error message.
         """
         cursor = self.db._get_cursor()
-        cursor.execute(
+        query = (
             "SELECT id, bot_name, topic_name, summary_type, target_entity, "
-            "message_count, timestamp, summary_text FROM summaries WHERE id = %s",
-            (summary_id,),
+            "message_count, timestamp, summary_text FROM summaries WHERE id = %s"
         )
+        params = [summary_id]
+        # Enforce ownership — user can only fetch summaries from their own bots
+        if self.allowed_bot_names is not None:
+            query += " AND bot_name = ANY(%s)"
+            params.append(self.allowed_bot_names)
+        cursor.execute(query, tuple(params))
         row = cursor.fetchone()
         if not row:
             return json.dumps({"error": "Summary not found"})
@@ -119,7 +129,7 @@ class SummaryToolkit(Toolkit):
         Returns:
             JSON dict: {bot_name: {topic_name: {hourly: N, daily: N, minute: N, interval: N}}}.
         """
-        counts = self.db.get_pending_counts()
+        counts = self.db.get_pending_counts(allowed_bot_names=self.allowed_bot_names)
         return json.dumps(counts, ensure_ascii=False)
 
 
@@ -130,8 +140,9 @@ class SummaryToolkit(Toolkit):
 class MessageToolkit(Toolkit):
     """Tools for searching and reading raw Telegram messages before they are summarized."""
 
-    def __init__(self, db, **kwargs):
+    def __init__(self, db, allowed_bot_names=None, **kwargs):
         self.db = db
+        self.allowed_bot_names = allowed_bot_names
         super().__init__(
             name="message_tools",
             tools=[
@@ -163,6 +174,7 @@ class MessageToolkit(Toolkit):
             limit=limit,
             days=days or None,
             source=source or None,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -186,6 +198,7 @@ class MessageToolkit(Toolkit):
             topic=topic,
             days=days,
             source=source or None,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -209,6 +222,7 @@ class MessageToolkit(Toolkit):
             source_filter=source or None,
             days=days,
             limit=limit,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -233,6 +247,7 @@ class MessageToolkit(Toolkit):
             bot_name=bot_name or None,
             collection=collection or None,
             search=search or None,
+            allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
 
@@ -243,7 +258,7 @@ class MessageToolkit(Toolkit):
         Returns:
             JSON list of {bot_name, collection_name, cnt} rows ordered by count descending.
         """
-        rows = self.db.get_unclassified_stats()
+        rows = self.db.get_unclassified_stats(allowed_bot_names=self.allowed_bot_names)
         return json.dumps(rows, ensure_ascii=False)
 
 
@@ -254,8 +269,9 @@ class MessageToolkit(Toolkit):
 class DashboardToolkit(Toolkit):
     """Tools for analytics, trend data, and dashboard statistics."""
 
-    def __init__(self, db, **kwargs):
+    def __init__(self, db, allowed_bot_names=None, **kwargs):
         self.db = db
+        self.allowed_bot_names = allowed_bot_names
         super().__init__(
             name="dashboard_tools",
             tools=[self.get_analytics],
@@ -280,6 +296,7 @@ class DashboardToolkit(Toolkit):
             days=days,
             filter_source=filter_source or None,
             filter_topic=filter_topic or None,
+            filter_bot_names=self.allowed_bot_names,
         )
         stats.pop("source_topic_breakdown", None)
         return json.dumps(stats, ensure_ascii=False, default=str)

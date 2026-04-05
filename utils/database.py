@@ -318,6 +318,28 @@ class Database:
             except Exception as e:
                 logger.warning(f"[DB] Could not auto-migrate prompts: {e}")
 
+        # AI usage plans — must exist before users (FK dependency)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_plans (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT DEFAULT '',
+                monthly_limit INTEGER NOT NULL DEFAULT 100,
+                is_default BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        # Seed 3 default plans on first run
+        cursor.execute("SELECT COUNT(*) as cnt FROM ai_plans WHERE is_default = TRUE")
+        if cursor.fetchone()['cnt'] == 0:
+            cursor.execute("""
+                INSERT INTO ai_plans (name, description, monthly_limit, is_default) VALUES
+                ('Basic',    '30 AI requests per month',   30,  TRUE),
+                ('Standard', '150 AI requests per month',  150, TRUE),
+                ('Pro',      '500 AI requests per month',  500, TRUE)
+                ON CONFLICT (name) DO NOTHING
+            """)
+
         # Registered users (multi-user support) — must exist before recycle_bin (FK dependency)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -362,6 +384,8 @@ class Database:
             cursor.execute("ALTER TABLE users ADD COLUMN gemini_project_agents TEXT DEFAULT NULL")
             if 'gemini_api_key_3' in user_cols:
                 cursor.execute("UPDATE users SET gemini_project_agents = gemini_api_key_3 WHERE gemini_api_key_3 IS NOT NULL")
+        if 'ai_plan_id' not in user_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN ai_plan_id INTEGER REFERENCES ai_plans(id) ON DELETE SET NULL DEFAULT NULL")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS recycle_bin (
@@ -454,6 +478,17 @@ class Database:
             )
         """)
 
+        # Per-user monthly AI request tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_usage (
+                id          SERIAL PRIMARY KEY,
+                user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                year_month  TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(user_id, year_month)
+            )
+        """)
+
         self.connection.commit()
         self._migrate_comma_keywords()
 
@@ -526,10 +561,15 @@ class Database:
 
     def get_all_users(self):
         cursor = self._get_cursor()
-        cursor.execute(
-            "SELECT id, username, role, is_active, bots_on, youtube_on, yt_chat_on, agents_on, sys_bot_on, agents_limit, "
-            "telegram_phone, created_at FROM users ORDER BY id"
-        )
+        cursor.execute("""
+            SELECT u.id, u.username, u.role, u.is_active, u.bots_on, u.youtube_on,
+                   u.yt_chat_on, u.agents_on, u.sys_bot_on, u.agents_limit,
+                   u.telegram_phone, u.created_at, u.ai_plan_id,
+                   p.name AS ai_plan_name, p.monthly_limit AS ai_plan_monthly_limit
+            FROM users u
+            LEFT JOIN ai_plans p ON p.id = u.ai_plan_id
+            ORDER BY u.id
+        """)
         return [dict(r) for r in cursor.fetchall()]
 
     def get_user_by_id(self, user_id: int):
@@ -539,7 +579,7 @@ class Database:
         return dict(row) if row else None
 
     def update_user(self, user_id: int, **fields):
-        allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role'}
+        allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role', 'ai_plan_id'}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
@@ -556,6 +596,118 @@ class Database:
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
         self.connection.commit()
+
+    # ── AI Plans ──────────────────────────────────────────────────────────────
+
+    def get_ai_plans(self):
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM ai_plans ORDER BY monthly_limit, id")
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_ai_plan(self, plan_id: int):
+        cursor = self._get_cursor()
+        cursor.execute("SELECT * FROM ai_plans WHERE id = %s", (plan_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def create_ai_plan(self, name: str, description: str, monthly_limit: int) -> int:
+        cursor = self._get_cursor()
+        cursor.execute(
+            "INSERT INTO ai_plans (name, description, monthly_limit, is_default) VALUES (%s, %s, %s, FALSE) RETURNING id",
+            (name, description, monthly_limit)
+        )
+        plan_id = cursor.fetchone()['id']
+        self.connection.commit()
+        return plan_id
+
+    def update_ai_plan(self, plan_id: int, **fields):
+        allowed = {'name', 'description', 'monthly_limit'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        cursor = self._get_cursor()
+        set_clause = ', '.join(f"{k} = %s" for k in updates)
+        vals = list(updates.values()) + [plan_id]
+        cursor.execute(f"UPDATE ai_plans SET {set_clause} WHERE id = %s", vals)
+        self.connection.commit()
+
+    def delete_ai_plan(self, plan_id: int):
+        cursor = self._get_cursor()
+        # Unassign from users first
+        cursor.execute("UPDATE users SET ai_plan_id = NULL WHERE ai_plan_id = %s", (plan_id,))
+        cursor.execute("DELETE FROM ai_plans WHERE id = %s", (plan_id,))
+        self.connection.commit()
+
+    def get_plan_for_user(self, user_id: int):
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT p.* FROM ai_plans p
+            JOIN users u ON u.ai_plan_id = p.id
+            WHERE u.id = %s
+        """, (user_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    # ── AI Usage tracking ─────────────────────────────────────────────────────
+
+    def check_ai_limit(self, user_id: int) -> dict:
+        """Return {allowed: bool, used: int, limit: int|None, remaining: int|None}.
+        allowed=True when user has no plan (unlimited) or has remaining quota."""
+        import datetime
+        year_month = datetime.datetime.utcnow().strftime("%Y-%m")
+        plan = self.get_plan_for_user(user_id)
+        if plan is None:
+            return {"allowed": True, "used": 0, "limit": None, "remaining": None}
+        used = self.get_ai_usage(user_id, year_month)
+        limit = plan["monthly_limit"]
+        remaining = max(0, limit - used)
+        return {"allowed": used < limit, "used": used, "limit": limit, "remaining": remaining}
+
+    def track_ai_request(self, user_id: int) -> int:
+        """Increment this month's request count for user. Returns new count."""
+        import datetime
+        year_month = datetime.datetime.utcnow().strftime("%Y-%m")
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO ai_usage (user_id, year_month, request_count)
+            VALUES (%s, %s, 1)
+            ON CONFLICT (user_id, year_month)
+            DO UPDATE SET request_count = ai_usage.request_count + 1
+            RETURNING request_count
+        """, (user_id, year_month))
+        row = cursor.fetchone()
+        self.connection.commit()
+        return row['request_count'] if row else 1
+
+    def get_ai_usage(self, user_id: int, year_month: str = None) -> int:
+        """Return request count for user in given month (default: current month)."""
+        import datetime
+        if year_month is None:
+            year_month = datetime.datetime.utcnow().strftime("%Y-%m")
+        cursor = self._get_cursor()
+        cursor.execute(
+            "SELECT request_count FROM ai_usage WHERE user_id = %s AND year_month = %s",
+            (user_id, year_month)
+        )
+        row = cursor.fetchone()
+        return row['request_count'] if row else 0
+
+    def get_ai_usage_with_plan(self, user_id: int) -> dict:
+        """Return {used, limit, remaining, plan_name, year_month} for this month."""
+        import datetime
+        year_month = datetime.datetime.utcnow().strftime("%Y-%m")
+        used = self.get_ai_usage(user_id, year_month)
+        plan = self.get_plan_for_user(user_id)
+        limit = plan['monthly_limit'] if plan else None
+        return {
+            "used":       used,
+            "limit":      limit,
+            "remaining":  max(0, limit - used) if limit is not None else None,
+            "plan_name":  plan['name'] if plan else None,
+            "plan_id":    plan['id'] if plan else None,
+            "year_month": year_month,
+            "has_plan":   plan is not None,
+        }
 
     # ── Bot inheritance ───────────────────────────────────────────────────────
 
@@ -2329,12 +2481,15 @@ class Database:
         return warnings
 
     def search_messages(self, topic_filter: str = None, source_filter: str = None,
-                         days: int = 7, limit: int = 50):
+                         days: int = 7, limit: int = 50, allowed_bot_names: list = None):
         """Search messages by topic and/or source within a date range."""
         cursor = self._get_cursor()
         clauses = ["collection_name IS NOT NULL AND collection_name != ''"]
         params = []
 
+        if allowed_bot_names is not None:
+            clauses.append("bot_name = ANY(%s)")
+            params.append(allowed_bot_names)
         if days:
             clauses.append("timestamp >= NOW() - (%s * INTERVAL '1 day')")
             params.append(days)

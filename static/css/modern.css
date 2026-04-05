@@ -1,6 +1,6 @@
 /* ==================== CSS Variables ==================== */
 :root {
-    /* Dark theme (default) */
+    /* Dark theme */
     --bg-primary: #0a0e1a;
     --bg-secondary: #13161f;
     --bg-tertiary: #1a1e2e;
@@ -162,19 +162,63 @@ body {
 .sidebar.collapsed .sidebar-resize-handle { display: none; }
 
 .sidebar-header {
-    padding: 24px 20px;
+    padding: 0.0001px 20px;
     border-bottom: 1px solid var(--border-color);
 }
 
-.sidebar-header h1 {
-    font-size: 20px;
-    font-weight: 700;
-    margin-bottom: 4px;
+/* Sidebar title area — row layout with AI label on the left */
+.sidebar-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
+
+.sidebar-logo-link {
+    display: flex;
+    align-items: center;
+    text-decoration: none;
+    flex-shrink: 0;
+}
+.sidebar-logo-link:hover { opacity: 0.82; }
+
+/* Logo images — swap based on theme */
+.sidebar-logo {
+    height: 100px;      /* ← tune logo size here */
+    width: auto;
+    display: block;
+    object-fit: contain;
+}
+
+/* Dark theme (default :root) shows dark logo */
+.sidebar-logo-dark  { display: block; }
+.sidebar-logo-light { display: none; }
+
+/* Light theme shows light logo */
+html[data-theme="light"] .sidebar-logo-dark  { display: none; }
+html[data-theme="light"] .sidebar-logo-light { display: block; }
 
 .version {
     font-size: 12px;
     color: var(--text-muted);
+}
+
+/* Animated "AI" badge */
+@keyframes ai-pulse {
+    0%   { opacity: 1; letter-spacing: 0.08em; }
+    50%  { opacity: 0.65; letter-spacing: 0.18em; }
+    100% { opacity: 1; letter-spacing: 0.08em; }
+}
+
+.version-ai {
+    font-size: 18px;    /* ← tune AI label size here */
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: ai-pulse 2.4s ease-in-out infinite;
+    flex-shrink: 0;
 }
 
 .sidebar-nav {
@@ -3330,6 +3374,79 @@ body.chat-page-active .main-content {
     margin: 10px 0;
 }
 
+/* Markdown tables */
+.ac-content table,
+.sc-msg-bubble-ai table,
+.yt-chat-msg-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+.ac-content th,
+.sc-msg-bubble-ai th,
+.yt-chat-msg-content th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    padding: 7px 12px;
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+.ac-content td,
+.sc-msg-bubble-ai td,
+.yt-chat-msg-content td {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    vertical-align: top;
+}
+.ac-content tr:nth-child(even) td,
+.sc-msg-bubble-ai tr:nth-child(even) td,
+.yt-chat-msg-content tr:nth-child(even) td {
+    background: rgba(255,255,255,0.02);
+}
+.ac-content tr:hover td,
+.sc-msg-bubble-ai tr:hover td,
+.yt-chat-msg-content tr:hover td {
+    background: rgba(255,255,255,0.04);
+}
+
+/* Strong / em / links in AI messages */
+.ac-content strong, .sc-msg-bubble-ai strong, .yt-chat-msg-content strong { font-weight: 600; }
+.ac-content em,     .sc-msg-bubble-ai em,     .yt-chat-msg-content em     { font-style: italic; color: var(--text-secondary); }
+.ac-content a,      .sc-msg-bubble-ai a,      .yt-chat-msg-content a      { color: var(--accent-primary); text-decoration: underline; }
+.ac-content a:hover,.sc-msg-bubble-ai a:hover,.yt-chat-msg-content a:hover{ opacity: .8; }
+
+/* Plan limit alert banner above input */
+.ai-limit-alert {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: rgba(239,68,68,.12);
+    border: 1px solid rgba(239,68,68,.3);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #fca5a5;
+}
+.ai-limit-alert button {
+    background: none;
+    border: none;
+    color: #fca5a5;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+    flex-shrink: 0;
+    opacity: .7;
+}
+.ai-limit-alert button:hover { opacity: 1; }
+
 /* Skeleton loading */
 .ac-skeleton {
     display: flex;
@@ -4316,3 +4433,81 @@ body.chat-page-active .main-content {
     flex: 1;
     color: var(--text-primary);
 }
+
+/* ==================== AI Plan Pills (shared) ==================== */
+.ac-plan-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+.ac-plan-basic {
+    background: rgba(99,102,241,.15);
+    color: #a5b4fc;
+    border: 1px solid rgba(99,102,241,.3);
+}
+.ac-plan-standard {
+    background: rgba(16,185,129,.15);
+    color: #6ee7b7;
+    border: 1px solid rgba(16,185,129,.3);
+}
+.ac-plan-pro {
+    background: rgba(245,158,11,.15);
+    color: #fcd34d;
+    border: 1px solid rgba(245,158,11,.3);
+}
+/* fallback for any custom plan name */
+.ac-plan-pill:not(.ac-plan-basic):not(.ac-plan-standard):not(.ac-plan-pro) {
+    background: rgba(167,139,250,.15);
+    color: #c4b5fd;
+    border: 1px solid rgba(167,139,250,.3);
+}
+
+/* ==================== AI Usage Widget (chatbot headers) ==================== */
+.ai-usage-widget {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 160px;
+    max-width: 220px;
+}
+.ai-usage-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.ai-usage-remaining {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.ai-usage-remaining-low {
+    color: #f87171;
+}
+.ai-usage-track {
+    width: 100%;
+    height: 5px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.ai-usage-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent-primary);
+    transition: width 0.4s ease;
+}
+.ai-usage-bar-warn { background: #f59e0b; }
+.ai-usage-bar-danger { background: #ef4444; }
+.ai-usage-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+

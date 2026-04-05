@@ -246,3 +246,124 @@ async def test_session(request: Request):
         logs.append(f"[ERROR] {e}")
         logger.error(f"[TG-TEST] {e}")
         return {"status": "error", "logs": logs}
+
+
+# ── Send / Receive test ───────────────────────────────────────────────────────
+
+async def _get_test_client(request):
+    """Return (client, error_dict). Client is connected & authorized."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return None, {"status": "error", "message": "Admin only"}
+
+    from utils.database import get_db
+    from utils.helpers import load_config
+
+    db = get_db()
+    admin = db.get_admin_user()
+    session_str = admin.get("telegram_session") if admin else None
+    if not session_str:
+        cfg = load_config()
+        session_str = cfg.get("telegram", {}).get("string_session", "")
+    if not session_str:
+        return None, {"status": "error", "message": "No session string found in DB or config.yaml"}
+
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    cfg = load_config()
+    tg_cfg = cfg.get("telegram", {})
+    client = TelegramClient(StringSession(session_str), int(tg_cfg["api_id"]), tg_cfg["api_hash"])
+
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+    except asyncio.TimeoutError:
+        return None, {"status": "error", "message": "Connection timed out (15s)"}
+
+    try:
+        authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+    except asyncio.TimeoutError:
+        await client.disconnect()
+        return None, {"status": "error", "message": "Authorization check timed out (15s)"}
+
+    if not authorized:
+        await client.disconnect()
+        return None, {"status": "error", "message": "Session is not authorized — re-run get_ss.py"}
+
+    return client, None
+
+
+@router.post("/telegram/test/send")
+async def test_send(request: Request, data: dict = Body(...)):
+    """Send a test message to a channel/user via the userbot session."""
+    target = (data.get("target") or "").strip()
+    message = (data.get("message") or "").strip()
+    if not target:
+        return {"status": "error", "message": "Missing target"}
+    if not message:
+        return {"status": "error", "message": "Missing message"}
+
+    client, err = await _get_test_client(request)
+    if err:
+        return err
+
+    try:
+        await client.send_message(target, message)
+        await client.disconnect()
+        logger.info(f"[TG-TEST-SEND] Sent to {target}")
+        return {"status": "ok", "message": f"Message delivered to {target}"}
+    except Exception as e:
+        await client.disconnect()
+        logger.error(f"[TG-TEST-SEND] {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/telegram/test/receive")
+async def test_receive(request: Request, data: dict = Body(...)):
+    """Fetch recent messages from a channel/chat via the userbot session."""
+    target = (data.get("target") or "").strip()
+    limit = min(int(data.get("limit") or 10), 50)
+    if not target:
+        return {"status": "error", "message": "Missing target"}
+
+    client, err = await _get_test_client(request)
+    if err:
+        return err
+
+    try:
+        from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+
+        messages = []
+        async for msg in client.iter_messages(target, limit=limit):
+            sender = ""
+            if msg.sender:
+                if getattr(msg.sender, "username", None):
+                    sender = f"@{msg.sender.username}"
+                elif getattr(msg.sender, "first_name", None):
+                    sender = msg.sender.first_name
+                elif getattr(msg.sender, "title", None):
+                    sender = msg.sender.title
+
+            media_type = None
+            if msg.media:
+                if isinstance(msg.media, MessageMediaPhoto):
+                    media_type = "photo"
+                elif isinstance(msg.media, MessageMediaDocument):
+                    media_type = "document"
+                else:
+                    media_type = "media"
+
+            messages.append({
+                "id": msg.id,
+                "date": msg.date.isoformat() if msg.date else None,
+                "sender": sender,
+                "text": msg.text or "",
+                "media_type": media_type,
+            })
+
+        await client.disconnect()
+        return {"status": "ok", "messages": messages, "count": len(messages)}
+    except Exception as e:
+        await client.disconnect()
+        logger.error(f"[TG-TEST-RECV] {e}")
+        return {"status": "error", "message": str(e)}

@@ -63,6 +63,8 @@ def list_accounts(request: Request):
     except Exception:
         pass
 
+    plans = db.get_ai_plans()
+
     return {
         "users":                users,
         "available_bots":       bots,
@@ -70,6 +72,7 @@ def list_accounts(request: Request):
         "available_collections": collections,
         "yt_channels":          yt_channels,
         "yt_keywords":          yt_keywords,
+        "ai_plans":             plans,
     }
 
 
@@ -83,6 +86,7 @@ class UpdateUserRequest(BaseModel):
     agents_on:    Optional[bool] = None
     sys_bot_on:   Optional[bool] = None
     agents_limit: Optional[dict] = None   # {"type": "money"|"calls", "value": 10.0}
+    ai_plan_id:   Optional[int]  = None
 
 
 @router.post("/admin/accounts/{user_id}/update")
@@ -92,7 +96,8 @@ def update_user(user_id: int, req: UpdateUserRequest, request: Request):
     if not db.get_user_by_id(user_id):
         raise HTTPException(404, "User not found")
 
-    kwargs = {k: v for k, v in req.dict().items() if v is not None}
+    # Include fields that were explicitly set (even if set to null, e.g. clearing ai_plan_id)
+    kwargs = {k: v for k, v in req.dict().items() if k in req.__fields_set__}
     if not kwargs:
         return {"status": "ok"}
     db.update_user(user_id, **kwargs)
@@ -100,6 +105,60 @@ def update_user(user_id: int, req: UpdateUserRequest, request: Request):
     if kwargs.get("is_active") is False:
         from routers.auth import revoke_all_tokens_for_user
         revoke_all_tokens_for_user(user_id)
+    return {"status": "ok"}
+
+
+# ── AI Plans CRUD ─────────────────────────────────────────────────────────────
+
+@router.get("/admin/plans")
+def list_plans(request: Request):
+    _require_admin(request)
+    db = get_db()
+    return {"plans": db.get_ai_plans()}
+
+
+class PlanRequest(BaseModel):
+    name:          str
+    description:   Optional[str] = ""
+    monthly_limit: int
+
+
+@router.post("/admin/plans")
+def create_plan(req: PlanRequest, request: Request):
+    _require_admin(request)
+    db = get_db()
+    plan_id = db.create_ai_plan(req.name.strip(), req.description or "", req.monthly_limit)
+    return {"status": "ok", "id": plan_id}
+
+
+class UpdatePlanRequest(BaseModel):
+    name:          Optional[str] = None
+    description:   Optional[str] = None
+    monthly_limit: Optional[int] = None
+
+
+@router.post("/admin/plans/{plan_id}/update")
+def update_plan(plan_id: int, req: UpdatePlanRequest, request: Request):
+    _require_admin(request)
+    db = get_db()
+    if not db.get_ai_plan(plan_id):
+        raise HTTPException(404, "Plan not found")
+    kwargs = {k: v for k, v in req.dict().items() if v is not None}
+    if kwargs:
+        db.update_ai_plan(plan_id, **kwargs)
+    return {"status": "ok"}
+
+
+@router.post("/admin/plans/{plan_id}/delete")
+def delete_plan(plan_id: int, request: Request):
+    _require_admin(request)
+    db = get_db()
+    plan = db.get_ai_plan(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    if plan.get("is_default"):
+        raise HTTPException(400, "Cannot delete default plans — edit their limits instead")
+    db.delete_ai_plan(plan_id)
     return {"status": "ok"}
 
 

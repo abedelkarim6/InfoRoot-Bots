@@ -40,8 +40,95 @@ async function agentChatInit() {
     }
     document.getElementById('agent-chat-input')?.focus();
 
+    // Show plan badge in header (non-blocking)
+    _renderPlanBadge('agent-chat-plan-badge');
+
     // Fetch AI-generated suggestions in background (non-blocking)
     _agentChatLoadSuggestions();
+}
+
+// ── AI Usage Widget ───────────────────────────────────────────────────────────
+
+let _usageCache = null; // {used, limit, remaining, plan_name, plan_id, year_month, has_plan}
+
+async function _fetchUsage() {
+    const token = localStorage.getItem('auth_token');
+    try {
+        const r = await fetch('/api/me/ai-usage', {
+            headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+        });
+        if (!r.ok) return null;
+        const d = await r.json();
+        _usageCache = d;
+        return d;
+    } catch { return null; }
+}
+
+function _renderPlanBadge(elementId) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    _fetchUsage().then(d => {
+        if (!d) return;
+        _applyUsageWidget(el, d);
+    });
+}
+
+function _applyUsageWidget(el, d) {
+    if (!d.has_plan) {
+        el.style.display = 'none';
+        return;
+    }
+    const used      = d.used      ?? 0;
+    const limit     = d.limit     ?? 0;
+    const remaining = d.remaining ?? 0;
+    const pct       = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+    const planCls   = `ac-plan-pill ac-plan-${(d.plan_name || '').toLowerCase().replace(/\s+/g, '-')}`;
+
+    // Colour the bar based on remaining %
+    let barCls = 'ai-usage-bar-fill';
+    if (pct >= 90)      barCls += ' ai-usage-bar-danger';
+    else if (pct >= 70) barCls += ' ai-usage-bar-warn';
+
+    el.innerHTML = `
+<div class="ai-usage-widget">
+  <div class="ai-usage-top">
+    <span class="${planCls}">${d.plan_name}</span>
+    <span class="ai-usage-remaining ${pct >= 90 ? 'ai-usage-remaining-low' : ''}">${remaining} left</span>
+  </div>
+  <div class="ai-usage-track">
+    <div class="${barCls}" style="width:${pct}%"></div>
+  </div>
+  <div class="ai-usage-sub">${used} of ${limit} requests used this month</div>
+</div>`;
+    el.style.display = 'block';
+}
+
+// Decrement widget counters locally after each AI message (avoids a round-trip)
+function _usageWidgetDecrement(elementId) {
+    if (!_usageCache || !_usageCache.has_plan) return;
+    _usageCache.used      = (_usageCache.used ?? 0) + 1;
+    _usageCache.remaining = Math.max(0, (_usageCache.remaining ?? 0) - 1);
+    const el = document.getElementById(elementId);
+    if (el && el.style.display !== 'none') _applyUsageWidget(el, _usageCache);
+}
+
+function _showLimitBanner(elementId, message) {
+    // Refresh actual usage from server and re-render widget in locked state
+    _fetchUsage().then(d => {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        _applyUsageWidget(el, d || _usageCache || { has_plan: false });
+    });
+    // Show dismissible inline alert above the input
+    const inputBar = document.getElementById('agent-chat-input-bar') || document.getElementById('yt-chat-input-bar');
+    if (inputBar) {
+        const existing = inputBar.querySelector('.ai-limit-alert');
+        if (existing) existing.remove();
+        const alert = document.createElement('div');
+        alert.className = 'ai-limit-alert';
+        alert.innerHTML = `<span>🚫 ${message}</span><button onclick="this.parentElement.remove()">✕</button>`;
+        inputBar.insertBefore(alert, inputBar.firstChild);
+    }
 }
 
 function agentChatCancel() {
@@ -317,7 +404,11 @@ async function agentChatSend(text) {
                     _agentChatUpdateBubble(replyId);
                 } else if (evt.type === 'error') {
                     _agentChatMessages = _agentChatMessages.filter(m => m.id !== replyId);
-                    ytToast(evt.message || 'Agent error', 'error');
+                    if (evt.limit_reached) {
+                        _showLimitBanner('agent-chat-plan-badge', evt.message);
+                    } else {
+                        ytToast(evt.message || 'Agent error', 'error');
+                    }
                     _agentChatRenderMessages();
                 }
             }
@@ -347,6 +438,7 @@ async function agentChatSend(text) {
     if (input) input.disabled = false;
     if (input) input.focus();
     _agentChatSetStatus('ready', 'Ready');
+    _usageWidgetDecrement('agent-chat-plan-badge');
 }
 
 function _agentChatUpdateBubble(msgId) {

@@ -3,7 +3,7 @@
 
 // ==================== Theme ====================
 (function () {
-    const saved = localStorage.getItem('theme') || 'dark';
+    const saved = localStorage.getItem('theme') || 'light';
     document.documentElement.setAttribute('data-theme', saved);
 })();
 
@@ -18,7 +18,7 @@ function _applyThemeButton(theme) {
 }
 
 function toggleTheme() {
-    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const current = document.documentElement.getAttribute('data-theme') || 'light';
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('theme', next);
@@ -269,6 +269,7 @@ function showPage(pageName) {
     else if (pageName === 'recycle-bin') loadRecycleBinData();
     else if (pageName === 'accounts') loadAccountsData();
     else if (pageName === 'profile') loadProfileData();
+    else if (pageName === 'tg-tester') tgTesterInit();
 }
 
 // ==================== System Bot FAB ====================

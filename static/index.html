@@ -15,8 +15,11 @@
         <div class="sidebar-header">
             <div style="display:flex;align-items:center;justify-content:space-between">
                 <div class="sidebar-title-wrap">
-                    <h1>Inforoot AI</h1>
-                    <p class="version">v4.0</p>
+                    <p class="version version-ai">AI</p>
+                    <a href="https://www.ibahsoun.com" class="sidebar-logo-link">
+                        <img src="/static/logo_dark.png" alt="Inforoot" class="sidebar-logo sidebar-logo-dark">
+                        <img src="/static/logo_light.png" alt="Inforoot" class="sidebar-logo sidebar-logo-light">
+                    </a>
                 </div>
                 <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" onclick="toggleSidebar()" title="Collapse sidebar">◀</button>
             </div>
@@ -105,8 +108,12 @@
                 <span class="nav-section-label">Admin</span>
                 <a href="#" class="nav-item" data-page="accounts">
                     <span class="icon">👥</span>
-                    <span>Accounts</span>
+                    <span>Access & Plans</span>
                     <span class="badge" id="accounts-count" style="display:none">0</span>
+                </a>
+                <a href="#" class="nav-item" data-page="tg-tester">
+                    <span class="icon">🧪</span>
+                    <span>TG Tester</span>
                 </a>
             </div>
         </nav>
@@ -674,6 +681,7 @@
                             <input type="text" class="input" id="yt-chat-url" placeholder="Paste YouTube URL or video ID…">
                             <button class="btn btn-primary" id="yt-chat-load-btn" onclick="ytChatLoadVideo()">Load Video</button>
                         </div>
+                        <div id="yt-chat-plan-badge" style="display:none;padding:6px 0 2px"></div>
                         <div class="yt-chat-video-info" id="yt-chat-video-info" style="display:none;">
                             <img id="yt-chat-thumb" class="yt-chat-thumb" src="" alt="">
                             <div>
@@ -748,6 +756,7 @@
                                 </span>
                             </div>
                         </div>
+                        <div id="agent-chat-plan-badge" style="display:none"></div>
                         <div class="agent-chat-header-actions">
                             <button class="agent-chat-icon-btn" onclick="agentChatToggleComposer()" title="Toggle composer">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
@@ -833,12 +842,12 @@
             </div>
         </div>
 
-        <!-- Accounts page (admin only) -->
+        <!-- Access & Plans page (admin only) -->
         <div id="accounts-page" class="page">
             <header class="page-header">
                 <div>
-                    <h2>Accounts</h2>
-                    <p class="subtitle">Manage registered users and their feature access</p>
+                    <h2>Access & Plans</h2>
+                    <p class="subtitle">Manage users, feature access, and AI usage plans</p>
                 </div>
                 <button class="btn btn-secondary btn-sm" onclick="loadAccountsData()">↻ Refresh</button>
             </header>
@@ -856,6 +865,20 @@
                 </div>
             </header>
             <div id="profile-content">
+                <p class="text-muted">Loading…</p>
+            </div>
+        </div>
+
+        <!-- TG Tester page -->
+        <div id="tg-tester-page" class="page">
+            <header class="page-header">
+                <div>
+                    <h2>Telegram Tester</h2>
+                    <p class="subtitle">Diagnose send &amp; receive issues with the userbot session</p>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="tgTesterInit()">↻ Refresh</button>
+            </header>
+            <div id="tg-tester-content">
                 <p class="text-muted">Loading…</p>
             </div>
         </div>
@@ -939,5 +962,6 @@
     <script src="/static/js/system-chat.js"></script>
     <script src="/static/js/accounts.js"></script>
     <script src="/static/js/profile.js"></script>
+    <script src="/static/js/tg-tester.js"></script>
 </body>
 </html>
