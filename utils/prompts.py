@@ -7,10 +7,41 @@ from utils.database import get_db
 
 SYSTEM_PROMPT = "أنت خبير في تلخيص الأخبار العربية بأسلوب صحفي دقيق وميجز."
 
+# Fixed prefix injected before every user prompt — not shown in the UI.
+_FIXED_PREFIX = """\
+الموضوع:
+
+{topic_name}
+
+الرسائل:
+
+{messages}
+
+تحديد النطاق:
+- التزم فقط بالأخبار المرتبطة بـ {topic_name}
+يشمل:
+- أحداث حصلت داخل {topic_name}
+- أحداث استهدفت {topic_name}
+- تصريحات صادرة من {topic_name}
+
+استبعد:
+- أي أحداث خارج {topic_name}
+- أي عمليات قامت بها {topic_name} خارج نطاقها
+- أي تصريحات من جهات أخرى عن {topic_name}
+---
+User Prompt:
+"""
+
 
 def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_name: str = '') -> str:
     """
     Injects news messages into bot-specific prompt templates.
+
+    The final prompt is:
+      [fixed Arabic scope prefix with topic_name + messages injected]
+      ---
+      User Prompt:
+      [user-defined template rendered with topic_name]
 
     Args:
         texts: List of message texts to summarize
@@ -44,8 +75,16 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_n
         def __missing__(self, key):
             return '{' + key + '}'
 
-    final_prompt = string.Formatter().vformat(
+    fmt = string.Formatter()
+
+    # Render fixed prefix (injects {topic_name} and {messages})
+    prefix = fmt.vformat(
+        _FIXED_PREFIX, (), _SafeDict(messages=combined_news, topic_name=topic_name)
+    )
+
+    # Render user prompt (only {topic_name} is meaningful here; {messages} already in prefix)
+    user_part = fmt.vformat(
         template, (), _SafeDict(messages=combined_news, topic_name=topic_name)
     )
 
-    return final_prompt
+    return prefix + user_part

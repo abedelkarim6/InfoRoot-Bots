@@ -330,6 +330,9 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
       <div style="display:flex;align-items:center;gap:8px">
         ${pendingYt ? `<span class="ac-chip ac-chip-warn">${pendingYt} pending</span>` : ''}
         <span class="ac-chip">${(u.yt_inheritances || []).length} items</span>
+        ${u.seo_visible === false && (u.yt_inheritances || []).some(i => i.source_type === 'keyword')
+          ? `<span class="ac-chip" style="background:rgba(245,158,11,.15);color:#fcd34d;border-color:rgba(245,158,11,.3)">🔎 SEO: count only</span>`
+          : ''}
         <span class="ac-chevron" id="chevron-yt-${u.id}">▶</span>
       </div>
     </div>

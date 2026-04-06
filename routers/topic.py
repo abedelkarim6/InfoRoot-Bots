@@ -312,10 +312,13 @@ def add_topic_keyword(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name or not keyword:
         return {"status": "error", "message": "Missing required fields"}
 
-    if not _can_modify_bot(request, bot_name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-
     db = get_db()
+    # Allow bot owners, admins, AND users who have inherited this bot
+    user_id = get_request_user_id(request)
+    if not _can_modify_bot(request, bot_name):
+        if not user_id or not db.user_has_bot_access(user_id, bot_name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
     inserted = db.add_keyword(bot_name, category_name, topic_name, keyword)
     return {"status": "ok", "inserted": inserted, "keyword": keyword}
 
@@ -329,9 +332,11 @@ def delete_topic_keyword(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name or not keyword:
         return {"status": "error", "message": "Missing required fields"}
 
-    if not _can_modify_bot(request, bot_name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-
     db = get_db()
+    user_id = get_request_user_id(request)
+    if not _can_modify_bot(request, bot_name):
+        if not user_id or not db.user_has_bot_access(user_id, bot_name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
     deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword)
     return {"status": "ok", "deleted": deleted, "keyword": keyword}

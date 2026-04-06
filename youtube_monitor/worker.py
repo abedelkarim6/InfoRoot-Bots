@@ -33,6 +33,107 @@ IMPORTANT: Focus ONLY on the actual video content. Completely ignore and exclude
 - Intro/outro filler unrelated to the main topic
 Do NOT mention any advertisements or sponsorships in your summary."""
 
+# Fixed prefix for strategy 1 (Gemini native video — URL sent directly, no transcript text).
+# Not shown in the UI; prepended silently before the user's prompt.
+_FIXED_PREFIX_VIDEO = """\
+العنوان:
+{title}
+
+اسم القناة:
+{channel_name}
+
+اسم الضيف:
+{guest}
+
+الرابط:
+{link}
+
+المطلوب:
+
+تحويل محتوى الفيديو إلى نص مترابط يغني عن مشاهدة الفيديو، مع الحفاظ التام على نفس العبارات وأسلوب المتحدث.
+
+تنسيق الإخراج:
+
+- {title}
+- اسم الضيف
+- التاريخ:
+الخميس ١٩/٠٣/٢٠٢٦
+
+ثم النص
+
+في النهاية:
+
+قناة: {channel_name}
+لمشاهدة الحلقة كاملة: {link}
+
+قواعد الميتاداتا:
+
+- استخدام العنوان كما هو 100% بدون تعديل
+- استخدام اسم القناة الصحيح فقط
+- حذف أي قيمة مثل N/A
+- عدم تكرار أي عنصر
+---
+User Prompt:
+"""
+
+# Fixed prefix for strategy 2 (transcript text — full transcript injected at {transcript}).
+# Not shown in the UI; prepended silently before the user's prompt.
+_FIXED_PREFIX_TRANSCRIPT = """\
+المحتوى:
+{transcript}
+
+العنوان:
+{title}
+
+اسم القناة:
+{channel_name}
+
+اسم الضيف:
+{guest}
+
+الرابط:
+{link}
+
+المطلوب:
+
+تحويل محتوى الفيديو إلى نص مترابط يغني عن مشاهدة الفيديو، مع الحفاظ التام على نفس العبارات وأسلوب المتحدث.
+
+تنسيق الإخراج:
+
+- {title}
+- اسم الضيف
+- التاريخ:
+الخميس ١٩/٠٣/٢٠٢٦
+
+ثم النص
+
+في النهاية:
+
+قناة: {channel_name}
+لمشاهدة الحلقة كاملة: {link}
+
+قواعد الميتاداتا:
+
+- استخدام العنوان كما هو 100% بدون تعديل
+- استخدام اسم القناة الصحيح فقط
+- حذف أي قيمة مثل N/A
+- عدم تكرار أي عنصر
+---
+User Prompt:
+"""
+
+
+def _build_yt_prompt(prefix_template: str, user_prompt: str,
+                     title: str, channel_name: str, link: str,
+                     guest: str = '') -> str:
+    """Inject metadata into the fixed prefix and append the user prompt."""
+    prefix = (prefix_template
+              .replace('{title}', title or '')
+              .replace('{channel_name}', channel_name or '')
+              .replace('{link}', link or '')
+              .replace('{guest}', guest or ''))
+    return prefix + user_prompt
+
 
 def _get_global_prompt() -> str:
     """Read the global summarization prompt from config.yaml as fallback."""
@@ -111,12 +212,19 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int
         transcript_list = available[0].fetch()
     full_text = ' '.join(entry.text for entry in transcript_list)
 
-    if len(full_text) > 30000:
+    if len(full_text) > 30_000:
         full_text = full_text[:30000] + "... [truncated]"
+
+    # If the prompt already has a {transcript} placeholder (from the fixed prefix),
+    # replace it in-place; otherwise fall back to appending the transcript at the end.
+    if '{transcript}' in prompt:
+        final_prompt = prompt.replace('{transcript}', full_text)
+    else:
+        final_prompt = prompt + f"\n\nVideo transcript:\n\n{full_text}"
 
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
-        contents={'text': prompt + f"\n\nVideo transcript:\n\n{full_text}"},
+        contents={'text': final_prompt},
         config=_YT_LABELS,
     )
     inp, out = _extract_tokens(response)
@@ -191,7 +299,7 @@ async def process_queue_item(queue_item: dict) -> bool:
             return False
 
     # Per-item prompt from the queue row, fall back to global config prompt
-    prompt = queue_item.get('prompt') or _get_global_prompt()
+    user_prompt = queue_item.get('prompt') or _get_global_prompt()
 
     # Mark as processing
     db.update_queue_status(queue_id, 'processing')
@@ -204,10 +312,13 @@ async def process_queue_item(queue_item: dict) -> bool:
     tags = meta.get('tags', [])
     description = meta.get('description', '')
 
-    # Replace placeholders in prompt so users can reference them in output formatting
+    # Build the two strategy-specific prompts (fixed prefix + user prompt, metadata injected).
+    # {transcript} in the transcript prompt is resolved inside _summarize_via_transcript.
     video_link = f"https://www.youtube.com/watch?v={video_id}"
-    prompt = prompt.replace('{link}', video_link)
-    prompt = prompt.replace('{channel_name}', channel_name or 'N/A')
+    prompt_video      = _build_yt_prompt(_FIXED_PREFIX_VIDEO,      user_prompt,
+                                         title, channel_name, video_link)
+    prompt_transcript = _build_yt_prompt(_FIXED_PREFIX_TRANSCRIPT, user_prompt,
+                                         title, channel_name, video_link)
 
     # Compute duration_secs unconditionally (needed for video-hour tracking)
     duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
@@ -259,7 +370,7 @@ async def process_queue_item(queue_item: dict) -> bool:
         if not _video_allowed:
             raise RuntimeError("Daily video-hour quota reached")
         summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
-            loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt),
+            loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
         )
         transcript_source = 'gemini_video'
@@ -283,7 +394,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     if not summary_text:
         try:
             summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
-                loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt),
+                loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript),
                 timeout=_ITEM_TIMEOUT_SECS,
             )
             transcript_source = 'transcript_api'

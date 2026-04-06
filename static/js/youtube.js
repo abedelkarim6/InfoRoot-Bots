@@ -960,6 +960,8 @@ async function loadYtVideosData() {
         return;
     }
 
+    const _ytIsAdmin = currentUser && currentUser.role === 'admin';
+
     let html = `
         <table class="yt-table">
             <thead>
@@ -968,7 +970,7 @@ async function loadYtVideosData() {
                     <th>Channel</th>
                     <th>Status</th>
                     <th>Source</th>
-                    <th>Cost</th>
+                    ${_ytIsAdmin ? '<th>Cost</th>' : ''}
                     <th>Target</th>
                     <th>Sent</th>
                     <th>Created</th>
@@ -1045,7 +1047,7 @@ async function loadYtVideosData() {
                 <td>${escapeHtml(item.channel_name || '—')}</td>
                 <td><span class="yt-status-badge ${statusClass}">${item.status}</span></td>
                 <td>${sourceLabel ? `<span class="yt-filter-tag">${sourceLabel}</span>` : '<span class="text-muted">—</span>'}</td>
-                <td>${costCell}</td>
+                ${_ytIsAdmin ? `<td>${costCell}</td>` : ''}
                 <td>${target}</td>
                 <td>${sentBadge}</td>
                 <td class="text-muted">${timeAgo(item.created_at)}</td>

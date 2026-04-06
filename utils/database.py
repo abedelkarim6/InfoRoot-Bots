@@ -897,6 +897,25 @@ class Database:
         finally:
             self._commit()
 
+    def user_has_bot_access(self, user_id: int, bot_name: str) -> bool:
+        """True if user owns or has inherited the named bot."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT 1 FROM user_bot_inheritance ubi
+                   JOIN bots b ON b.id = ubi.bot_id
+                   WHERE ubi.user_id = %s AND b.name = %s
+                   LIMIT 1""",
+                (user_id, bot_name)
+            )
+            if cursor.fetchone():
+                return True
+            cursor.execute("SELECT 1 FROM bots WHERE name = %s AND owner_id = %s LIMIT 1",
+                           (bot_name, user_id))
+            return cursor.fetchone() is not None
+        finally:
+            self._commit()
+
     def get_bot_inheritance_id(self, user_id: int, bot_id: int):
         try:
             cursor = self._get_cursor()

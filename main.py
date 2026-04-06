@@ -21,9 +21,12 @@ from utils.prompts import get_summary_prompt
 from utils.helpers import load_config, setup_logging, categorizer
 
 import datetime
+from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+BEIRUT_TZ = ZoneInfo('Asia/Beirut')
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -346,7 +349,7 @@ def _compute_window_start(job_data) -> datetime.datetime:
     import math
 
     schedule_type = job_data.get('schedule_type', '')
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(BEIRUT_TZ)
 
     try:
         if schedule_type == 'interval':
@@ -487,7 +490,7 @@ async def generate_and_send_summary(job_data):
         # ── Time-window enforcement ──────────────────────────────────────────
         if schedule_type != 'minute':
             window_start = _compute_window_start(job_data)
-            logger.info(f"[WINDOW] window_start={window_start} | now={datetime.datetime.now()} | Bot={bot_name} | Topic={topic_name}")
+            logger.info(f"[WINDOW] window_start={window_start} | now={datetime.datetime.now(BEIRUT_TZ)} | Bot={bot_name} | Topic={topic_name}")
 
             in_window = []
             expired   = []
@@ -499,9 +502,13 @@ async def generate_and_send_summary(job_data):
                             ts = datetime.datetime.fromisoformat(ts)
                         except ValueError:
                             ts = None
-                    if ts and ts < window_start:
-                        expired.append(msg)
-                        continue
+                    if ts:
+                        # Make naive timestamps tz-aware (treat as Beirut time)
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=BEIRUT_TZ)
+                        if ts < window_start:
+                            expired.append(msg)
+                            continue
                 in_window.append(msg)
 
             if expired:
@@ -559,7 +566,7 @@ async def generate_and_send_summary(job_data):
         if header_text:
             if job_data.get('header_datetime'):
                 ar_days = ['الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
-                now = datetime.datetime.now()
+                now = datetime.datetime.now(BEIRUT_TZ)
                 day_name = ar_days[now.weekday()]
                 hour_12 = now.hour % 12 or 12
                 am_pm = 'ص' if now.hour < 12 else 'م'
@@ -764,7 +771,7 @@ async def schedule_summaries():
     if SCHEDULER and SCHEDULER.running:
         SCHEDULER.remove_all_jobs()
     else:
-        SCHEDULER = AsyncIOScheduler(job_defaults={'misfire_grace_time': 60})
+        SCHEDULER = AsyncIOScheduler(timezone=BEIRUT_TZ, job_defaults={'misfire_grace_time': 60})
         SCHEDULER.start()
 
     bots_cfg = db.get_all_bots_config()
@@ -846,7 +853,7 @@ async def schedule_summaries():
                             interval_mins = schedule.get('minutes', 30)
                             start_hour   = schedule.get('start_hour', 0)
                             start_minute = schedule.get('start_minute', 0)
-                            now = datetime.datetime.now()
+                            now = datetime.datetime.now(BEIRUT_TZ)
                             # Anchor to today's start time (or yesterday if still in future).
                             # IntervalTrigger computes the correct next fire from the anchor,
                             # so rebuilding the scheduler never resets the fire cycle.
@@ -858,7 +865,7 @@ async def schedule_summaries():
                             interval_hours = schedule.get('hours', 1)
                             start_hour   = schedule.get('start_hour', 0)
                             start_minute = schedule.get('start_minute', 0)
-                            now = datetime.datetime.now()
+                            now = datetime.datetime.now(BEIRUT_TZ)
                             # Anchor to today's start time (or yesterday if still in future).
                             # IntervalTrigger computes the correct next fire from the anchor,
                             # so rebuilding the scheduler never resets the fire cycle.
