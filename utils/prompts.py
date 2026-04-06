@@ -1,14 +1,15 @@
 """
-Prompts for OpenAI summarization.
+Prompts for OpenAI/Gemini summarization.
 Each format provides a different style of summary.
 """
 from typing import List
 from utils.database import get_db
 
-SYSTEM_PROMPT = "أنت خبير في تلخيص الأخبار العربية بأسلوب صحفي دقيق وميجز."
+# Hardcoded defaults — used when no override is stored in config.yaml
+_DEFAULT_SYSTEM_PROMPT = "أنت خبير في تلخيص الأخبار العربية بأسلوب صحفي دقيق وميجز."
 
 # Fixed prefix injected before every user prompt — not shown in the UI.
-_FIXED_PREFIX = """\
+_DEFAULT_FIXED_PREFIX = """\
 الموضوع:
 
 {topic_name}
@@ -31,6 +32,32 @@ _FIXED_PREFIX = """\
 ---
 User Prompt:
 """
+
+# Backward-compatible aliases (modules that import SYSTEM_PROMPT directly still work)
+SYSTEM_PROMPT = _DEFAULT_SYSTEM_PROMPT
+_FIXED_PREFIX = _DEFAULT_FIXED_PREFIX
+
+
+def get_system_prompt() -> str:
+    """Return the active system prompt, reading override from config.yaml if set."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        val = cfg.get("system_prompts", {}).get("summaries_system", "")
+        return val or _DEFAULT_SYSTEM_PROMPT
+    except Exception:
+        return _DEFAULT_SYSTEM_PROMPT
+
+
+def get_fixed_prefix() -> str:
+    """Return the active fixed prefix, reading override from config.yaml if set."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        val = cfg.get("system_prompts", {}).get("summaries_prefix", "")
+        return val or _DEFAULT_FIXED_PREFIX
+    except Exception:
+        return _DEFAULT_FIXED_PREFIX
 
 
 def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_name: str = '') -> str:
@@ -77,9 +104,11 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_n
 
     fmt = string.Formatter()
 
+    active_prefix = get_fixed_prefix()
+
     # Render fixed prefix (injects {topic_name} and {messages})
     prefix = fmt.vformat(
-        _FIXED_PREFIX, (), _SafeDict(messages=combined_news, topic_name=topic_name)
+        active_prefix, (), _SafeDict(messages=combined_news, topic_name=topic_name)
     )
 
     # Render user prompt (only {topic_name} is meaningful here; {messages} already in prefix)

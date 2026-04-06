@@ -158,7 +158,7 @@
                 </svg>
                 Sign Out
             </button>
-            <p class="sidebar-copyright">© Inforoot.org. All rights reserved.<br><a href="#" class="sidebar-copyright-link" onclick="showPage('privacy');return false;">Privacy Policy</a></p>
+            <p class="sidebar-copyright">© Inforoot.org. All rights reserved.<br><a href="/static/terms.html" target="_blank" class="sidebar-copyright-link">Terms of Service</a> · <a href="/static/privacy.html" target="_blank" class="sidebar-copyright-link">Privacy Policy</a></p>
         </div>
     </aside>
 
@@ -640,6 +640,22 @@
                     </div>
                     <textarea class="input yt-prompt-textarea" id="yt-prompt-text" rows="4" placeholder="Loading prompt…"></textarea>
                 </div>
+                <!-- Admin-only: Fixed prefix prompts -->
+                <div class="yt-prompt-card yt-fixed-prefix-card" id="yt-fixed-prefix-card" style="display:none">
+                    <div class="yt-prompt-header">
+                        <h3>🔒 Fixed System Prefix <span class="admin-badge">Admin</span></h3>
+                        <div style="display:flex;gap:6px;">
+                            <select class="input" id="yt-prefix-tab" onchange="ytSwitchPrefixTab()" style="font-size:12px;padding:4px 8px;height:auto">
+                                <option value="video">Video Strategy</option>
+                                <option value="transcript">Transcript Strategy</option>
+                            </select>
+                            <button class="btn btn-secondary btn-sm" onclick="ytResetFixedPrefix()">Reset</button>
+                            <button class="btn btn-primary btn-sm" onclick="ytSaveFixedPrefix()">Save</button>
+                        </div>
+                    </div>
+                    <p class="text-muted" style="margin:0 0 6px;font-size:12px">Prepended before the Summarization Prompt above. Supports placeholders: {title}, {channel_name}, {link}, {guest}, {transcript} (transcript only).</p>
+                    <textarea class="input yt-prompt-textarea" id="yt-fixed-prefix-text" rows="6" placeholder="Loading…" style="font-family:monospace;font-size:12px"></textarea>
+                </div>
                 <div class="yt-prompt-card" style="flex:0 0 auto;min-width:260px;">
                     <div class="yt-prompt-header">
                         <h3>📤 Default Targets</h3>
@@ -1052,7 +1068,9 @@
         <footer class="site-footer">
             <span>© 2026 Inforoot.org. All rights reserved.</span>
             <span class="site-footer-sep">·</span>
-            <a href="#" class="site-footer-link" onclick="showPage('privacy');return false;">Privacy Policy</a>
+            <a href="/static/terms.html" target="_blank" class="site-footer-link">Terms of Service</a>
+            <span class="site-footer-sep">·</span>
+            <a href="/static/privacy.html" target="_blank" class="site-footer-link">Privacy Policy</a>
         </footer>
 
     </main>

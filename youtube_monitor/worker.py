@@ -33,9 +33,9 @@ IMPORTANT: Focus ONLY on the actual video content. Completely ignore and exclude
 - Intro/outro filler unrelated to the main topic
 Do NOT mention any advertisements or sponsorships in your summary."""
 
-# Fixed prefix for strategy 1 (Gemini native video — URL sent directly, no transcript text).
-# Not shown in the UI; prepended silently before the user's prompt.
-_FIXED_PREFIX_VIDEO = """\
+# Hardcoded defaults for the fixed prefixes.
+# Admins can override these via the UI (stored in config.yaml under system_prompts).
+_DEFAULT_FIXED_PREFIX_VIDEO = """\
 العنوان:
 {title}
 
@@ -76,9 +76,7 @@ _FIXED_PREFIX_VIDEO = """\
 User Prompt:
 """
 
-# Fixed prefix for strategy 2 (transcript text — full transcript injected at {transcript}).
-# Not shown in the UI; prepended silently before the user's prompt.
-_FIXED_PREFIX_TRANSCRIPT = """\
+_DEFAULT_FIXED_PREFIX_TRANSCRIPT = """\
 المحتوى:
 {transcript}
 
@@ -121,6 +119,22 @@ _FIXED_PREFIX_TRANSCRIPT = """\
 ---
 User Prompt:
 """
+
+
+def _get_fixed_prefix_video() -> str:
+    """Read the video fixed prefix from config.yaml, falling back to the hardcoded default."""
+    from utils.helpers import load_config
+    cfg = load_config()
+    val = cfg.get("system_prompts", {}).get("youtube_prefix_video", "")
+    return val or _DEFAULT_FIXED_PREFIX_VIDEO
+
+
+def _get_fixed_prefix_transcript() -> str:
+    """Read the transcript fixed prefix from config.yaml, falling back to the hardcoded default."""
+    from utils.helpers import load_config
+    cfg = load_config()
+    val = cfg.get("system_prompts", {}).get("youtube_prefix_transcript", "")
+    return val or _DEFAULT_FIXED_PREFIX_TRANSCRIPT
 
 
 def _build_yt_prompt(prefix_template: str, user_prompt: str,
@@ -316,9 +330,9 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Build the two strategy-specific prompts (fixed prefix + user prompt, metadata injected).
     # {transcript} in the transcript prompt is resolved inside _summarize_via_transcript.
     video_link = f"https://www.youtube.com/watch?v={video_id}"
-    prompt_video      = _build_yt_prompt(_FIXED_PREFIX_VIDEO,      user_prompt,
+    prompt_video      = _build_yt_prompt(_get_fixed_prefix_video(),      user_prompt,
                                          title, channel_name, video_link)
-    prompt_transcript = _build_yt_prompt(_FIXED_PREFIX_TRANSCRIPT, user_prompt,
+    prompt_transcript = _build_yt_prompt(_get_fixed_prefix_transcript(), user_prompt,
                                          title, channel_name, video_link)
 
     # Compute duration_secs unconditionally (needed for video-hour tracking)

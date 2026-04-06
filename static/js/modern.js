@@ -1512,6 +1512,12 @@ function _renderBotDetailView(name, bot, keepOpen = null) {
                 if (el) el.classList.add('open');
             });
         }
+        // If the prompts tab is already active on render, load fixed prompts
+        const savedTab = localStorage.getItem(`bot-tab-${name}`) || 'basic';
+        if (savedTab === 'prompts') {
+            const isAdmin = !currentUser || currentUser.role === 'admin';
+            if (isAdmin) loadSummariesFixedPrompts();
+        }
     }, 50);
 }
 
@@ -1557,6 +1563,10 @@ function switchBotTab(botName, tab) {
     card.querySelectorAll('.bot-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     card.querySelectorAll('.bot-tab-pane').forEach(p => p.classList.toggle('active', p.dataset.tab === tab));
     localStorage.setItem(`bot-tab-${botName}`, tab);
+    if (tab === 'prompts') {
+        const isAdmin = !currentUser || currentUser.role === 'admin';
+        if (isAdmin) loadSummariesFixedPrompts();
+    }
 }
 
 function createBasicSettingsSection(botName, bot) {
@@ -1650,6 +1660,37 @@ function createPromptsSection(botName) {
     const sectionId = `prompts-${botName}`;
     const savedState = loadCollapsibleState(sectionId);
     const defaultOpen = savedState !== null ? savedState : false; // Default closed for Prompts
+    const isAdmin = !currentUser || currentUser.role === 'admin';
+
+    const fixedPromptsHtml = isAdmin ? `
+        <div class="prompt-card prompt-card-fixed" id="fixed-sysprompt-card-${botName}">
+            <div class="prompt-card-header">
+                <h4 class="prompt-card-title">🔒 System Prompt <span class="admin-badge">Admin</span></h4>
+                <div class="prompt-card-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="resetSummariesFixedPrompt('system_prompt', 'fixed-sysprompt-${botName}')" title="Reset to default">Reset</button>
+                    <button class="btn btn-primary btn-sm" onclick="saveSummariesFixedPrompt('system_prompt', 'fixed-sysprompt-${botName}')">Save</button>
+                </div>
+            </div>
+            <textarea class="textarea"
+                      id="fixed-sysprompt-${botName}"
+                      rows="2"
+                      placeholder="Loading…"></textarea>
+        </div>
+        <div class="prompt-card prompt-card-fixed" id="fixed-prefix-card-${botName}">
+            <div class="prompt-card-header">
+                <h4 class="prompt-card-title">🔒 Fixed Prefix <span class="admin-badge">Admin</span></h4>
+                <div class="prompt-card-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="resetSummariesFixedPrompt('fixed_prefix', 'fixed-prefix-${botName}')" title="Reset to default">Reset</button>
+                    <button class="btn btn-primary btn-sm" onclick="saveSummariesFixedPrompt('fixed_prefix', 'fixed-prefix-${botName}')">Save</button>
+                </div>
+            </div>
+            <p class="text-muted" style="margin:0 0 4px;font-size:11px">Injected before every user prompt. Supports: {topic_name}, {messages}.</p>
+            <textarea class="textarea"
+                      id="fixed-prefix-${botName}"
+                      rows="5"
+                      style="font-family:monospace;font-size:12px"
+                      placeholder="Loading…"></textarea>
+        </div>` : '';
 
     return `
         <div class="collapsible-section ${defaultOpen ? 'open' : ''}" id="${sectionId}">
@@ -1663,6 +1704,7 @@ function createPromptsSection(botName) {
             <div class="collapsible-content">
                 <div class="collapsible-body">
                     <p class="text-muted mb-2">Manage prompts for this bot</p>
+                    ${fixedPromptsHtml}
                     ${Object.entries(prompts).map(([key, value]) => {
                         const promptText = (value && typeof value === 'object') ? (value.text || '') : (value || '');
                         return `
@@ -1689,6 +1731,42 @@ function createPromptsSection(botName) {
             </div>
         </div>
     `;
+}
+
+// ==================== Summaries Fixed Prompts (Admin Only) ====================
+
+let _summariesFixedDefaults = { system_prompt: '', fixed_prefix: '' };
+let _summariesFixedLoaded = false;
+
+async function loadSummariesFixedPrompts() {
+    if (_summariesFixedLoaded) return;
+    const res = await api('/api/system/fixed-prefix');
+    if (res.status !== 'ok') return;
+    _summariesFixedDefaults.system_prompt = res.default_system_prompt || '';
+    _summariesFixedDefaults.fixed_prefix  = res.default_fixed_prefix  || '';
+    _summariesFixedLoaded = true;
+    // Populate all visible fixed prompt textareas
+    document.querySelectorAll('[id^="fixed-sysprompt-"]').forEach(el => {
+        if (!el.value) el.value = res.system_prompt || res.default_system_prompt || '';
+    });
+    document.querySelectorAll('[id^="fixed-prefix-"]').forEach(el => {
+        if (!el.value) el.value = res.fixed_prefix || res.default_fixed_prefix || '';
+    });
+}
+
+async function saveSummariesFixedPrompt(field, textareaId) {
+    const ta = document.getElementById(textareaId);
+    if (!ta) return;
+    const body = { [field]: ta.value };
+    const res = await api('/api/system/fixed-prefix/save', body);
+    if (res.status === 'ok') showAlert('Saved successfully.');
+    else showAlert('Failed to save.');
+}
+
+function resetSummariesFixedPrompt(field, textareaId) {
+    const ta = document.getElementById(textareaId);
+    if (!ta) return;
+    ta.value = _summariesFixedDefaults[field] || '';
 }
 
 // ==================== Bot Rules Section ====================

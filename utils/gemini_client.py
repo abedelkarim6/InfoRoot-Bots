@@ -7,7 +7,7 @@ Authentication uses Application Default Credentials (ADC) set by:
 import logging
 import google.genai as genai
 from google.genai import types
-from utils.prompts import SYSTEM_PROMPT
+from utils.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class GeminiClient:
 
     def generate_summary(self, prompt: str) -> str:
         try:
-            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+            full_prompt = f"{get_system_prompt()}\n\n{prompt}"
             labels = {"service": "bots"}
             if self.user_id is not None:
                 labels["user_id"] = str(self.user_id)

@@ -173,6 +173,7 @@ class YouTubeDB:
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
         _ensure_col('yt_video_queue', 'updated_at', 'TIMESTAMP', 'NOW()')
+        _ensure_col('yt_video_queue', 'added_by_user_id', 'INTEGER')
 
         # Channel-level video filters (mirror of keyword filters)
         _ensure_col('yt_channels', 'min_duration_seconds', 'INTEGER')
@@ -570,17 +571,18 @@ class YouTubeDB:
         return None
 
     def enqueue_video(self, video_id: str, telegram_target: str = None, prompt: str = None,
-                      source_channel_id: str = None, source_keyword_id: int = None):
+                      source_channel_id: str = None, source_keyword_id: int = None,
+                      added_by_user_id: int = None):
         reason = self.is_video_already_queued_or_summarized(video_id)
         if reason:
             logger.info(f"[YT-DB] Skipping enqueue for {video_id}: {reason}")
             return None
         cursor = self._get_cursor()
         cursor.execute("""
-            INSERT INTO yt_video_queue (video_id, telegram_target, prompt, source_channel_id, source_keyword_id)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO yt_video_queue (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (video_id, telegram_target, prompt, source_channel_id, source_keyword_id))
+        """, (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
@@ -654,15 +656,17 @@ class YouTubeDB:
         """, (queue_id,))
         self.connection.commit()
 
-    def get_queue_stats(self, yt_ch_ids=None, kw_ids=None):
+    def get_queue_stats(self, yt_ch_ids=None, kw_ids=None, user_id=None):
         """Queue and daily summary stats.
 
         Pass yt_ch_ids (YouTube channel_id strings) and/or kw_ids (keyword DB IDs)
         to scope counts to a specific user. None = no filter (global).
+        user_id additionally shows manually-added videos for that user.
         """
         scoped = yt_ch_ids is not None or kw_ids is not None
         ch_f = yt_ch_ids or []
         kw_f = kw_ids or []
+        uid_f = user_id if user_id is not None else -1
         # Sentinel values that will never match real rows
         ch_sentinel = ['__none__']
         kw_sentinel = [-1]
@@ -674,8 +678,9 @@ class YouTubeDB:
                 SELECT status, COUNT(*) AS cnt
                 FROM yt_video_queue
                 WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+                   OR added_by_user_id = %s
                 GROUP BY status
-            """, (ch_f or ch_sentinel, kw_f or kw_sentinel))
+            """, (ch_f or ch_sentinel, kw_f or kw_sentinel, uid_f))
         else:
             cursor.execute("SELECT status, COUNT(*) AS cnt FROM yt_video_queue GROUP BY status")
         stats = {r['status']: r['cnt'] for r in cursor.fetchall()}
@@ -692,9 +697,10 @@ class YouTubeDB:
                   AND EXISTS (
                       SELECT 1 FROM yt_video_queue q
                       WHERE q.video_id = s.video_id
-                        AND (q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s))
+                        AND (q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s)
+                             OR q.added_by_user_id = %s)
                   )
-            """, (ch_f or ch_sentinel, kw_f or kw_sentinel))
+            """, (ch_f or ch_sentinel, kw_f or kw_sentinel, uid_f))
         else:
             cursor.execute("""
                 SELECT
@@ -862,12 +868,13 @@ class YouTubeDB:
             'today': today,
         }
 
-    def get_queue_items(self, limit: int = 100, yt_ch_ids=None, kw_ids=None):
+    def get_queue_items(self, limit: int = 100, yt_ch_ids=None, kw_ids=None, user_id=None):
         cursor = self._get_cursor()
         scoped = yt_ch_ids is not None or kw_ids is not None
         if scoped:
             ch_f = yt_ch_ids or ['__none__']
             kw_f = kw_ids or [-1]
+            uid_f = user_id if user_id is not None else -1
             cursor.execute("""
                 SELECT q.*, sv.title AS video_title,
                        COALESCE(ch.channel_name, sm.channel_name, sv.channel_id) AS video_channel_name
@@ -880,9 +887,10 @@ class YouTubeDB:
                     LIMIT 1
                 ) sm ON TRUE
                 WHERE q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s)
+                   OR q.added_by_user_id = %s
                 ORDER BY q.created_at DESC
                 LIMIT %s
-            """, (ch_f, kw_f, limit))
+            """, (ch_f, kw_f, uid_f, limit))
         else:
             cursor.execute("""
                 SELECT q.*, sv.title AS video_title,
@@ -909,11 +917,12 @@ class YouTubeDB:
                            status_filter: str = None, channel_filter: str = None,
                            source_filter: str = None, date_from: str = None,
                            date_to: str = None,
-                           yt_ch_ids=None, kw_ids=None):
+                           yt_ch_ids=None, kw_ids=None, user_id=None):
         """Return queue items joined with their summaries in one unified view with pagination.
 
         yt_ch_ids: list of YouTube channel_id strings to restrict to (None = all).
         kw_ids: list of keyword DB IDs to restrict to (None = all).
+        user_id: also include videos manually added by this user.
         """
         cursor = self._get_cursor()
         clauses = []
@@ -923,8 +932,9 @@ class YouTubeDB:
         if yt_ch_ids is not None or kw_ids is not None:
             ch_f = yt_ch_ids or ['__none__']
             kw_f = kw_ids or [-1]
-            clauses.append("(q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s))")
-            params.extend([ch_f, kw_f])
+            uid_f = user_id if user_id is not None else -1
+            clauses.append("(q.source_channel_id = ANY(%s) OR q.source_keyword_id = ANY(%s) OR q.added_by_user_id = %s)")
+            params.extend([ch_f, kw_f, uid_f])
 
         if status_filter:
             clauses.append("q.status = %s")
@@ -1012,7 +1022,7 @@ class YouTubeDB:
     def get_summaries(self, limit: int = 100, channel_name: str = None,
                       transcript_source: str = None, telegram_sent: str = None,
                       date_from: str = None, date_to: str = None,
-                      yt_ch_ids=None, kw_ids=None):
+                      yt_ch_ids=None, kw_ids=None, user_id=None):
         cursor = self._get_cursor()
         clauses = []
         params = []
@@ -1021,13 +1031,15 @@ class YouTubeDB:
         if yt_ch_ids is not None or kw_ids is not None:
             ch_f = yt_ch_ids or ['__none__']
             kw_f = kw_ids or [-1]
+            uid_f = user_id if user_id is not None else -1
             clauses.append("""
                 video_id IN (
                     SELECT video_id FROM yt_video_queue
                     WHERE source_channel_id = ANY(%s) OR source_keyword_id = ANY(%s)
+                       OR added_by_user_id = %s
                 )
             """)
-            params.extend([ch_f, kw_f])
+            params.extend([ch_f, kw_f, uid_f])
 
         if channel_name:
             clauses.append("channel_name ILIKE %s")

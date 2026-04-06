@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Body, Request
 from utils.helpers import start_bot_subprocess, stop_bot_subprocess
 from utils.database import get_db
+from routers.auth import is_admin_request
 
 logger = logging.getLogger("system_router")
 router = APIRouter()
@@ -52,6 +53,41 @@ def get_gemini_usage():
     """Return current Gemini API usage counters (RPM, TPM, RPD)."""
     from utils.gemini_usage import get_gemini_usage as _get
     return {"status": "ok", **_get()}
+
+
+@router.get("/system/fixed-prefix")
+def get_summaries_fixed_prefix(request: Request):
+    """Return the active summaries system prompt and fixed prefix (admin only)."""
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    from utils.prompts import get_system_prompt, get_fixed_prefix, _DEFAULT_SYSTEM_PROMPT, _DEFAULT_FIXED_PREFIX
+    return {
+        "status": "ok",
+        "system_prompt": get_system_prompt(),
+        "fixed_prefix": get_fixed_prefix(),
+        "default_system_prompt": _DEFAULT_SYSTEM_PROMPT,
+        "default_fixed_prefix": _DEFAULT_FIXED_PREFIX,
+    }
+
+
+@router.post("/system/fixed-prefix/save")
+async def save_summaries_fixed_prefix(request: Request):
+    """Save overrides for the summaries system prompt and fixed prefix (admin only)."""
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    import yaml
+    from utils.helpers import load_config
+    data = await request.json()
+    cfg = load_config()
+    if "system_prompts" not in cfg:
+        cfg["system_prompts"] = {}
+    if "system_prompt" in data:
+        cfg["system_prompts"]["summaries_system"] = data["system_prompt"]
+    if "fixed_prefix" in data:
+        cfg["system_prompts"]["summaries_prefix"] = data["fixed_prefix"]
+    with open("config.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return {"status": "ok"}
 
 
 @router.post("/system/restart")

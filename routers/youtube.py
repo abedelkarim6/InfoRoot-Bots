@@ -18,7 +18,11 @@ from youtube_monitor.websub import (
     process_websub_notification,
 )
 from youtube_monitor.keyword_search import run_keyword_search, run_all_keyword_searches
-from youtube_monitor.worker import process_pending_queue, process_queue_item, DEFAULT_PROMPT
+from youtube_monitor.worker import (
+    process_pending_queue, process_queue_item, DEFAULT_PROMPT,
+    _DEFAULT_FIXED_PREFIX_VIDEO, _DEFAULT_FIXED_PREFIX_TRANSCRIPT,
+    _get_fixed_prefix_video, _get_fixed_prefix_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +69,18 @@ def _track_yt_usage(request: Request):
 
 
 def _get_yt_user_source_filter(request: Request):
-    """Return (yt_ch_ids, kw_db_ids) scoped to the current user.
+    """Return (yt_ch_ids, kw_db_ids, user_id) scoped to the current user.
 
-    Returns (None, None) for admin → no filter (global view).
-    Returns ([], []) for unauthenticated → see nothing.
-    Returns ([youtube_channel_id_strings], [keyword_db_int_ids]) for regular users.
+    Returns (None, None, None) for admin → no filter (global view).
+    Returns ([], [], None) for unauthenticated → see nothing.
+    Returns ([youtube_channel_id_strings], [keyword_db_int_ids], user_id) for regular users.
+    The user_id allows manually-added videos to be visible to the user who added them.
     """
     if is_admin_request(request):
-        return None, None
+        return None, None, None
     user_id = get_request_user_id(request)
     if not user_id:
-        return [], []
+        return [], [], None
     from utils.database import get_db
     inheritances = get_db().get_user_yt_inheritances(user_id)
     ch_db_ids = [i['source_id'] for i in inheritances if i['source_type'] == 'channel']
@@ -86,7 +91,7 @@ def _get_yt_user_source_filter(request: Request):
     if ch_db_ids:
         ch_id_map = {ch['id']: ch['channel_id'] for ch in yt_db.get_channels()}
         yt_ch_ids = [ch_id_map[i] for i in ch_db_ids if i in ch_id_map]
-    return yt_ch_ids, kw_db_ids
+    return yt_ch_ids, kw_db_ids, user_id
 
 
 def _get_callback_url(request: Request = None):
@@ -524,8 +529,10 @@ async def add_manual_video(request: Request):
     if reason:
         return {"status": "error", "message": f"Video {video_id} is {reason}"}
 
+    added_by = get_request_user_id(request)  # None for admin (legacy token)
     db.mark_video_seen(video_id, title=None, channel_id=None, source='manual')
-    queue_id = db.enqueue_video(video_id, telegram_target=telegram_target, prompt=prompt)
+    queue_id = db.enqueue_video(video_id, telegram_target=telegram_target, prompt=prompt,
+                                added_by_user_id=added_by)
 
     return {"status": "ok", "video_id": video_id, "queue_id": queue_id}
 
@@ -572,6 +579,38 @@ async def save_prompt(request: Request):
     return {"status": "ok"}
 
 
+@router.get("/fixed-prefix")
+async def get_fixed_prefix(request: Request):
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    return {
+        "status": "ok",
+        "prefix_video": _get_fixed_prefix_video(),
+        "prefix_transcript": _get_fixed_prefix_transcript(),
+        "default_prefix_video": _DEFAULT_FIXED_PREFIX_VIDEO,
+        "default_prefix_transcript": _DEFAULT_FIXED_PREFIX_TRANSCRIPT,
+    }
+
+
+@router.post("/fixed-prefix/save")
+async def save_fixed_prefix(request: Request):
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    import yaml
+    from utils.helpers import load_config
+    data = await request.json()
+    cfg = load_config()
+    if "system_prompts" not in cfg:
+        cfg["system_prompts"] = {}
+    if "prefix_video" in data:
+        cfg["system_prompts"]["youtube_prefix_video"] = data["prefix_video"]
+    if "prefix_transcript" in data:
+        cfg["system_prompts"]["youtube_prefix_transcript"] = data["prefix_transcript"]
+    with open("config.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return {"status": "ok"}
+
+
 @router.post("/default-targets/save")
 async def save_default_targets(request: Request):
     import yaml
@@ -600,13 +639,13 @@ async def get_videos_unified(
     date_to: str = Query(None),
 ):
     db = get_yt_db()
-    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
-    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
+    yt_ch_ids, kw_ids, uid = _get_yt_user_source_filter(request)
+    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid)
     result = db.get_videos_unified(
         limit=limit, offset=offset, status_filter=status,
         channel_filter=channel, source_filter=source,
         date_from=date_from, date_to=date_to,
-        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids,
+        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid,
     )
     return {"status": "ok", "stats": stats, "items": result["items"], "total": result["total"]}
 
@@ -616,9 +655,9 @@ async def get_videos_unified(
 @router.get("/queue")
 async def get_queue(request: Request):
     db = get_yt_db()
-    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
-    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
-    items = db.get_queue_items(limit=200, yt_ch_ids=yt_ch_ids, kw_ids=kw_ids)
+    yt_ch_ids, kw_ids, uid = _get_yt_user_source_filter(request)
+    stats = db.get_queue_stats(yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid)
+    items = db.get_queue_items(limit=200, yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid)
     return {"status": "ok", "stats": stats, "items": items}
 
 
@@ -712,12 +751,12 @@ async def get_summaries(
     limit: int = Query(100),
 ):
     db = get_yt_db()
-    yt_ch_ids, kw_ids = _get_yt_user_source_filter(request)
+    yt_ch_ids, kw_ids, uid = _get_yt_user_source_filter(request)
     summaries = db.get_summaries(
         limit=limit, channel_name=channel_name,
         transcript_source=transcript_source, telegram_sent=telegram_sent,
         date_from=date_from, date_to=date_to,
-        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids,
+        yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid,
     )
     return {"status": "ok", "summaries": summaries}
 

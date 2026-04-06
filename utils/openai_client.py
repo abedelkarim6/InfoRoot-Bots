@@ -4,7 +4,7 @@ OpenAI client for generating summaries.
 
 import openai
 import logging
-from utils.prompts import SYSTEM_PROMPT
+from utils.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class OpenAIClient:
             response = openai.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": get_system_prompt()},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=self.max_tokens,

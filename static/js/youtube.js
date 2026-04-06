@@ -8,6 +8,8 @@ let _ytTotalItems = 0;
 let _ytDateInitialized = false;
 let _ytProcessingCount = 0;
 const _ytProcessingMax = 3;
+let _ytFixedPrefixDefaults = { video: '', transcript: '' };
+let _ytFixedPrefixValues   = { video: '', transcript: '' };
 
 // ==================== Toast Notifications ====================
 
@@ -864,6 +866,50 @@ function ytResetPrompt() {
     ytToast('Reset to default prompt', 'info');
 }
 
+// ==================== Fixed Prefix (Admin Only) ====================
+
+async function ytLoadFixedPrefixes() {
+    const card = document.getElementById('yt-fixed-prefix-card');
+    if (!card) return;
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    if (!isAdmin) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const res = await api('/api/youtube/fixed-prefix');
+    if (res.status !== 'ok') return;
+    _ytFixedPrefixDefaults.video      = res.default_prefix_video      || '';
+    _ytFixedPrefixDefaults.transcript = res.default_prefix_transcript || '';
+    _ytFixedPrefixValues.video        = res.prefix_video              || '';
+    _ytFixedPrefixValues.transcript   = res.prefix_transcript         || '';
+    ytSwitchPrefixTab();
+}
+
+function ytSwitchPrefixTab() {
+    const tab = document.getElementById('yt-prefix-tab')?.value || 'video';
+    const ta  = document.getElementById('yt-fixed-prefix-text');
+    if (ta) ta.value = _ytFixedPrefixValues[tab] || _ytFixedPrefixDefaults[tab] || '';
+}
+
+async function ytSaveFixedPrefix() {
+    const tab = document.getElementById('yt-prefix-tab')?.value || 'video';
+    const ta  = document.getElementById('yt-fixed-prefix-text');
+    const val = ta ? ta.value : '';
+    _ytFixedPrefixValues[tab] = val;
+    const body = tab === 'video'
+        ? { prefix_video: val }
+        : { prefix_transcript: val };
+    const res = await api('/api/youtube/fixed-prefix/save', body);
+    if (res.status === 'ok') ytToast('Fixed prefix saved', 'success');
+    else ytToast('Failed to save.', 'error');
+}
+
+function ytResetFixedPrefix() {
+    const tab = document.getElementById('yt-prefix-tab')?.value || 'video';
+    const ta  = document.getElementById('yt-fixed-prefix-text');
+    if (ta) ta.value = _ytFixedPrefixDefaults[tab] || '';
+    _ytFixedPrefixValues[tab] = _ytFixedPrefixDefaults[tab] || '';
+    ytToast('Reset to default', 'info');
+}
+
 async function ytSaveDefaultTargets() {
     const input = document.getElementById('yt-default-targets');
     const targets = _parseCommaSep(input ? input.value : '');
@@ -876,9 +922,12 @@ async function ytSaveDefaultTargets() {
 // ==================== Videos Page (unified queue + summaries) ====================
 
 async function loadYtVideosData() {
-    // Load prompt on first visit
+    // Load prompt + fixed prefixes on first visit
     const textarea = document.getElementById('yt-prompt-text');
-    if (textarea && !textarea.value) ytLoadPrompt();
+    if (textarea && !textarea.value) {
+        ytLoadPrompt();
+        ytLoadFixedPrefixes();
+    }
 
     // Default date to today on first load
     if (!_ytDateInitialized) {
@@ -1028,9 +1077,6 @@ async function loadYtVideosData() {
         }
         if (item.status === 'pending' || item.status === 'failed') {
             actions += `<button class="btn btn-secondary btn-sm" onclick="ytProcessOneItem(${item.id}, this)" title="Process now">▶</button>`;
-        }
-        if (item.status === 'failed') {
-            actions += `<button class="btn btn-secondary btn-sm" onclick="ytRetryQueueItem(${item.id})" title="Retry">🔄</button>`;
         }
         if (item.error_log) {
             actions += `<button class="btn btn-secondary btn-sm" onclick="ytShowError(${item.id})" title="View error">⚠️</button>`;

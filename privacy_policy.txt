@@ -1,0 +1,104 @@
+*Privacy Policy*
+
+*Effective Date:* April 7, 2026
+
+Welcome to *Inforoot.org* (“Inforoot”, a platform operated by individuals based in Lebanon.
+
+This Privacy Policy explains how we collect, use, and handle your information when you use our services.
+
+By using Inforoot, you agree to this Privacy Policy.
+
+*1. Information We Collect*
+
+We may collect the following types of information:
+
+- Account information (such as email address and login credentials)  
+- Content data from connected sources (such as text from Telegram, WhatsApp, and YouTube)  
+- User-generated inputs (such as prompts, configurations, and automation settings)  
+
+We only collect data necessary to provide and operate the service.
+
+*2. How We Use Information*
+
+We use collected information to:
+
+- Provide and operate the platform  
+- Process and transform content using AI tools  
+- Enable automation and content distribution  
+- Maintain system performance, reliability, and security  
+
+We do not use your data for advertising purposes.
+
+*3. AI Processing*
+
+Inforoot uses third-party AI providers (such as OpenAI and Gemini) to process content.
+
+- Your data may be sent to these providers for processing  
+- We do *not* use your data to train AI models  
+- AI providers may process data according to their own policies  
+
+*4. Data Storage and Retention*
+
+We store data only as long as necessary to provide the service.
+
+- Data remains stored until you delete it or stop using the service  
+- We may delete data at our discretion, including upon account termination  
+
+*5. Data Sharing*
+
+We do not sell or share your personal data with third parties, except:
+
+- When required to operate the service (e.g., AI providers)  
+- When required by law or legal process  
+
+*6. Third-Party Services*
+
+Inforoot connects with third-party platforms such as Telegram, WhatsApp, and YouTube.
+
+- We do not control these platforms  
+- Your use of these services is subject to their own terms and policies  
+- We are not responsible for how these platforms handle your data  
+
+*7. Cookies and Basic Tracking*
+
+We may use basic cookies or similar technologies to:
+
+- Maintain user sessions (e.g., keeping you logged in)  
+- Ensure proper functionality of the platform  
+
+We do not use cookies for advertising or cross-site tracking.
+
+*8. Data Security*
+
+We take reasonable measures to protect your data.
+
+However, no system is completely secure, and we cannot guarantee absolute security.
+
+*9. Your Responsibilities*
+
+You are responsible for:
+
+- Ensuring that you have the right to access and process any data you use  
+- Complying with applicable laws and third-party platform rules  
+
+*10. Eligibility*
+
+You must be at least 18 years old to use the service.
+
+*11. Geographic Availability*
+
+The service may not be available in certain regions.
+
+Users are responsible for ensuring their use complies with local laws.
+
+*12. Changes to This Policy*
+
+We may update this Privacy Policy at any time.
+
+Continued use of the service means you accept the updated policy.
+
+*13. Contact*
+
+For any privacy-related inquiries:
+
+*Info@inforoot.org*
