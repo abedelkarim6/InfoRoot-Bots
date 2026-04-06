@@ -179,14 +179,15 @@ _YT_LABELS = types.GenerateContentConfig(labels={"service": "youtube"})
 
 
 def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int]:
-    """Strategy 1: Send YouTube URL directly to Gemini for native video understanding.
+    """Strategy 1: Send YouTube URL directly to Vertex AI Gemini for native video understanding.
     Returns (summary_text, input_tokens, output_tokens)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=types.Content(
+            role="user",
             parts=[
-                types.Part(file_data=types.FileData(file_uri=url)),
+                types.Part(file_data=types.FileData(file_uri=url, mime_type="video/*")),
                 types.Part(text=prompt),
             ]
         ),

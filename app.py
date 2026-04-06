@@ -74,10 +74,16 @@ async def _yt_telegram_send(target: str, text: str):
     from telethon import TelegramClient
     from telethon.sessions import StringSession
     tg_cfg = _cfg.get("telegram", {})
+    # Prefer session stored in DB (set via Telegram setup page); fall back to config.yaml
     session_str = tg_cfg.get("string_session", "")
+    try:
+        admin_row = db.get_admin_user()
+        if admin_row and admin_row.get("telegram_session"):
+            session_str = admin_row["telegram_session"]
+    except Exception:
+        pass
     if not session_str:
-        logger.warning("[YT-TG] No string_session in config — cannot send")
-        return
+        raise RuntimeError("[YT-TG] No string_session in config or DB — cannot send")
     client = TelegramClient(
         StringSession(session_str),
         int(tg_cfg["api_id"]),
@@ -85,16 +91,22 @@ async def _yt_telegram_send(target: str, text: str):
     )
     try:
         await client.connect()
+
+        if not await client.is_user_authorized():
+            raise RuntimeError("[YT-TG] Session is not authorized — regenerate string_session")
+
         # Split into ≤4096-char chunks so long summaries don't get silently dropped
         chunk_size = 4096
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             try:
-                await client.send_message(target, chunk, parse_mode='md')
+                msg = await client.send_message(target, chunk, parse_mode='md')
             except Exception as md_err:
                 # Markdown parse error — retry as plain text
                 logger.warning(f"[YT-TG] Markdown send failed ({md_err}), retrying as plain text")
-                await client.send_message(target, chunk, parse_mode=None)
+                msg = await client.send_message(target, chunk, parse_mode=None)
+            if msg is None or not getattr(msg, 'id', None):
+                raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")
         logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")
     finally:
         await client.disconnect()
