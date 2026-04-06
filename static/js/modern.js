@@ -3051,17 +3051,17 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                     </label>
                     <span class="form-label" style="margin:0;">Show date & time in header</span>
                 </div>
-                <div id="topic-schedule-datetime-opts" style="display:${schedule.header_datetime ? 'block' : 'none'};padding-left:16px;">
+                <div id="topic-schedule-datetime-opts" style="display:none;padding-left:16px;">
                     <div class="form-group" style="display:flex;align-items:center;gap:10px;">
                         <label class="toggle-switch">
-                            <input type="checkbox" id="topic-schedule-date-arabic" ${schedule.header_date_arabic ? 'checked' : ''}>
+                            <input type="checkbox" id="topic-schedule-date-arabic">
                             <span class="toggle-slider"></span>
                         </label>
                         <span class="form-label" style="margin:0;">Date in Arabic numerals (٢٠٢٦/٠٣/٢١)</span>
                     </div>
                     <div class="form-group" style="display:flex;align-items:center;gap:10px;">
                         <label class="toggle-switch">
-                            <input type="checkbox" id="topic-schedule-time-arabic" ${schedule.header_time_arabic ? 'checked' : ''}>
+                            <input type="checkbox" id="topic-schedule-time-arabic">
                             <span class="toggle-slider"></span>
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
