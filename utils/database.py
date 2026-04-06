@@ -2132,6 +2132,7 @@ class Database:
             cursor.execute("DELETE FROM collections WHERE name = %s", (name,))
             deleted = cursor.rowcount > 0
             if deleted:
+                cursor.execute("DELETE FROM messages WHERE collection_name = %s", (name,))
                 self._bump_config_version()
             return deleted
         finally:
@@ -2419,6 +2420,7 @@ class Database:
             cursor.execute("DELETE FROM bots WHERE name = %s", (name,))
             deleted = cursor.rowcount > 0
             if deleted:
+                cursor.execute("DELETE FROM messages WHERE bot_name = %s", (name,))
                 self._bump_config_version()
             return deleted
         finally:

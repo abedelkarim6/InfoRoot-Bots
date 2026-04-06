@@ -221,29 +221,6 @@ function renderTgSetupCard(u) {
       </div>
     </div>
 
-    <!-- Advanced: paste session string directly -->
-    <details style="margin-top:16px">
-      <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none">🔑 Advanced: Paste Session String</summary>
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)">
-        <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
-          <div>
-            <label class="form-label">Phone number (optional)</label>
-            <input id="pf-ss-phone" type="tel" class="input" style="margin-top:4px"
-              placeholder="+1 234 567 8900" value="${escapeHtmlSys(u.telegram_phone || '')}">
-          </div>
-          <div>
-            <label class="form-label">Session string</label>
-            <textarea id="pf-ss-value" class="input" rows="3"
-              style="margin-top:4px;resize:vertical;font-family:monospace;font-size:11px"
-              placeholder="Paste your StringSession here…"></textarea>
-          </div>
-          <div id="pf-ss-msg" class="pf-err"></div>
-          <button class="btn btn-primary" style="align-self:flex-start" onclick="pfUpdateSession()">
-            Save Session
-          </button>
-        </div>
-      </div>
-    </details>
   </div>`;
 }
 
