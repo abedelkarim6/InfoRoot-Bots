@@ -111,6 +111,10 @@ let _channelValidation = {}; // { '@channel': 'ok'|'warn'|'pending' }
 let _pickerChannels = [];    // cached joined channels for the picker dropdown
 let _pickerCloser  = null;   // document click handler to close picker
 
+// SEO hidden mode: tracks keywords added by the user this session (not visible from server)
+// keyed by "botName|catName|topicName" → string[]
+const _userAddedKeywords = {};
+
 // ==================== Sidebar collapse & resize ====================
 function initSidebar() {
     const sidebar = document.getElementById('main-sidebar');
@@ -188,6 +192,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Seed the history entry so back/forward works from the start
     history.replaceState({ page: initialPage }, '', '#' + initialPage);
     showPage(initialPage);
+});
+
+// Global search keyboard shortcut (Ctrl+K / Cmd+K)
+document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        const input = document.getElementById('global-search-input');
+        if (input) { input.focus(); input.select(); }
+    }
+});
+
+// Close search dropdown on outside click
+document.addEventListener('click', e => {
+    const searchEl = document.querySelector('.sidebar-search');
+    if (searchEl && !searchEl.contains(e.target)) {
+        hideSearchResults();
+    }
 });
 
 // Back / forward navigation
@@ -271,6 +292,7 @@ function showPage(pageName) {
     else if (pageName === 'recycle-bin') loadRecycleBinData();
     else if (pageName === 'accounts') loadAccountsData();
     else if (pageName === 'profile') loadProfileData();
+    else if (pageName === 'tg-setup') loadTgSetupPage();
     else if (pageName === 'tg-tester') tgTesterInit();
 }
 
@@ -786,8 +808,9 @@ function createCollectionCard(collectionName, collection) {
     const sources = (collection.source_channels || []).join(', ') || 'None';
     const targets = (collection.target_channels || [collection.target_channel]).filter(Boolean).join(', ') || 'Not set';
 
+    const safeCollId = 'coll-card-' + collectionName.replace(/[^a-zA-Z0-9_-]/g, '_');
     return `
-        <div class="collection-card">
+        <div class="collection-card" id="${safeCollId}">
             <div class="collection-header">
                 <div class="flex-center">
                     <label class="toggle-switch">
@@ -1886,6 +1909,9 @@ function createCategoryBox(botName, categoryName, category) {
 function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled = true) {
     const keywords = topic.keywords || [];
     const seoHidden = topic._keyword_count != null;   // admin stripped keyword text
+    const _ukKey    = `${botName}|${categoryName}|${topicName}`;
+    const userKws   = seoHidden ? (_userAddedKeywords[_ukKey] || []) : [];
+    // seoCount = admin's count + user's own additions (shown separately)
     const seoCount  = seoHidden ? topic._keyword_count : keywords.length;
     const schedules = topic.schedules || [];
     const linkedTopics = topic.linked_topics || [];
@@ -1948,7 +1974,13 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                             ${seoHidden ? `
                                 <span class="tag" style="background:rgba(99,102,241,.12);color:var(--text-muted);border:1px dashed var(--border-color);cursor:default;pointer-events:none;">
                                     🔒 ${seoCount} SEO${seoCount !== 1 ? 's' : ''} active — details hidden by admin
-                                </span>` :
+                                </span>
+                                ${userKws.map(kw => `
+                                    <span class="tag" style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);color:#6ee7b7;">
+                                        ${escapeHtmlSys(kw)}
+                                        <span class="tag-remove" onclick="removeUserKeyword('${b}','${c}','${t}','${jsAttr(kw)}')">×</span>
+                                    </span>
+                                `).join('')}` :
                             keywords.map((kw, idx) => `
                                 <span class="tag kw-selectable" data-idx="${idx}">
                                     <input type="checkbox" class="kw-cb" style="margin:0 4px 0 0;accent-color:var(--accent-primary);cursor:pointer;" onchange="kwSelectionChanged('${b}','${c}','${t}')">
@@ -2802,16 +2834,24 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
 
     // When keyword text is hidden, use per-keyword add (don't overwrite admin's keywords)
     if (seoHidden) {
+        const ukKey = `${botName}|${categoryName}|${topicName}`;
+        if (!_userAddedKeywords[ukKey]) _userAddedKeywords[ukKey] = [];
         let addedCount = 0;
         for (const kw of keywordsToAdd) {
+            // Skip duplicates already tracked locally
+            if (_userAddedKeywords[ukKey].includes(kw)) continue;
             const result = await api('/api/topic/keyword/add', {
                 bot_name: botName, category_name: categoryName,
                 topic_name: topicName, keyword: kw
             });
-            if (result.status === 'ok' && result.inserted) addedCount++;
+            if (result.status === 'ok' && result.inserted) {
+                _userAddedKeywords[ukKey].push(kw);
+                // Update the local count so the label stays accurate
+                topic._keyword_count = (topic._keyword_count || 0) + 1;
+                addedCount++;
+            }
         }
         if (addedCount > 0) {
-            await loadAllData();
             const topicId = `topic-${botName}-${categoryName}-${topicName}`;
             const categoryId = `categories-${botName}`;
             renderBotsPage([topicId, categoryId]);
@@ -2849,6 +2889,28 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
             showNotification(message, 'success');
         }
     }
+}
+
+async function removeUserKeyword(botName, categoryName, topicName, kw) {
+    const result = await api('/api/topic/keyword/delete', {
+        bot_name: botName, category_name: categoryName,
+        topic_name: topicName, keyword: kw
+    });
+    if (result.status !== 'ok') {
+        showNotification('Failed to remove SEO', 'error');
+        return;
+    }
+    const ukKey = `${botName}|${categoryName}|${topicName}`;
+    if (_userAddedKeywords[ukKey]) {
+        _userAddedKeywords[ukKey] = _userAddedKeywords[ukKey].filter(k => k !== kw);
+    }
+    // Decrement local count
+    const topic = globalConfig?.bots?.[botName]?.categories?.[categoryName]?.topics?.[topicName];
+    if (topic && topic._keyword_count > 0) topic._keyword_count--;
+    const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+    const categoryId = `categories-${botName}`;
+    renderBotsPage([topicId, categoryId]);
+    showNotification('SEO removed', 'success');
 }
 
 function kwSelectionChanged(b, c, t) {
@@ -3738,29 +3800,37 @@ async function loadMonitorData() {
     if (_monActiveTab === 'summaries') applyMonSummaryFilters();
     startMonitorCountdowns();
 
-    // Load unclassified badge count in background
-    api('/api/monitor/unclassified?limit=1').then(r => {
-        if (r.status === 'ok') {
-            const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
-            const badge = document.getElementById('mon-uncl-badge');
-            if (badge) {
-                badge.textContent = total;
-                badge.style.display = total > 0 ? 'inline-block' : 'none';
+    // Load unclassified badge count in background (respects cleared-at)
+    {
+        const since = localStorage.getItem('mon-uncl-cleared-at');
+        const url = '/api/monitor/unclassified?limit=1' + (since ? '&since=' + encodeURIComponent(since) : '');
+        api(url).then(r => {
+            if (r.status === 'ok') {
+                const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
+                const badge = document.getElementById('mon-uncl-badge');
+                if (badge) {
+                    badge.textContent = total;
+                    badge.style.display = total > 0 ? 'inline-block' : 'none';
+                }
             }
-        }
-    });
+        });
+    }
 
-    // Load missed badge count in background
-    api('/api/monitor/missed?limit=1').then(r => {
-        if (r.status === 'ok') {
-            const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
-            const badge = document.getElementById('mon-missed-badge');
-            if (badge) {
-                badge.textContent = total;
-                badge.style.display = total > 0 ? 'inline-block' : 'none';
+    // Load missed badge count in background (respects cleared-at)
+    {
+        const since = localStorage.getItem('mon-missed-cleared-at');
+        const url = '/api/monitor/missed?limit=1' + (since ? '&since=' + encodeURIComponent(since) : '');
+        api(url).then(r => {
+            if (r.status === 'ok') {
+                const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
+                const badge = document.getElementById('mon-missed-badge');
+                if (badge) {
+                    badge.textContent = total;
+                    badge.style.display = total > 0 ? 'inline-block' : 'none';
+                }
             }
-        }
-    });
+        });
+    }
 
     // Restore scroll position after paint
     if (!isFirstLoad) {
@@ -3782,8 +3852,23 @@ function switchMonTab(tab) {
         if (el) el.style.display = t === tab ? '' : 'none';
     });
     if (tab === 'messages' && !_allMessages.length) loadMonitorMessages();
-    if (tab === 'unclassified' && !_unclMessages.length) loadUnclassifiedMessages();
-    if (tab === 'missed' && !_missedMessages.length) loadMissedMessages();
+    if (tab === 'unclassified') {
+        // Restore clear/show-all button state from persisted timestamp
+        const clearedAt = localStorage.getItem('mon-uncl-cleared-at');
+        const clearBtn   = document.getElementById('uncl-clear-btn');
+        const showAllBtn = document.getElementById('uncl-showall-btn');
+        if (clearBtn)   clearBtn.style.display   = clearedAt ? 'none' : '';
+        if (showAllBtn) showAllBtn.style.display  = clearedAt ? ''     : 'none';
+        if (!_unclMessages.length) loadUnclassifiedMessages();
+    }
+    if (tab === 'missed') {
+        const clearedAt = localStorage.getItem('mon-missed-cleared-at');
+        const clearBtn   = document.getElementById('missed-clear-btn');
+        const showAllBtn = document.getElementById('missed-showall-btn');
+        if (clearBtn)   clearBtn.style.display   = clearedAt ? 'none' : '';
+        if (showAllBtn) showAllBtn.style.display  = clearedAt ? ''     : 'none';
+        if (!_missedMessages.length) loadMissedMessages();
+    }
 }
 
 // ---------- Topics & Schedules ----------
@@ -4413,7 +4498,7 @@ function _populateMonSelect(id, values, allLabel) {
 let _unclInitialized = false;
 let _unclMessages    = [];
 let _unclGrouped     = false;
-let _unclClearedAt   = null; // ISO string or null — UI-only clear
+let _unclClearedAt   = localStorage.getItem('mon-uncl-cleared-at') || null;
 
 function toggleUnclGroupView() {
     _unclGrouped = !_unclGrouped;
@@ -4697,13 +4782,18 @@ async function loadUnclassifiedMessages(append = false) {
 // --- Unclassified clear/show-all ---
 function clearUnclassifiedView() {
     _unclClearedAt = new Date().toISOString();
+    localStorage.setItem('mon-uncl-cleared-at', _unclClearedAt);
     document.getElementById('uncl-clear-btn').style.display = 'none';
     document.getElementById('uncl-showall-btn').style.display = '';
+    // Reset badge immediately — background poll will fetch only new messages
+    const badge = document.getElementById('mon-uncl-badge');
+    if (badge) { badge.textContent = '0'; badge.style.display = 'none'; }
     _renderUnclassified(_unclMessages);
 }
 
 function showAllUnclassifiedView() {
     _unclClearedAt = null;
+    localStorage.removeItem('mon-uncl-cleared-at');
     document.getElementById('uncl-clear-btn').style.display = '';
     document.getElementById('uncl-showall-btn').style.display = 'none';
     _renderUnclassified(_unclMessages);
@@ -4713,7 +4803,7 @@ function showAllUnclassifiedView() {
 let _missedMessages  = [];
 let _missedOffset    = 0;
 let _missedHasMore   = true;
-let _missedClearedAt = null; // ISO string or null
+let _missedClearedAt = localStorage.getItem('mon-missed-cleared-at') || null;
 const _MISSED_PAGE_SIZE = 50;
 
 async function loadMissedMessages(append = false) {
@@ -4836,13 +4926,18 @@ function _renderMissed(messages) {
 
 function clearMissedView() {
     _missedClearedAt = new Date().toISOString();
+    localStorage.setItem('mon-missed-cleared-at', _missedClearedAt);
     document.getElementById('missed-clear-btn').style.display   = 'none';
     document.getElementById('missed-showall-btn').style.display = '';
+    // Reset badge immediately — background poll will fetch only new messages
+    const badge = document.getElementById('mon-missed-badge');
+    if (badge) { badge.textContent = '0'; badge.style.display = 'none'; }
     _renderMissed(_missedMessages);
 }
 
 function showAllMissedView() {
     _missedClearedAt = null;
+    localStorage.removeItem('mon-missed-cleared-at');
     document.getElementById('missed-clear-btn').style.display   = '';
     document.getElementById('missed-showall-btn').style.display = 'none';
     _renderMissed(_missedMessages);
@@ -5034,4 +5129,206 @@ async function emptyRecycleBin() {
             loadRecycleBinData();
         }
     }, { title: 'Empty Recycle Bin' });
+}
+
+// ==================== Global Search ====================
+let _searchDebounceTimer = null;
+let _searchResults = [];
+let _searchSelectedIndex = -1;
+
+function buildSearchIndex() {
+    const index = [];
+    if (!globalConfig) return index;
+
+    // Bots, categories, topics, keywords
+    const bots = globalConfig.bots || {};
+    for (const [botName, bot] of Object.entries(bots)) {
+        const cats = bot.categories || {};
+        const catCount = Object.keys(cats).length;
+        index.push({ type: 'bot', label: botName, subtitle: `Bot · ${catCount} categor${catCount === 1 ? 'y' : 'ies'}`, icon: '🤖', page: 'bots', botName, openIds: [] });
+
+        for (const [catName, cat] of Object.entries(cats)) {
+            const catId = `category-${botName}-${catName}`;
+            const topicCount = Object.keys(cat.topics || {}).length;
+            index.push({ type: 'category', label: catName, subtitle: `Category in ${botName} · ${topicCount} topic${topicCount === 1 ? '' : 's'}`, icon: '🗂️', page: 'bots', botName, openIds: [catId] });
+
+            for (const [topicName, topic] of Object.entries(cat.topics || {})) {
+                const topicId = `topic-${botName}-${catName}-${topicName}`;
+                index.push({ type: 'topic', label: topicName, subtitle: `Topic in ${catName} › ${botName}`, icon: '📌', page: 'bots', botName, openIds: [catId, topicId] });
+
+                for (const kw of (topic.keywords || [])) {
+                    index.push({ type: 'keyword', label: kw, subtitle: `SEO in ${topicName} › ${catName}`, icon: '🔎', page: 'bots', botName, openIds: [catId, topicId] });
+                }
+            }
+        }
+    }
+
+    // Collections, sources, targets
+    const collections = globalConfig.collections || {};
+    for (const [collName, coll] of Object.entries(collections)) {
+        const safeId = 'coll-card-' + collName.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const srcCount = (coll.source_channels || []).length;
+        index.push({ type: 'collection', label: collName, subtitle: `Collection · ${srcCount} source${srcCount === 1 ? '' : 's'}`, icon: '📦', page: 'collections', scrollTo: safeId });
+
+        for (const src of (coll.source_channels || [])) {
+            index.push({ type: 'source', label: src, subtitle: `Source channel in ${collName}`, icon: '📡', page: 'collections', scrollTo: safeId });
+        }
+        const targets = [coll.target_channel, ...(coll.target_channels || [])].filter(Boolean);
+        for (const tgt of [...new Set(targets)]) {
+            index.push({ type: 'target', label: tgt, subtitle: `Target channel in ${collName}`, icon: '📤', page: 'collections', scrollTo: safeId });
+        }
+    }
+
+    return index;
+}
+
+function handleSearchInput(query) {
+    clearTimeout(_searchDebounceTimer);
+    const clearBtn = document.getElementById('global-search-clear');
+    if (clearBtn) clearBtn.style.display = query ? '' : 'none';
+
+    if (!query.trim()) { hideSearchResults(); return; }
+
+    _searchDebounceTimer = setTimeout(() => performSearch(query.trim()), 150);
+}
+
+function performSearch(query) {
+    const index = buildSearchIndex();
+    const q = query.toLowerCase();
+    _searchResults = index.filter(item =>
+        item.label.toLowerCase().includes(q) || item.subtitle.toLowerCase().includes(q)
+    ).slice(0, 25);
+    renderSearchResults(_searchResults, query);
+}
+
+function _highlightMatch(text, query) {
+    const q = query.toLowerCase();
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx === -1) return text;
+    return text.slice(0, idx) + '<mark class="search-highlight">' + text.slice(idx, idx + query.length) + '</mark>' + text.slice(idx + query.length);
+}
+
+function renderSearchResults(results, query) {
+    const dropdown = document.getElementById('global-search-results');
+    if (!dropdown) return;
+    _searchSelectedIndex = -1;
+
+    // Position the dropdown below the search input
+    const input = document.getElementById('global-search-input');
+    if (input) {
+        const rect = input.closest('.sidebar-search').getBoundingClientRect();
+        dropdown.style.top  = (rect.bottom + 4) + 'px';
+        dropdown.style.left = rect.left + 'px';
+        dropdown.style.width = Math.max(rect.width, 280) + 'px';
+    }
+
+    if (results.length === 0) {
+        dropdown.innerHTML = `<div class="search-no-results">No results for "<strong>${escapeHtmlSys(query)}</strong>"</div>`;
+        dropdown.style.display = '';
+        return;
+    }
+
+    const typeOrder = ['bot', 'category', 'topic', 'keyword', 'collection', 'source', 'target'];
+    const typeLabels = { bot: 'Bots', category: 'Categories', topic: 'Topics', keyword: 'SEOs', collection: 'Collections', source: 'Sources', target: 'Targets' };
+    const grouped = {};
+    for (const item of results) {
+        if (!grouped[item.type]) grouped[item.type] = [];
+        grouped[item.type].push(item);
+    }
+
+    let html = '';
+    let globalIdx = 0;
+    for (const type of typeOrder) {
+        if (!grouped[type]) continue;
+        html += `<div class="search-result-group-label">${typeLabels[type]}</div>`;
+        for (const item of grouped[type]) {
+            const highlighted = _highlightMatch(escapeHtmlSys(item.label), query);
+            html += `<div class="search-result-item" data-idx="${globalIdx}" onclick="selectSearchResult(${globalIdx})">
+                <span class="search-result-icon">${item.icon}</span>
+                <div class="search-result-text">
+                    <div class="search-result-label">${highlighted}</div>
+                    <div class="search-result-subtitle">${escapeHtmlSys(item.subtitle)}</div>
+                </div>
+            </div>`;
+            globalIdx++;
+        }
+    }
+
+    dropdown.innerHTML = html;
+    dropdown.style.display = '';
+}
+
+function handleSearchKeydown(event) {
+    const dropdown = document.getElementById('global-search-results');
+    if (!dropdown || dropdown.style.display === 'none') {
+        if (event.key === 'Escape') clearSearch();
+        return;
+    }
+    const items = dropdown.querySelectorAll('.search-result-item');
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        _searchSelectedIndex = Math.min(_searchSelectedIndex + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle('selected', i === _searchSelectedIndex));
+        if (items[_searchSelectedIndex]) items[_searchSelectedIndex].scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        _searchSelectedIndex = Math.max(_searchSelectedIndex - 1, 0);
+        items.forEach((el, i) => el.classList.toggle('selected', i === _searchSelectedIndex));
+        if (items[_searchSelectedIndex]) items[_searchSelectedIndex].scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (_searchSelectedIndex >= 0 && _searchSelectedIndex < _searchResults.length) {
+            selectSearchResult(_searchSelectedIndex);
+        }
+    } else if (event.key === 'Escape') {
+        clearSearch();
+    }
+}
+
+function selectSearchResult(idx) {
+    const result = _searchResults[idx];
+    if (!result) return;
+    clearSearch();
+
+    if (result.page === 'bots') {
+        showPage('bots');
+        if (result.botName) {
+            openBotDetail(result.botName);
+            if (result.openIds && result.openIds.length > 0) {
+                setTimeout(() => {
+                    // Switch to categories tab for category/topic/keyword results
+                    if (result.type !== 'bot') switchBotTab(result.botName, 'categories');
+                    result.openIds.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el && !el.classList.contains('open')) el.classList.add('open');
+                    });
+                    const target = document.getElementById(result.openIds[result.openIds.length - 1]);
+                    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 120);
+            }
+        }
+    } else if (result.page === 'collections') {
+        showPage('collections');
+        if (result.scrollTo) {
+            setTimeout(() => {
+                const el = document.getElementById(result.scrollTo);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 80);
+        }
+    }
+}
+
+function hideSearchResults() {
+    const dropdown = document.getElementById('global-search-results');
+    if (dropdown) dropdown.style.display = 'none';
+    _searchResults = [];
+    _searchSelectedIndex = -1;
+}
+
+function clearSearch() {
+    const input = document.getElementById('global-search-input');
+    const clearBtn = document.getElementById('global-search-clear');
+    if (input) input.value = '';
+    if (clearBtn) clearBtn.style.display = 'none';
+    hideSearchResults();
 }

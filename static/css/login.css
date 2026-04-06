@@ -375,3 +375,13 @@ html, body {
   margin-top: 22px;
   letter-spacing: 0.01em;
 }
+
+.copyright-note {
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  opacity: 0.55;
+  margin-top: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}

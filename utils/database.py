@@ -452,6 +452,8 @@ class Database:
                     cursor.execute("UPDATE users SET gemini_project_agents = gemini_api_key_3 WHERE gemini_api_key_3 IS NOT NULL")
             if 'ai_plan_id' not in user_cols:
                 cursor.execute("ALTER TABLE users ADD COLUMN ai_plan_id INTEGER REFERENCES ai_plans(id) ON DELETE SET NULL DEFAULT NULL")
+            if 'seo_visible' not in user_cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN seo_visible BOOLEAN DEFAULT TRUE")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS recycle_bin (
@@ -646,7 +648,7 @@ class Database:
             cursor.execute("""
                 SELECT u.id, u.username, u.role, u.is_active, u.bots_on, u.youtube_on,
                        u.yt_chat_on, u.agents_on, u.sys_bot_on, u.agents_limit,
-                       u.telegram_phone, u.created_at, u.ai_plan_id,
+                       u.telegram_phone, u.created_at, u.ai_plan_id, u.seo_visible,
                        p.name AS ai_plan_name, p.monthly_limit AS ai_plan_monthly_limit
                 FROM users u
                 LEFT JOIN ai_plans p ON p.id = u.ai_plan_id
@@ -1451,7 +1453,7 @@ class Database:
         finally:
             self._commit()
 
-    def get_unclassified_stats(self, allowed_bot_names: list = None):
+    def get_unclassified_stats(self, allowed_bot_names: list = None, since: str = None):
         try:
             """Return counts for unclassified messages grouped by bot and collection."""
             cursor = self._get_cursor()
@@ -1460,6 +1462,9 @@ class Database:
             if allowed_bot_names is not None:
                 where += " AND bot_name = ANY(%s)"
                 params.append(allowed_bot_names)
+            if since:
+                where += " AND timestamp > %s::timestamptz"
+                params.append(since)
             cursor.execute(f"""
                 SELECT bot_name, collection_name, COUNT(*) AS cnt
                 FROM messages
@@ -1513,20 +1518,23 @@ class Database:
         finally:
             self._commit()
 
-    def get_missed_stats(self, allowed_bot_names: list = None):
+    def get_missed_stats(self, allowed_bot_names: list = None, since: str = None):
         try:
             """Return counts for missed messages grouped by bot and topic."""
             cursor = self._get_cursor()
-            where = "status = 'missed'"
+            where = "ms.status = 'missed'"
             params = []
             if allowed_bot_names is not None:
-                where += " AND bot_name = ANY(%s)"
+                where += " AND ms.bot_name = ANY(%s)"
                 params.append(allowed_bot_names)
+            if since:
+                where += " AND ms.message_id IN (SELECT id FROM messages WHERE timestamp > %s::timestamptz)"
+                params.append(since)
             cursor.execute(f"""
-                SELECT bot_name, topic_name, COUNT(*) AS cnt
-                FROM message_summarizations
+                SELECT ms.bot_name, ms.topic_name, COUNT(*) AS cnt
+                FROM message_summarizations ms
                 WHERE {where}
-                GROUP BY bot_name, topic_name
+                GROUP BY ms.bot_name, ms.topic_name
                 ORDER BY cnt DESC
             """, params or None)
             return [dict(r) for r in cursor.fetchall()]

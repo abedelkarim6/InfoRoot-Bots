@@ -142,6 +142,7 @@ def get_unclassified_messages(
     search: str = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    since: str = Query(default=None),
 ):
     db = get_db()
     try:
@@ -149,7 +150,7 @@ def get_unclassified_messages(
         messages = db.get_unclassified_messages(
             limit=limit, offset=offset, bot_name=bot, collection=collection,
             search=search, allowed_bot_names=allowed_bots)
-        stats = db.get_unclassified_stats(allowed_bot_names=allowed_bots)
+        stats = db.get_unclassified_stats(allowed_bot_names=allowed_bots, since=since)
         return {'status': 'ok', 'messages': messages, 'stats': stats}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
@@ -163,6 +164,7 @@ def get_missed_messages(
     search: str = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    since: str = Query(default=None),
 ):
     db = get_db()
     try:
@@ -170,7 +172,7 @@ def get_missed_messages(
         messages = db.get_missed_messages(
             limit=limit, offset=offset, bot_name=bot, topic_name=topic,
             search=search, allowed_bot_names=allowed_bots)
-        stats = db.get_missed_stats(allowed_bot_names=allowed_bots)
+        stats = db.get_missed_stats(allowed_bot_names=allowed_bots, since=since)
         return {'status': 'ok', 'messages': messages, 'stats': stats}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}

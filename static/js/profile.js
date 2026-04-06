@@ -25,7 +25,23 @@ async function loadProfileData() {
 
     el.innerHTML = renderProfilePage(_profileUser);
     if (_profileUser.role === 'admin') loadGeminiUsage();
-    // Load Telegram profile info async after page render
+}
+
+// Called by modern.js when the Telegram Setup page is shown
+async function loadTgSetupPage() {
+    const el = document.getElementById('tg-setup-content');
+    if (!el) return;
+    el.innerHTML = '<p class="text-muted">Loading…</p>';
+
+    const token = localStorage.getItem('auth_token');
+    const r = await fetch('/api/auth/me', {
+        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    if (!r.ok) { el.innerHTML = '<p style="color:var(--danger)">Not authenticated.</p>'; return; }
+
+    _profileUser = await r.json();
+    el.innerHTML = renderTgSetupCard(_profileUser);
+
     if (_profileUser.telegram_session || _profileUser.telegram_phone) {
         loadTgProfile();
         if (_profileUser.role === 'admin') loadTgChannels();
@@ -34,7 +50,6 @@ async function loadProfileData() {
 
 function renderProfilePage(u) {
     const isAdmin     = u.role === 'admin';
-    const hasTelegram = !!u.telegram_phone || !!u.telegram_session;
     const joinedDate  = u.created_at
         ? new Date(u.created_at).toLocaleDateString()
         : '—';
@@ -76,9 +91,59 @@ function renderProfilePage(u) {
         🔧 System Bot <strong>${u.sys_bot_on ? 'ON' : 'OFF'}</strong>
       </div>
     </div>` : ''}
+
+    <div style="padding-top:14px;border-top:1px solid var(--border-color);margin-top:14px">
+      <a href="#tg-setup" onclick="showPage('tg-setup')" class="btn btn-secondary btn-sm">
+        📱 Telegram Setup →
+      </a>
+    </div>
   </div>
 
-  <!-- ── Telegram account (unified) ── -->
+  <!-- ── Gemini API usage (admin only) ── -->
+  ${isAdmin ? `<div class="card" style="margin-bottom:20px" id="pf-gemini-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 style="font-size:14px;font-weight:600;margin:0">✨ Gemini API Usage</h3>
+      <button class="btn btn-secondary btn-sm" onclick="loadGeminiUsage()">↺ Refresh</button>
+    </div>
+    <div id="pf-gemini-usage"><p class="text-muted" style="font-size:13px">Loading…</p></div>
+  </div>` : ''}
+
+  <!-- ── Change password (DB users only) ── -->
+  ${!isAdmin ? `
+  <div class="card">
+    <h3 style="font-size:14px;font-weight:600;margin:0 0 14px">🔒 Change Password</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;max-width:360px">
+      <div>
+        <label class="form-label">Current password</label>
+        <input id="pf-pw-current" type="password" class="input" style="margin-top:4px"
+          placeholder="Current password">
+      </div>
+      <div>
+        <label class="form-label">New password</label>
+        <input id="pf-pw-new" type="password" class="input" style="margin-top:4px"
+          placeholder="New password (min 6 chars)">
+      </div>
+      <div>
+        <label class="form-label">Confirm new password</label>
+        <input id="pf-pw-confirm" type="password" class="input" style="margin-top:4px"
+          placeholder="Repeat new password">
+      </div>
+      <div id="pf-pw-msg" class="pf-err"></div>
+      <button class="btn btn-primary" style="align-self:flex-start" onclick="pfChangePassword()">
+        Update Password
+      </button>
+    </div>
+  </div>` : ''}
+
+</div>`;
+}
+
+function renderTgSetupCard(u) {
+    const isAdmin     = u.role === 'admin';
+    const hasTelegram = !!u.telegram_phone || !!u.telegram_session;
+
+    return `
+  <!-- ── Telegram account ── -->
   <div class="card" style="margin-bottom:20px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <h3 style="font-size:14px;font-weight:600;margin:0">📱 Telegram Account</h3>
@@ -179,46 +244,7 @@ function renderProfilePage(u) {
         </div>
       </div>
     </details>
-  </div>
-
-
-  <!-- ── Gemini API usage (admin only) ── -->
-  ${isAdmin ? `<div class="card" style="margin-bottom:20px" id="pf-gemini-card">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h3 style="font-size:14px;font-weight:600;margin:0">✨ Gemini API Usage</h3>
-      <button class="btn btn-secondary btn-sm" onclick="loadGeminiUsage()">↺ Refresh</button>
-    </div>
-    <div id="pf-gemini-usage"><p class="text-muted" style="font-size:13px">Loading…</p></div>
-  </div>` : ''}
-
-  <!-- ── Change password (DB users only) ── -->
-  ${!isAdmin ? `
-  <div class="card">
-    <h3 style="font-size:14px;font-weight:600;margin:0 0 14px">🔒 Change Password</h3>
-    <div style="display:flex;flex-direction:column;gap:10px;max-width:360px">
-      <div>
-        <label class="form-label">Current password</label>
-        <input id="pf-pw-current" type="password" class="input" style="margin-top:4px"
-          placeholder="Current password">
-      </div>
-      <div>
-        <label class="form-label">New password</label>
-        <input id="pf-pw-new" type="password" class="input" style="margin-top:4px"
-          placeholder="New password (min 6 chars)">
-      </div>
-      <div>
-        <label class="form-label">Confirm new password</label>
-        <input id="pf-pw-confirm" type="password" class="input" style="margin-top:4px"
-          placeholder="Repeat new password">
-      </div>
-      <div id="pf-pw-msg" class="pf-err"></div>
-      <button class="btn btn-primary" style="align-self:flex-start" onclick="pfChangePassword()">
-        Update Password
-      </button>
-    </div>
-  </div>` : ''}
-
-</div>`;
+  </div>`;
 }
 
 // ── Gemini usage ──────────────────────────────────────────────────────────────
@@ -486,9 +512,15 @@ function pfTgSuccess(sessionString) {
     ['pf-tg-phone', 'pf-tg-code', 'pf-tg-2fa'].forEach(id => {
         const el = document.getElementById(id); if (el) el.value = '';
     });
-    // Refresh the profile display with real data from Telegram
+    // Refresh the Telegram Setup display with real data from Telegram
     loadTgProfile();
     if (_profileUser?.role === 'admin') loadTgChannels();
+}
+
+function _reloadTgSetup() {
+    if (_profileUser) {
+        loadTgSetupPage();
+    }
 }
 
 // ── Change password ───────────────────────────────────────────────────────────
@@ -557,7 +589,7 @@ async function pfUpdateSession() {
         _profileUser.telegram_session = ssVal;
         if (phone) _profileUser.telegram_phone = phone;
     }
-    // Refresh the live profile display
+    // Refresh the live Telegram Setup display
     loadTgProfile();
     if (_profileUser?.role === 'admin') loadTgChannels();
     setTimeout(() => {
@@ -617,7 +649,7 @@ function pfDisconnectTelegram() {
                 const data = await res.json();
                 if (data.status === 'ok') {
                     showNotification('Telegram account disconnected', 'success');
-                    loadProfileData();
+                    loadTgSetupPage();
                 } else {
                     showNotification(data.error || 'Disconnect failed', 'error');
                 }
