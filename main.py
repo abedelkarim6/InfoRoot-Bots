@@ -476,23 +476,22 @@ async def generate_and_send_summary(job_data):
                 if topic_name in msg_topics:
                     topic_messages.append(msg)
 
+        logger.info(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | raw_msgs={len(messages)} | topic_msgs={len(topic_messages)}")
+
         if not topic_messages:
+            logger.info(f"[SKIP] No messages match topic '{topic_name}' after filter")
             return
 
         # ── Time-window enforcement ──────────────────────────────────────────
-        # Only messages received within the schedule's interval window are eligible.
-        # window_start is anchored to the PREVIOUS scheduled fire time so the window
-        # is always [prev_fire_time, now], not a rolling "last N seconds".
-        # 'minute' schedules accumulate all pending messages (no window cutoff).
         if schedule_type != 'minute':
             window_start = _compute_window_start(job_data)
+            logger.info(f"[WINDOW] window_start={window_start} | now={datetime.datetime.now()} | Bot={bot_name} | Topic={topic_name}")
 
             in_window = []
             expired   = []
             for msg in topic_messages:
                 ts = msg.get('timestamp')
                 if ts:
-                    # timestamp may be a string (ISO) or datetime object
                     if isinstance(ts, str):
                         try:
                             ts = datetime.datetime.fromisoformat(ts)
@@ -503,15 +502,15 @@ async def generate_and_send_summary(job_data):
                         continue
                 in_window.append(msg)
 
-            # Permanently mark expired messages so they are never reconsidered
             if expired:
                 expired_ids = [m['id'] for m in expired]
                 db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
-                logger.info(f"[MISSED] {len(expired_ids)} messages outside window marked as missed | "
-                            f"Bot: {bot_name} | Topic: {topic_name} | window_start: {window_start}")
+                logger.info(f"[MISSED] {len(expired_ids)} msgs outside window | Bot={bot_name} | Topic={topic_name} | window_start={window_start}")
 
+            logger.info(f"[WINDOW] in_window={len(in_window)} | expired={len(expired)} | Bot={bot_name} | Topic={topic_name}")
             topic_messages = in_window
             if not topic_messages:
+                logger.info(f"[SKIP] All messages outside window for Bot={bot_name} | Topic={topic_name}")
                 return
 
         # Check minimum messages requirement
@@ -519,23 +518,21 @@ async def generate_and_send_summary(job_data):
         bot_cfg = bots_cfg.get(bot_name, {})
         min_messages = bot_cfg.get('minimum_messages', 1)
         if len(topic_messages) < min_messages:
-            # logger.info(f"[SKIP]  SKIP | Not enough messages ({len(topic_messages)}/{min_messages}) | Bot: {bot_name} | Topic: {topic_name}")
+            logger.info(f"[SKIP] Not enough messages ({len(topic_messages)}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
             return
 
-        # logger.info(f"[SUMMARY] SUMMARY TASK START | Bot: {bot_name} | Topic: {topic_name} | Schedule: {schedule_type} | Messages: {len(topic_messages)}")
+        logger.info(f"[SUMMARY] START | Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | msgs={len(topic_messages)}")
 
-        # Extract message texts
         texts = [m['text'] for m in topic_messages]
 
-        # Generate summary (chunked if > CHUNK_SIZE messages)
-        # logger.info(f"[AI] SUMMARY GENERATION | Bot: {bot_name} | Topic: {topic_name} | Prompt: {prompt_key} | Messages: {len(texts)}")
+        logger.info(f"[AI] Calling LLM | Bot={bot_name} | Topic={topic_name} | prompt_key={prompt_key} | msgs={len(texts)}")
         summary_text = _chunked_summarize(texts, bot_name, prompt_key, topic_name)
+        logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)}")
 
-        # Get target channels: per-schedule override, or fall back to bot's collections
+        # Get target channels
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
         if schedule_targets:
             target_channels = list(set(schedule_targets))
-            logger.info(f"[TARGETS] Using schedule targets for {bot_name}/{topic_name}: {target_channels}")
         else:
             bot_collections = bot_cfg.get('collections', [])
             collections_cfg = db.get_all_collections()
@@ -546,41 +543,38 @@ async def generate_and_send_summary(job_data):
                     target_channels.extend(targets)
             target_channels = list(set(target_channels))
 
+        logger.info(f"[TARGETS] Bot={bot_name} | Topic={topic_name} | targets={target_channels}")
+
         if not target_channels:
-            logger.warning(f"No target channels found for bot {bot_name}")
+            logger.warning(f"[SKIP] No target channels for bot {bot_name}")
             return
 
-        # Build message text — use per-schedule header (defaults to *schedule_name*)
+        # Build message text
         header_text = job_data.get('header', '').strip()
         if header_text:
-            # Optionally append date-time line under the header
             if job_data.get('header_datetime'):
                 ar_days = ['الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
                 now = datetime.datetime.now()
                 day_name = ar_days[now.weekday()]
                 hour_12 = now.hour % 12 or 12
                 am_pm = 'ص' if now.hour < 12 else 'م'
-
                 date_str = f"{now.year}/{now.month:02d}/{now.day:02d}"
                 time_str = f"{hour_12:02d}:{now.minute:02d} {am_pm}"
-
                 if job_data.get('header_date_arabic'):
                     date_str = _to_arabic_numerals(date_str)
                 if job_data.get('header_time_arabic'):
                     time_str = _to_arabic_numerals(time_str)
-
                 dt_line = f"{day_name} {date_str}  ؛  {time_str}"
                 header_text = f"{header_text}\n{dt_line}"
             message_text = f"{header_text}\n\n{summary_text}"
         else:
             message_text = summary_text
 
-        # Send summary to all target channels using the userbot client
         msg_ids = [m['id'] for m in topic_messages]
         for target_chat in target_channels:
             try:
                 await client.send_message(target_chat, message_text, parse_mode='md')
-                # logger.info(f"[SENT] SUMMARY SENT | Bot: {bot_name} | Topic: {topic_name} | Target: {target_chat}")
+                logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
                 db.save_summary(
                     summary_text=summary_text,
                     message_count=len(topic_messages),
@@ -591,14 +585,15 @@ async def generate_and_send_summary(job_data):
                     message_ids=msg_ids
                 )
             except Exception as e:
-                logger.error(f"Failed to send summary to {target_chat}: {e}")
+                logger.error(f"[ERROR] send_message to {target_chat}: {e}")
 
-        # Mark messages as summarized for this specific (bot, topic, schedule_type)
         db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
-        # logger.info(f"[DONE]  MARKED AS SUMMARIZED | Bot: {bot_name} | Topic: {topic_name} | Count: {len(msg_ids)} messages")
+        # Verify the mark actually persisted
+        remaining = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
+        logger.info(f"[DONE] Bot={bot_name} | Topic={topic_name} | marked {len(msg_ids)} | remaining_pending={len(remaining)}")
 
     except Exception as e:
-        logger.error(f"Critical error in summary generation: {e}", exc_info=True)
+        logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
 
 # ==================== Speeches Interval ====================
 
@@ -846,25 +841,24 @@ async def schedule_summaries():
                             start_hour   = schedule.get('start_hour', 0)
                             start_minute = schedule.get('start_minute', 0)
                             now = datetime.datetime.now()
+                            # Anchor to today's start time (or yesterday if still in future).
+                            # IntervalTrigger computes the correct next fire from the anchor,
+                            # so rebuilding the scheduler never resets the fire cycle.
                             start_dt = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-                            if start_dt <= now:
-                                start_dt += datetime.timedelta(minutes=interval_mins)
-                                while start_dt <= now:
-                                    start_dt += datetime.timedelta(minutes=interval_mins)
+                            if start_dt > now:
+                                start_dt -= datetime.timedelta(days=1)
                             trigger = IntervalTrigger(minutes=interval_mins, start_date=start_dt)
                         elif schedule_type == "interval":
                             interval_hours = schedule.get('hours', 1)
                             start_hour   = schedule.get('start_hour', 0)
                             start_minute = schedule.get('start_minute', 0)
-                            # Build a start_date anchored to today's start time
                             now = datetime.datetime.now()
+                            # Anchor to today's start time (or yesterday if still in future).
+                            # IntervalTrigger computes the correct next fire from the anchor,
+                            # so rebuilding the scheduler never resets the fire cycle.
                             start_dt = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-                            # If that time already passed today, bump to next occurrence
-                            if start_dt <= now:
-                                start_dt += datetime.timedelta(hours=interval_hours)
-                                # Keep bumping until it's in the future
-                                while start_dt <= now:
-                                    start_dt += datetime.timedelta(hours=interval_hours)
+                            if start_dt > now:
+                                start_dt -= datetime.timedelta(days=1)
                             trigger = IntervalTrigger(hours=interval_hours, start_date=start_dt)
                         elif schedule_type == "speeches_interval":
                             # Always runs every 1 minute; wait_time controls when buckets are sent

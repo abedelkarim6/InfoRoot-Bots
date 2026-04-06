@@ -1871,7 +1871,7 @@ function createCategoryBox(botName, categoryName, category) {
                 </div>
                 <div class="category-controls" onclick="event.stopPropagation()">
                     <button class="btn btn-secondary btn-sm"
-                            onclick="document.getElementById('new-topic-${botName}-${categoryName}').focus()">
+                            onclick="toggleCollapsible('${jsAttr(sectionId)}'); document.getElementById('new-topic-${botName}-${categoryName}').focus()">
                         + Add Topic
                     </button>
                     <label class="toggle-switch">
@@ -2211,10 +2211,6 @@ function openDefaultScheduleModal(botName) {
                         <option value="speeches_interval">Speeches Interval</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">Prompt</label>
-                    <select class="select" id="ds-prompt">${promptOptions}</select>
-                </div>
                 <div id="ds-type-inputs"></div>
                 <div class="form-group">
                     <label class="form-label">Header</label>
@@ -2270,31 +2266,38 @@ function updateDsInputs() {
         container.innerHTML = `<div class="form-group"><label class="form-label">Every N Minutes</label>
             <input type="number" class="input" id="ds-minute" min="1" max="59" value="30"></div>`;
     } else if (type === 'hourly') {
-        container.innerHTML = `<div class="form-group"><label class="form-label">At Minute</label>
+        container.innerHTML = `<div class="form-group"><label class="form-label">Minute</label>
             <input type="number" class="input" id="ds-minute" min="0" max="59" value="0"></div>`;
     } else if (type === 'interval_minutes') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Every N Minutes</label>
-            <input type="number" class="input" id="ds-minutes" min="1" value="30"></div>
-            <div class="form-group"><label class="form-label">Start Hour</label>
-            <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0"></div>
-            <div class="form-group"><label class="form-label">Start Minute</label>
-            <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0"></div>`;
+            <input type="number" class="input" id="ds-minutes" min="1" value="30">
+            <div class="form-group"><label class="form-label">Starting at (HH : MM)</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at this time, then every X minutes</small>
+        </div>`;
     } else if (type === 'interval') {
-        container.innerHTML = `<div class="form-group"><label class="form-label">Every N Hours</label>
-            <input type="number" class="input" id="ds-hours" min="1" max="24" value="3"></div>
-            <div class="form-group"><label class="form-label">Start Hour</label>
-            <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0"></div>
-            <div class="form-group"><label class="form-label">Start Minute</label>
-            <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0"></div>`;
+        container.innerHTML = `<div class="form-group"><label class="form-label">Every X Hours</label>
+            <input type="number" class="input" id="ds-hours" min="1" max="24" value="3">
+            <div class="form-group"><label class="form-label">Starting at (HH : MM)</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at this time, then every X hours</small>
+        </div>`;
     } else if (type === 'daily') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Hour</label>
-            <input type="number" class="input" id="ds-hour" min="0" max="23" value="18"></div>
+            <input type="number" class="input" id="ds-hour" min="0" max="23" value="18">
             <div class="form-group"><label class="form-label">Minute</label>
-            <input type="number" class="input" id="ds-minute" min="0" max="59" value="0"></div>`;
+            <input type="number" class="input" id="ds-minute" min="0" max="59" value="0">
+        </div>`;
     } else if (type === 'speeches_interval') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Wait Time (mins) — send buckets when idle</label>
             <input type="number" class="input" id="ds-wait-time" min="1" value="5">
-            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code> on its own line.</small></div>`;
+            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code> on its own line.</small>`;
     } else {
         container.innerHTML = '';
     }
@@ -2469,21 +2472,21 @@ async function deletePrompt(botName, promptKey) {
 }
 
 function renamePromptDialog(botName, oldKey) {
-    showPrompt('Rename Prompt', oldKey, async (newKey) => {
-        await renamePrompt(botName, oldKey, newKey);
+    showPrompt('Rename Prompt', oldKey, async (newName) => {
+        await renamePrompt(botName, oldKey, newName);
     });
 }
 
-async function renamePrompt(botName, oldKey, newKey) {
-    newKey = newKey.trim();
-    if (!newKey || oldKey === newKey) return;
+async function renamePrompt(botName, oldKey, newName) {
+    newName = newName.trim();
+    if (!newName || oldKey === newName) return;
 
     // Get bot prompts
     const botPrompts = (globalPrompts && globalPrompts[botName]) || {};
 
     // Check if new key already exists for this bot
-    if (botPrompts[newKey]) {
-        showAlert(`Prompt "${newKey}" already exists`, { icon: '⚠️' });
+    if (botPrompts[newName]) {
+        showAlert(`Prompt "${newName}" already exists`, { icon: '⚠️' });
         renderBotsPage(); // Reset the input
         return;
     }
@@ -2494,12 +2497,12 @@ async function renamePrompt(botName, oldKey, newKey) {
     const oldText = (oldVal && typeof oldVal === 'object') ? (oldVal.text || '') : (oldVal || '');
 
     // Create new prompt with new key
-    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newKey, text: oldText });
+    const addResult = await api('/api/prompts/update', { bot_name: botName, key: newName, text: oldText });
     if (addResult.status === 'ok') {
         // Delete old prompt
         await api('/api/prompts/delete', { bot_name: botName, key: oldKey });
         // Cascade rename to all schedules that referenced the old prompt key
-        await api('/api/prompts/rename-cascade', { bot_name: botName, old_key: oldKey, new_key: newKey });
+        await api('/api/prompts/rename-cascade', { bot_name: botName, old_key: oldKey, new_key: newName });
         await loadAllData();
         renderBotsPage();
         showNotification('Prompt renamed', 'success');
@@ -2604,6 +2607,7 @@ async function deleteCategory(botName, categoryName) {
         if (result.status === 'ok') {
             await loadAllData();
             renderBotsPage();
+            loadWarnings();
             showNotification('Category deleted', 'success');
         }
     }, { title: 'Delete Category' });
@@ -2946,7 +2950,9 @@ function kwDeleteSelected(b, c, t) {
         });
         if (result.status === 'ok') {
             await loadAllData();
-            renderBotsPage([`topic-${b}-${c}-${t}`, `categories-${b}`]);
+            const topicId = `topic-${b}-${c}-${t}`;
+            const categoryId = `categories-${b}`;
+            renderBotsPage([topicId, categoryId]);
             showNotification(`${count} keyword${count > 1 ? 's' : ''} deleted`, 'success');
         }
     }, { title: 'Delete Keywords' });
@@ -2962,7 +2968,9 @@ function kwDeleteAll(b, c, t) {
         });
         if (result.status === 'ok') {
             await loadAllData();
-            renderBotsPage([`topic-${b}-${c}-${t}`, `categories-${b}`]);
+            const topicId = `topic-${b}-${c}-${t}`;
+            const categoryId = `categories-${b}`;
+            renderBotsPage([topicId, categoryId]);
             showNotification(`All ${count} keywords deleted`, 'success');
         }
     }, { title: 'Delete All Keywords' });
@@ -3043,17 +3051,17 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                     </label>
                     <span class="form-label" style="margin:0;">Show date & time in header</span>
                 </div>
-                <div id="topic-schedule-datetime-opts" style="display:none;padding-left:16px;">
+                <div id="topic-schedule-datetime-opts" style="display:${schedule.header_datetime ? 'block' : 'none'};padding-left:16px;">
                     <div class="form-group" style="display:flex;align-items:center;gap:10px;">
                         <label class="toggle-switch">
-                            <input type="checkbox" id="topic-schedule-date-arabic">
+                            <input type="checkbox" id="topic-schedule-date-arabic" ${schedule.header_date_arabic ? 'checked' : ''}>
                             <span class="toggle-slider"></span>
                         </label>
                         <span class="form-label" style="margin:0;">Date in Arabic numerals (٢٠٢٦/٠٣/٢١)</span>
                     </div>
                     <div class="form-group" style="display:flex;align-items:center;gap:10px;">
                         <label class="toggle-switch">
-                            <input type="checkbox" id="topic-schedule-time-arabic">
+                            <input type="checkbox" id="topic-schedule-time-arabic" ${schedule.header_time_arabic ? 'checked' : ''}>
                             <span class="toggle-slider"></span>
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
@@ -3126,8 +3134,7 @@ function updateTopicScheduleInputs() {
         container.innerHTML = `
             <label class="form-label">Wait Time (mins) — send buckets when idle</label>
             <input type="number" class="input" id="topic-schedule-wait-time" min="1" value="5">
-            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code> on its own line.</small>
-        `;
+            <small class="text-muted">Checks every minute. Sends each bucket as a separate message after this many idle minutes. Separate LLM response sections with <code>---</code>.</small>`;
     }
 }
 
@@ -3141,25 +3148,12 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         return;
     }
     
-    const headerInput = document.getElementById('topic-schedule-header').value;
-    const header = headerInput || `**${name}**`;
+    const header = document.getElementById('topic-schedule-header').value;
     const header_datetime = document.getElementById('topic-schedule-header-datetime').checked;
     const header_date_arabic = document.getElementById('topic-schedule-date-arabic').checked;
     const header_time_arabic = document.getElementById('topic-schedule-time-arabic').checked;
-
     const telegram_targets = getSchTgTargets('topic-schedule');
-
-    const schedule = {
-        name,
-        type,
-        prompt_key,
-        enabled: true,
-        header,
-        header_datetime,
-        header_date_arabic,
-        header_time_arabic,
-        telegram_targets
-    };
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, telegram_targets };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
@@ -3174,7 +3168,7 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
     } else if (type === 'daily') {
-        schedule.hour = Number(document.getElementById('topic-schedule-hour').value);
+        schedule.hour   = Number(document.getElementById('topic-schedule-hour').value);
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
     } else if (type === 'speeches_interval') {
         schedule.wait_time = Number(document.getElementById('topic-schedule-wait-time').value);
@@ -3360,8 +3354,8 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
                     <label class="form-label">Prompt</label>
                     <select class="select" id="edit-sch-prompt">
                         ${Object.keys(botPrompts).map(key => `
-                            <option value="${key}"${schedule.prompt_key === key ? ' selected' : ''}>${key}</option>
-                        `).join('')}
+                            <option value="${key}"${schedule.prompt_key === key ? ' selected' : ''}>${key}</option>`
+                        ).join('')}
                     </select>
                 </div>
                 <div class="form-group">
@@ -4158,7 +4152,7 @@ function computeNextRun(sch) {
     if (sch.type === 'interval') {
         // Anchor: today at start_hour:start_minute; find next fire after now
         const startH = sch.start_hour ?? 0;
-        const startM = sch.start_minute ?? 0;
+        const startM   = sch.start_minute ?? 0;
         const hours  = sch.hours ?? 1;
         const anchor = new Date(now);
         anchor.setHours(startH, startM, 0, 0);
@@ -4236,7 +4230,7 @@ function applyMonSummaryFilters() {
             ? `<span class="mon-msgs-link" onclick="showSummaryMessages(${s.id})">${count}</span>`
             : count;
         return `<tr>
-            <td style="white-space:nowrap;">${ts}</td>
+            <td style="white-space:nowrap;font-size:11px">${ts}</td>
             <td>${escapeHtml(s.bot_name || '—')}</td>
             <td>${escapeHtml(s.topic_name || '—')}</td>
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(s.summary_type || '—')}</span></td>
@@ -4322,19 +4316,17 @@ function _renderSumMsgTable() {
 
     const rows = filtered.map(m => {
         const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-        const src = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '—';
+        const src = m.channel_username ? `@${m.channel_username}` : '—';
         const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
         const bot = m.bot_name         ? escapeHtml(m.bot_name)         : '—';
         const top = m.topics           ? escapeHtml(m.topics)           : '—';
         const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
         const txt = escapeHtml(m.preview || '');
         return `<tr>
-            <td style="white-space:nowrap;font-size:11px">${ts}</td>
-            <td><span class="mon-ch-badge">${src}</span></td>
-            <td style="font-size:11px">${col}</td>
-            <td style="font-size:11px">${bot}</td>
-            <td style="font-size:11px">${top}</td>
-            <td style="font-size:11px">${kw}</td>
+            <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+            <td>${topicTags || '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td>${catTags  || '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td>${kwTags   || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td class="smp-msg-cell" title="${txt}">${txt}</td>
         </tr>`;
     }).join('');
@@ -4395,7 +4387,7 @@ async function loadMonitorMessages(append = false) {
     const scrollY = window.scrollY;
     const data = await api(`/api/monitor/messages?limit=${_MSG_PAGE_SIZE}&offset=${_msgOffset}`);
     if (data.status !== 'ok') {
-        if (!append) el.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message)}</p>`;
+        if (!append) el.innerHTML = `<p class="mon-empty" style="color:var(--danger);">Error: ${escapeHtml(data.message || 'Unknown error')}</p>`;
         return;
     }
     const newMsgs = data.messages || [];
@@ -4449,21 +4441,14 @@ function applyMonMessageFilters() {
         const chHtml = Object.entries(channels).map(([chName, msgs]) => {
             const rowsHtml = msgs.map(m => {
                 const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-                const topicTags = (m.topics || '').split(',').filter(Boolean)
-                    .map(t => `<span class="mon-tag">${escapeHtml(t.trim())}</span>`).join('');
-                const catTags = (m.categories || '').split(',').filter(Boolean)
-                    .map(c => `<span class="mon-tag cat">${escapeHtml(c.trim())}</span>`).join('');
-                const kwTags = (m.keywords_found || '').split(',').filter(Boolean).slice(0,5)
-                    .map(k => `<span class="mon-tag">${escapeHtml(k.trim())}</span>`).join('');
+                const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '';
                 return `<tr>
                     <td style="white-space:nowrap;font-size:11px;">${ts}</td>
-                    <td>${topicTags || '<span style="color:var(--text-muted)">—</span>'}</td>
-                    <td>${catTags  || '<span style="color:var(--text-muted)">—</span>'}</td>
-                    <td>${kwTags   || '<span style="color:var(--text-muted)">—</span>'}</td>
-                    <td class="mon-ellipsis" title="${escapeHtml(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+                    <td>${botTag}</td>
+                    <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
                 </tr>`;
             }).join('');
-            return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)}</div>
+            return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
                 <div style="overflow-x:auto;">
                 <table class="mon-table">
                     <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
@@ -4521,7 +4506,7 @@ const _unclStopWords = new Set([
     'any','because','before','between','during','into','only','over','same','then','through',
     'under','until','up','while','into','out','new','one','two','said','says','been','being',
     'get','got','still','back','much','even','well','here','there','now','via','per','المزيد',
-    'من','في','على','إلى','عن','مع','هذا','هذه','التي','الذي','ان','أن','لا','ما','هو','هي',
+    'من','في','على','إلى','عن','مع','هذا',' هذه','التي','الذي','ان','أن','لا','ما','هو','هي',
     'كان','بين','بعد','قبل','حتى','عند','ذلك','أو','ولا','كل','غير','بل','لم','ثم','إن',
     'يتم','تم','لن','قد','منذ','خلال','حول','ضد','نحو','عبر','أي','لها','له','لهم','التى',
     'وفي','وقد','يوم','أنه','تلك','هؤلاء','الى','وهو','أكثر','فيها','فيه','وعلى','ومن'
@@ -4607,7 +4592,7 @@ function _renderUnclByChannel(messages, content) {
             return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
                 <div style="overflow-x:auto;">
                 <table class="mon-table">
-                    <thead><tr><th style="width:140px;">Time</th><th style="width:100px;">Bot</th><th>Message Preview</th></tr></thead>
+                    <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
                     <tbody>${rowsHtml}</tbody>
                 </table></div>`;
         }).join('');
@@ -4739,7 +4724,7 @@ async function loadUnclassifiedMessages(append = false) {
     }
 
     const newMsgs = data.messages || [];
-    const stats = data.stats || [];
+    const stats = data.stats    || [];
     _unclHasMore = newMsgs.length === _UNCL_PAGE_SIZE;
     _unclMessages = _unclMessages.concat(newMsgs);
     _unclOffset += newMsgs.length;
@@ -4769,7 +4754,7 @@ async function loadUnclassifiedMessages(append = false) {
         if (stats.length) {
             statsEl.innerHTML = `<div class="mon-uncl-stats-bar">${stats.map(s =>
                 `<span class="yt-filter-tag">${escapeHtml(s.bot_name || '?')} / ${escapeHtml(s.collection_name || '?')}: <strong>${s.cnt}</strong></span>`
-            ).join('')}</div>`;
+              ).join('')}</div>`;
         } else {
             statsEl.innerHTML = '';
         }
