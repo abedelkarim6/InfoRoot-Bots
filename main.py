@@ -363,7 +363,8 @@ def _compute_window_start(job_data) -> datetime.datetime:
             # How many complete intervals have elapsed since the anchor?
             elapsed_seconds = (now - anchor).total_seconds()
             n = math.floor(elapsed_seconds / (hours * 3600))
-            window_start = anchor + datetime.timedelta(hours=n * hours)
+            # n is the current interval index; (n-1) is the previous fire → window start
+            window_start = anchor + datetime.timedelta(hours=max(n - 1, 0) * hours)
             return window_start
 
         elif schedule_type == 'interval_minutes':
@@ -377,7 +378,8 @@ def _compute_window_start(job_data) -> datetime.datetime:
 
             elapsed_seconds = (now - anchor).total_seconds()
             n = math.floor(elapsed_seconds / (minutes * 60))
-            window_start = anchor + datetime.timedelta(minutes=n * minutes)
+            # n is the current interval index; (n-1) is the previous fire → window start
+            window_start = anchor + datetime.timedelta(minutes=max(n - 1, 0) * minutes)
             return window_start
 
         elif schedule_type == 'hourly':
@@ -526,7 +528,10 @@ async def generate_and_send_summary(job_data):
         texts = [m['text'] for m in topic_messages]
 
         logger.info(f"[AI] Calling LLM | Bot={bot_name} | Topic={topic_name} | prompt_key={prompt_key} | msgs={len(texts)}")
-        summary_text = _chunked_summarize(texts, bot_name, prompt_key, topic_name)
+        loop = asyncio.get_event_loop()
+        summary_text = await loop.run_in_executor(
+            None, _chunked_summarize, texts, bot_name, prompt_key, topic_name
+        )
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)}")
 
         # Get target channels
@@ -713,7 +718,8 @@ async def generate_speech_buckets(job_data: dict):
         msg_ids = [m['id']   for m in in_window]
 
         prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-        llm_response = llm_client.generate_summary(prompt)
+        loop         = asyncio.get_event_loop()
+        llm_response = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
         buckets      = _parse_speech_buckets(llm_response)
 
         # Cancel any existing pending send task and restart the countdown

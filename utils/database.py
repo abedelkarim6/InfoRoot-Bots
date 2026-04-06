@@ -1169,9 +1169,17 @@ class Database:
         try:
             """Get messages not yet summarized for this specific (bot, topic, schedule_type) combo."""
             cursor = self._get_cursor()
+            # Filter by topic in SQL to avoid fetching thousands of unrelated messages.
+            # topics field is comma-separated; match topic_name in any position.
             cursor.execute(
                 """SELECT m.* FROM messages m
                    WHERE m.bot_name = %s
+                     AND (
+                         m.topics = %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                     )
                      AND NOT EXISTS (
                          SELECT 1 FROM message_summarizations ms
                          WHERE ms.message_id = m.id
@@ -1179,7 +1187,14 @@ class Database:
                            AND ms.topic_name = %s
                            AND ms.schedule_type = %s
                      )""",
-                (bot_name, bot_name, topic_name, schedule_type)
+                (
+                    bot_name,
+                    topic_name,                        # exact (single topic)
+                    topic_name + ',%',                 # topic at start
+                    '%,' + topic_name + ',%',          # topic in middle
+                    '%,' + topic_name,                 # topic at end
+                    bot_name, topic_name, schedule_type,
+                )
             )
             return [dict(row) for row in cursor.fetchall()]
         finally:
