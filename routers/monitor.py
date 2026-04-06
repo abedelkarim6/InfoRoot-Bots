@@ -155,6 +155,27 @@ def get_unclassified_messages(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.get("/monitor/missed")
+def get_missed_messages(
+    request: Request,
+    bot: str = Query(default=None),
+    topic: str = Query(default=None),
+    search: str = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    db = get_db()
+    try:
+        allowed_bots = _get_allowed_bots(request)
+        messages = db.get_missed_messages(
+            limit=limit, offset=offset, bot_name=bot, topic_name=topic,
+            search=search, allowed_bot_names=allowed_bots)
+        stats = db.get_missed_stats(allowed_bot_names=allowed_bots)
+        return {'status': 'ok', 'messages': messages, 'stats': stats}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
     request: Request,
@@ -169,9 +190,9 @@ def get_dashboard_stats(
             user_id = get_request_user_id(request)
             if user_id:
                 cfg = db.get_filtered_bots_config(user_id)
-                allowed_bots = list(cfg.keys())
-                if not allowed_bots:
-                    allowed_bots = ["__no_access__"]
+                allowed_bots = list(cfg.keys()) or ["__no_access__"]
+            else:
+                allowed_bots = ["__no_access__"]
         data = db.get_dashboard_stats(
             days,
             filter_source=filter_source,

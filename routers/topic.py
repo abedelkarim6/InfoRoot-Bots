@@ -290,10 +290,17 @@ def update_topic_schedule(request: Request, data: dict = Body(...)):
 # ==================== Keyword Operations ====================
 
 @router.get("/topic/keywords")
-def get_topic_keywords(bot_name: str, category_name: str, topic_name: str):
+def get_topic_keywords(request: Request, bot_name: str, category_name: str, topic_name: str):
     db = get_db()
     keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
-    return {"status": "ok", "keywords": keywords, "count": len(keywords)}
+    # Check seo_visible for non-admin users
+    if not is_admin_request(request):
+        user_id = get_request_user_id(request)
+        if user_id:
+            user_row = db.get_user_by_id(user_id)
+            if user_row and not user_row.get('seo_visible', True):
+                return {"status": "ok", "keywords": [], "count": len(keywords), "seo_visible": False}
+    return {"status": "ok", "keywords": keywords, "count": len(keywords), "seo_visible": True}
 
 @router.post("/topic/keyword/add")
 def add_topic_keyword(request: Request, data: dict = Body(...)):

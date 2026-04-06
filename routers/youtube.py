@@ -334,13 +334,21 @@ async def list_keywords(request: Request):
 
     if not is_admin_request(request):
         user_id = get_request_user_id(request)
-        if user_id:
-            from utils.database import get_db
-            inheritances = get_db().get_user_yt_inheritances(user_id)
-            allowed_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'keyword'}
-            keywords = [kw for kw in keywords if kw['id'] in allowed_ids]
+        if not user_id:
+            return {"status": "ok", "keywords": [], "seo_count": 0, "seo_visible": False}
+        from utils.database import get_db
+        db = get_db()
+        inheritances = db.get_user_yt_inheritances(user_id)
+        allowed_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'keyword'}
+        keywords = [kw for kw in keywords if kw['id'] in allowed_ids]
+        # Check if user has permission to see full SEO details
+        user_row = db.get_user_by_id(user_id)
+        seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
+        if not seo_visible:
+            return {"status": "ok", "keywords": [], "seo_count": len(keywords), "seo_visible": False}
+        return {"status": "ok", "keywords": keywords, "seo_count": len(keywords), "seo_visible": True}
 
-    return {"status": "ok", "keywords": keywords}
+    return {"status": "ok", "keywords": keywords, "seo_count": len(keywords), "seo_visible": True}
 
 
 @router.post("/keywords/add")

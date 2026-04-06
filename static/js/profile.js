@@ -87,6 +87,7 @@ function renderProfilePage(u) {
         <button class="btn ${hasTelegram ? 'btn-secondary' : 'btn-primary'} btn-sm" onclick="startTgRelink()">
           ${hasTelegram ? '🔄 Re-link' : '🔗 Link Telegram'}
         </button>
+        ${hasTelegram ? `<button class="btn btn-danger btn-sm" onclick="pfDisconnectTelegram()">✕ Disconnect</button>` : ''}
       </div>
     </div>
 
@@ -600,3 +601,30 @@ async function pfUpdateSession() {
     `;
     document.head.appendChild(s);
 })();
+
+// ── Disconnect Telegram ───────────────────────────────────────────────────────
+
+function pfDisconnectTelegram() {
+    showConfirm(
+        'Disconnect your Telegram account? You will no longer receive channel updates until you re-link.',
+        async () => {
+            const token = localStorage.getItem('auth_token');
+            try {
+                const res = await fetch('/api/auth/profile/disconnect-telegram', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showNotification('Telegram account disconnected', 'success');
+                    loadProfileData();
+                } else {
+                    showNotification(data.error || 'Disconnect failed', 'error');
+                }
+            } catch (e) {
+                showNotification('Connection error', 'error');
+            }
+        },
+        { title: 'Disconnect Telegram', icon: '🔌', confirmLabel: 'Disconnect', confirmClass: 'btn-danger' }
+    );
+}

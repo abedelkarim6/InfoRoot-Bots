@@ -667,7 +667,7 @@ class Database:
 
     def update_user(self, user_id: int, **fields):
         try:
-            allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role', 'ai_plan_id'}
+            allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role', 'ai_plan_id', 'seo_visible'}
             updates = {k: v for k, v in fields.items() if k in allowed}
             if not updates:
                 return
@@ -1245,13 +1245,16 @@ class Database:
                 """)
             rows = cursor.fetchall()
 
-            # Get all existing summarizations
-            cursor.execute("SELECT message_id, bot_name, topic_name, schedule_type FROM message_summarizations")
+            # Get all existing summarizations (done = summarized/missed per schedule)
+            cursor.execute("SELECT message_id, bot_name, topic_name, schedule_type, status FROM message_summarizations")
             done = set()
+            missed = set()  # (message_id, bot_name, topic_name) — missed for any schedule
             for r in cursor.fetchall():
                 done.add((r['message_id'], r['bot_name'], r['topic_name'], r['schedule_type']))
+                if r['status'] == 'missed':
+                    missed.add((r['message_id'], r['bot_name'], r['topic_name']))
 
-            counts = {}  # bot_name -> topic -> {hourly, daily, minute}
+            counts = {}  # bot_name -> topic -> {hourly, daily, minute, ...}
             for row in rows:
                 bn = row['bot_name'] or 'unknown'
                 topics_str = row['topics'] or ''
@@ -1263,6 +1266,9 @@ class Database:
                 for topic in topics:
                     if topic not in counts[bn]:
                         counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0, 'speeches_interval': 0}
+                    # Skip if this message was marked missed for any schedule type
+                    if (row['id'], bn, topic) in missed:
+                        continue
                     for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes', 'speeches_interval'):
                         if (row['id'], bn, topic, stype) not in done:
                             counts[bn][topic][stype] += 1
@@ -1465,6 +1471,68 @@ class Database:
         finally:
             self._commit()
 
+    def get_missed_messages(self, limit: int = 50, offset: int = 0,
+                             bot_name: str = None, topic_name: str = None,
+                             search: str = None, allowed_bot_names: list = None):
+        try:
+            """Returns messages marked as missed (outside schedule window)."""
+            cursor = self._get_cursor()
+            clauses = ["ms.status = 'missed'"]
+            params = []
+            if allowed_bot_names is not None:
+                clauses.append("ms.bot_name = ANY(%s)")
+                params.append(allowed_bot_names)
+            if bot_name:
+                clauses.append("ms.bot_name = %s")
+                params.append(bot_name)
+            if topic_name:
+                clauses.append("ms.topic_name = %s")
+                params.append(topic_name)
+            if search:
+                clauses.append("m.text ILIKE %s")
+                params.append(f"%{search}%")
+            where = " AND ".join(clauses)
+            params.extend([limit, offset])
+            cursor.execute(f"""
+                SELECT m.id, m.channel_id, m.channel_username, m.collection_name,
+                       ms.bot_name, ms.topic_name, ms.schedule_type, m.timestamp, m.text
+                FROM message_summarizations ms
+                JOIN messages m ON m.id = ms.message_id
+                WHERE {where}
+                ORDER BY m.timestamp DESC
+                LIMIT %s OFFSET %s
+            """, tuple(params))
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['preview'] = (d.pop('text', '') or '')[:300]
+                if d['timestamp']:
+                    d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def get_missed_stats(self, allowed_bot_names: list = None):
+        try:
+            """Return counts for missed messages grouped by bot and topic."""
+            cursor = self._get_cursor()
+            where = "status = 'missed'"
+            params = []
+            if allowed_bot_names is not None:
+                where += " AND bot_name = ANY(%s)"
+                params.append(allowed_bot_names)
+            cursor.execute(f"""
+                SELECT bot_name, topic_name, COUNT(*) AS cnt
+                FROM message_summarizations
+                WHERE {where}
+                GROUP BY bot_name, topic_name
+                ORDER BY cnt DESC
+            """, params or None)
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            self._commit()
+
     def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None, filter_bot_names: list = None) -> dict:
         try:
             """Return comprehensive analytics for the dashboard page."""
@@ -1500,13 +1568,13 @@ class Database:
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
-            # --- Dropdown population: always return full unfiltered lists ---
+            # --- Dropdown population: filtered by bot access ---
             cursor.execute(f"""
                 SELECT DISTINCT channel_username AS source FROM messages
                 WHERE channel_username IS NOT NULL AND channel_username != ''
-                  AND timestamp >= NOW() - {iv}
+                  AND timestamp >= NOW() - {iv}{bot_clause}
                 ORDER BY source LIMIT 200
-            """, (days,))
+            """, (days,) + ((filter_bot_names,) if filter_bot_names is not None else ()))
             all_sources = [r['source'] for r in cursor.fetchall()]
 
             cursor.execute(f"""
@@ -1515,9 +1583,9 @@ class Database:
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE topics IS NOT NULL AND topics != ''
                   AND TRIM(t.topic) != ''
-                  AND timestamp >= NOW() - {iv}
+                  AND timestamp >= NOW() - {iv}{bot_clause}
                 ORDER BY topic LIMIT 200
-            """, (days,))
+            """, (days,) + ((filter_bot_names,) if filter_bot_names is not None else ()))
             all_topics = [r['topic'] for r in cursor.fetchall()]
 
             # 1. Totals

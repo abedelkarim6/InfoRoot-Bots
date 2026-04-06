@@ -331,7 +331,10 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/auth/register")
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, request: Request):
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin access required."}, status_code=403)
+
     username = req.username.strip()
     if len(username) < 3:
         return JSONResponse({"error": "Username must be at least 3 characters."}, status_code=400)
@@ -344,8 +347,7 @@ def register(req: RegisterRequest):
 
     password_hash = hash_password(req.password)
     user_id = db.create_user(username, password_hash)
-    token   = create_token(user_id=user_id)
-    return {"token": token, "user_id": user_id}
+    return {"user_id": user_id, "username": username}
 
 
 # ── Telegram OTP linking ──────────────────────────
@@ -516,6 +518,27 @@ def update_session(req: UpdateSessionRequest, request: Request):
         return JSONResponse({"error": "Session string cannot be empty."}, status_code=400)
 
     db.update_user_telegram(user_id, req.phone.strip() or None, req.session_string.strip())
+    return {"status": "ok"}
+
+
+@router.post("/auth/profile/disconnect-telegram")
+def disconnect_telegram(request: Request):
+    """Clear the telegram session for the current user."""
+    token   = _get_bearer(request)
+    user_id = get_token_user_id(token) if token else None
+
+    db = get_db()
+
+    if user_id is None:
+        # Legacy config-admin token
+        from utils.helpers import load_config
+        admin_username = load_config().get("admin", {}).get("username", "")
+        user = db.get_user_by_username(admin_username) or db.get_admin_user()
+        if not user:
+            return JSONResponse({"error": "Admin not found in DB."}, status_code=404)
+        user_id = user["id"]
+
+    db.update_user_telegram(user_id, None, None)
     return {"status": "ok"}
 
 

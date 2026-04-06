@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title> Summaries Bot Manager v4</title>
+    <title> Inforoot </title>
     <link rel="stylesheet" href="/static/css/modern.css?v=4">
     <link rel="stylesheet" href="/static/css/auto-save.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -73,7 +73,7 @@
                 </a>
                 <a href="#" class="nav-item" data-page="yt-keywords">
                     <span class="icon">🔎</span>
-                    <span>Youtube Trackers</span>
+                    <span>YouTube SEOs</span>
                 </a>
             </div>
 
@@ -416,6 +416,7 @@
                     <button class="mon-tab"         data-tab="summaries"   onclick="switchMonTab('summaries')">📬 Summaries</button>
                     <button class="mon-tab"         data-tab="messages"    onclick="switchMonTab('messages')">📥 Messages</button>
                     <button class="mon-tab"         data-tab="unclassified" onclick="switchMonTab('unclassified')">❓ Unclassified <span id="mon-uncl-badge" class="mon-uncl-badge" style="display:none;"></span></button>
+                    <button class="mon-tab"         data-tab="missed"      onclick="switchMonTab('missed')">⏭ Missed <span id="mon-missed-badge" class="mon-uncl-badge" style="display:none;"></span></button>
                 </div>
 
                 <!-- Schedules tab -->
@@ -467,10 +468,26 @@
                         <select class="select mon-filter-sel" id="uncl-filter-coll" onchange="loadUnclassifiedMessages()"><option value="">All Collections</option></select>
                         <input type="text" class="input mon-filter-search" id="uncl-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadUnclassifiedMessages()">
                         <button class="btn btn-secondary btn-sm" onclick="loadUnclassifiedMessages()">Search</button>
-                        <button class="btn btn-sm" id="uncl-group-btn" onclick="toggleUnclGroupView()" style="margin-left:auto;">🔤 Group by words</button>
+                        <button class="btn btn-sm" id="uncl-group-btn" onclick="toggleUnclGroupView()">🔤 Group by words</button>
+                        <button class="btn btn-sm btn-secondary" id="uncl-clear-btn" onclick="clearUnclassifiedView()" style="margin-left:auto;" title="Hide current messages from view (still in DB)">✕ Clear view</button>
+                        <button class="btn btn-sm btn-secondary" id="uncl-showall-btn" onclick="showAllUnclassifiedView()" style="display:none;" title="Show previously cleared messages">↩ Show all</button>
                     </div>
                     <div id="mon-uncl-stats"></div>
                     <div id="mon-uncl-content"><p class="mon-empty">Loading…</p></div>
+                </div>
+
+                <!-- Missed tab -->
+                <div id="mon-tab-missed" class="mon-tab-panel" style="display:none;">
+                    <div class="mon-filter-bar">
+                        <select class="select mon-filter-sel" id="missed-filter-bot"   onchange="loadMissedMessages()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="missed-filter-topic" onchange="loadMissedMessages()"><option value="">All Topics</option></select>
+                        <input type="text" class="input mon-filter-search" id="missed-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadMissedMessages()">
+                        <button class="btn btn-secondary btn-sm" onclick="loadMissedMessages()">Search</button>
+                        <button class="btn btn-sm btn-secondary" id="missed-clear-btn" onclick="clearMissedView()" style="margin-left:auto;" title="Hide current messages from view (still in DB)">✕ Clear view</button>
+                        <button class="btn btn-sm btn-secondary" id="missed-showall-btn" onclick="showAllMissedView()" style="display:none;" title="Show previously cleared messages">↩ Show all</button>
+                    </div>
+                    <div id="mon-missed-stats"></div>
+                    <div id="mon-missed-content"><p class="mon-empty">Loading…</p></div>
                 </div>
             </div>
         </div>
@@ -517,12 +534,12 @@
             </div>
         </div>
 
-        <!-- ══ YouTube Keywords Page ═══════════════════════════════ -->
+        <!-- ══ YouTube SEOs Page ═════════════════════════════════════ -->
         <div id="yt-keywords-page" class="page">
             <header class="page-header">
                 <div>
-                    <h2>Trackers</h2>
-                    <p class="subtitle">Keyword search configs with filtering rules</p>
+                    <h2>SEOs</h2>
+                    <p class="subtitle">SEO keyword search configs with filtering rules</p>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center;">
                     <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
@@ -865,7 +882,10 @@
                     <h2>Access & Plans</h2>
                     <p class="subtitle">Manage users, feature access, and AI usage plans</p>
                 </div>
-                <button class="btn btn-secondary btn-sm" onclick="loadAccountsData()">↻ Refresh</button>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-primary btn-sm" onclick="showCreateUserModal()">+ Create User</button>
+                    <button class="btn btn-secondary btn-sm" onclick="loadAccountsData()">↻ Refresh</button>
+                </div>
             </header>
             <div id="accounts-content">
                 <p class="text-muted">Loading…</p>

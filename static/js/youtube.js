@@ -429,6 +429,9 @@ async function loadYtKeywordsData() {
 
     const container = document.getElementById('yt-keywords-container');
     container.innerHTML = '<p class="mon-empty">Loading…</p>';
+    // Restore header controls in case they were hidden on a previous seo_visible=false load
+    const _kwHeader = document.querySelector('#yt-keywords-page .page-header > div:last-child');
+    if (_kwHeader) _kwHeader.style.display = '';
 
     const res = await api('/api/youtube/keywords');
     if (res.status !== 'ok') {
@@ -436,9 +439,19 @@ async function loadYtKeywordsData() {
         return;
     }
 
+    // Non-admin user with seo_visible=false: show count-only placeholder
+    if (res.seo_visible === false) {
+        const count = res.seo_count || 0;
+        container.innerHTML = `<p class="mon-empty" style="color:var(--text-muted)">🔎 ${count} SEO tracker${count !== 1 ? 's' : ''} assigned — details hidden by admin.</p>`;
+        // Also hide the action bar controls (search, run, add) for this user
+        const header = document.querySelector('#yt-keywords-page .page-header > div:last-child');
+        if (header) header.style.display = 'none';
+        return;
+    }
+
     const keywords = res.keywords || [];
     if (!keywords.length) {
-        container.innerHTML = '<p class="mon-empty">No keyword configs. Click "Add Keyword" to get started.</p>';
+        container.innerHTML = '<p class="mon-empty">No keyword configs. Click "Add Tracker" to get started.</p>';
         return;
     }
 

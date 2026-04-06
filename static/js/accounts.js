@@ -122,7 +122,7 @@ function renderAccounts(data, container) {
              <div style="font-size:32px;margin-bottom:12px">👥</div>
              <p class="text-muted">No registered users yet.</p>
              <p class="text-muted" style="font-size:12px;margin-top:6px">
-               Users register at <a href="/register" style="color:var(--accent-primary)">/register</a>
+               Use the <strong>+ Create User</strong> button above to add one.
              </p>
            </div>`;
 
@@ -239,6 +239,16 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
         <span class="toggle-slider"></span>
       </label>
       <span style="font-size:13px">💬 Video Chat</span>
+    </div>
+
+    <div class="ac-feature-row">
+      <label class="toggle-switch">
+        <input type="checkbox" ${u.seo_visible !== false ? 'checked' : ''}
+          onchange="setUserFlag(${u.id}, 'seo_visible', this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:13px">🔎 SEO Details Visible</span>
+      <span class="ac-chip" style="font-size:10px;margin-left:4px">${u.seo_visible !== false ? 'Full details' : 'Count only'}</span>
     </div>
 
   </div>
@@ -573,7 +583,7 @@ function renderYtInheritance(u, allChans, allKws) {
   </div>` : ''}
   ${availKws.length ? `
   <div style="margin-bottom:10px">
-    <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Keyword Trackers</div>
+    <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">SEO Trackers</div>
     <div style="display:flex;flex-wrap:wrap;gap:8px">${kwList}</div>
   </div>` : ''}
   <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
@@ -1106,3 +1116,68 @@ function fmtDate(iso) {
     `;
     document.head.appendChild(s);
 })();
+
+// ── Create User (admin only) ──────────────────────────────────────────────────
+function showCreateUserModal() {
+    const existing = document.getElementById('create-user-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'create-user-modal';
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Create New User</h3>
+                <button class="btn-icon" onclick="document.getElementById('create-user-modal').remove()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group" style="margin-bottom:12px">
+                    <label class="form-label">Username</label>
+                    <input id="cu-username" class="input" type="text" placeholder="e.g. john_doe" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Password</label>
+                    <input id="cu-password" class="input" type="password" placeholder="Min. 6 characters" autocomplete="new-password">
+                </div>
+                <div id="cu-error" style="color:var(--danger);font-size:13px;margin-top:10px;display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="document.getElementById('create-user-modal').remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitCreateUser()">Create</button>
+            </div>
+        </div>`;
+
+    document.body.appendChild(modal);
+    setTimeout(() => document.getElementById('cu-username')?.focus(), 50);
+    document.getElementById('cu-password').addEventListener('keydown', e => {
+        if (e.key === 'Enter') submitCreateUser();
+    });
+}
+
+async function submitCreateUser() {
+    const username = document.getElementById('cu-username')?.value.trim();
+    const password = document.getElementById('cu-password')?.value;
+    const errEl    = document.getElementById('cu-error');
+
+    if (!username || username.length < 3) {
+        errEl.textContent = 'Username must be at least 3 characters.';
+        errEl.style.display = '';
+        return;
+    }
+    if (!password || password.length < 6) {
+        errEl.textContent = 'Password must be at least 6 characters.';
+        errEl.style.display = '';
+        return;
+    }
+
+    const data = await acctApi('POST', '/api/auth/register', { username, password });
+    if (data.error) {
+        errEl.textContent = data.error;
+        errEl.style.display = '';
+        return;
+    }
+
+    document.getElementById('create-user-modal')?.remove();
+    await loadAccountsData();
+}

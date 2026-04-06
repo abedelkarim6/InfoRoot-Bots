@@ -412,6 +412,42 @@ def _compute_window_start(job_data) -> datetime.datetime:
     return now - datetime.timedelta(hours=24)
 
 
+CHUNK_SIZE = 25  # messages per chunk before hierarchical summarization
+
+def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: str) -> str:
+    """
+    If len(texts) <= CHUNK_SIZE: single LLM call (existing behaviour).
+    Otherwise: split into CHUNK_SIZE chunks → summarize each → merge all
+    intermediate summaries into one final summary.
+    """
+    if len(texts) <= CHUNK_SIZE:
+        prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+        return llm_client.generate_summary(prompt)
+
+    # --- Chunked path ---
+    chunks = [texts[i:i + CHUNK_SIZE] for i in range(0, len(texts), CHUNK_SIZE)]
+    logger.info(f"[CHUNK] {len(texts)} messages → {len(chunks)} chunks | Bot: {bot_name} | Topic: {topic_name}")
+
+    intermediates = []
+    for idx, chunk in enumerate(chunks, 1):
+        prompt = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
+        part = llm_client.generate_summary(prompt)
+        logger.info(f"[CHUNK] Chunk {idx}/{len(chunks)} summarized ({len(chunk)} msgs)")
+        intermediates.append(part)
+
+    if len(intermediates) == 1:
+        return intermediates[0]
+
+    # Merge pass: combine intermediate summaries in the same bot style
+    merge_prompt = (
+        "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
+        "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+        + "\n---\n".join(intermediates)
+    )
+    logger.info(f"[CHUNK] Merging {len(intermediates)} intermediate summaries | Bot: {bot_name} | Topic: {topic_name}")
+    return llm_client.generate_summary(merge_prompt)
+
+
 # ==================== Summary Handler ====================
 async def generate_and_send_summary(job_data):
     """
@@ -491,11 +527,9 @@ async def generate_and_send_summary(job_data):
         # Extract message texts
         texts = [m['text'] for m in topic_messages]
 
-        # Generate summary using bot-specific prompt
-        prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-
+        # Generate summary (chunked if > CHUNK_SIZE messages)
         # logger.info(f"[AI] SUMMARY GENERATION | Bot: {bot_name} | Topic: {topic_name} | Prompt: {prompt_key} | Messages: {len(texts)}")
-        summary_text = llm_client.generate_summary(prompt)
+        summary_text = _chunked_summarize(texts, bot_name, prompt_key, topic_name)
 
         # Get target channels: per-schedule override, or fall back to bot's collections
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]

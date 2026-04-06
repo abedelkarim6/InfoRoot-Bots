@@ -109,7 +109,7 @@ init_worker(
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    _OPEN = {"/login", "/register", "/api/auth/login", "/api/auth/register", "/favicon.ico"}
+    _OPEN = {"/login", "/api/auth/login", "/favicon.ico"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -246,9 +246,6 @@ app.include_router(websub_router)
 def login_page():
     return FileResponse("static/login.html")
 
-@app.get("/register")
-def register_page():
-    return FileResponse("static/register.html")
 
 @app.get("/")
 def main_page():
@@ -269,10 +266,21 @@ def get_config(request: Request):
     # Regular user: return only their inherited bots
     user_id = get_request_user_id(request)
     if not user_id:
-        return db.get_full_config()
+        return {'system': {'enabled': db.get_system_enabled()}, 'bots': {}, 'collections': {}}
+    user_row = db.get_user_by_id(user_id)
+    seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
     bots = db.get_filtered_bots_config(user_id)
+    if not seo_visible:
+        # Hide keyword text — replace arrays with count metadata so UI can show "X SEOs active"
+        for bot_cfg in bots.values():
+            for cat in bot_cfg.get('categories', {}).values():
+                for topic in cat.get('topics', {}).values():
+                    kws = topic.get('keywords') or []
+                    topic['_keyword_count'] = len(kws)
+                    topic['keywords'] = []
     return {
         'system': {'enabled': db.get_system_enabled()},
         'bots': bots,
         'collections': db.get_user_collections(user_id),
+        'seo_visible': seo_visible,
     }

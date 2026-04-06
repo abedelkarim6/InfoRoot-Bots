@@ -85,6 +85,7 @@ class UpdateUserRequest(BaseModel):
     yt_chat_on:   Optional[bool] = None
     agents_on:    Optional[bool] = None
     sys_bot_on:   Optional[bool] = None
+    seo_visible:  Optional[bool] = None   # whether user can see full SEO keyword details
     agents_limit: Optional[dict] = None   # {"type": "money"|"calls", "value": 10.0}
     ai_plan_id:   Optional[int]  = None
 

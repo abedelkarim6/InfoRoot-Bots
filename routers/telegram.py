@@ -44,8 +44,11 @@ def _lookup_channel(channels: list, channel_id: str):
 
 
 @router.get("/telegram/admin_channels")
-def get_admin_channels():
-    """Return all channels the userbot is a member of (from DB cache)."""
+def get_admin_channels(request: Request):
+    """Return all channels the userbot is a member of (from DB cache). Admin only."""
+    from routers.auth import is_admin_request
+    if not is_admin_request(request):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
     result, err = _get_dialogs()
     if err:
         return err
@@ -90,12 +93,77 @@ def verify_channel(data: dict = Body(...)):
 
 
 @router.get("/telegram/userbot/dialogs")
-def get_userbot_dialogs():
-    """Return the cached list of Telegram channels the userbot is a member of."""
-    result, err = _get_dialogs()
-    if err:
-        return err
-    return {"status": "ok", **result}
+async def get_userbot_dialogs(request: Request):
+    """Return Telegram channels.
+    Admin: returns cached DB dialogs (fast).
+    Non-admin with session: live-fetches their own subscribed channels.
+    Non-admin without session: returns status=no_session.
+    """
+    from routers.auth import is_admin_request, get_request_user_id
+    from utils.database import get_db
+
+    if is_admin_request(request):
+        result, err = _get_dialogs()
+        if err:
+            return err
+        return {"status": "ok", **result}
+
+    # Non-admin path
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    db = get_db()
+    user = db.get_user_by_id(user_id)
+    session_str = user.get("telegram_session") if user else None
+    if not session_str:
+        return {"status": "no_session"}
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        from telethon.tl.types import Channel, Chat
+        from utils.helpers import load_config
+
+        cfg = load_config()
+        tg_cfg = cfg.get("telegram", {})
+        client = TelegramClient(
+            StringSession(session_str),
+            int(tg_cfg["api_id"]),
+            tg_cfg["api_hash"],
+        )
+        try:
+            await asyncio.wait_for(client.connect(), timeout=15)
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": "Connection timed out"}
+
+        try:
+            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            return {"status": "error", "message": "Authorization check timed out"}
+
+        if not authorized:
+            await client.disconnect()
+            return {"status": "unauthorized"}
+
+        channels = []
+        async for dialog in client.iter_dialogs():
+            entity = dialog.entity
+            if isinstance(entity, (Channel, Chat)):
+                channels.append({
+                    "id": entity.id,
+                    "title": entity.title,
+                    "username": getattr(entity, "username", None),
+                    "is_group": getattr(entity, "megagroup", False) or isinstance(entity, Chat),
+                })
+
+        await client.disconnect()
+        return {"status": "ok", "channels": channels, "updated_at": None}
+
+    except Exception as e:
+        logger.error(f"[TG-DIALOGS-USER] {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # ── Userbot profile ───────────────────────────────────────────────────────────

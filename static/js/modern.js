@@ -561,7 +561,7 @@ async function renderYoutubeOverview() {
                     <div class="stat-icon">🔑</div>
                     <div class="stat-content">
                         <div class="stat-value">${kw.total || 0}</div>
-                        <div class="stat-label">Keywords</div>
+                        <div class="stat-label">SEOs</div>
                         <div class="stat-sub">${subLine(kw.active||0, kw.total||0)}</div>
                     </div>
                 </div>
@@ -1885,6 +1885,8 @@ function createCategoryBox(botName, categoryName, category) {
 
 function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled = true) {
     const keywords = topic.keywords || [];
+    const seoHidden = topic._keyword_count != null;   // admin stripped keyword text
+    const seoCount  = seoHidden ? topic._keyword_count : keywords.length;
     const schedules = topic.schedules || [];
     const linkedTopics = topic.linked_topics || [];
     const catchAll = !!topic.catch_all;
@@ -1935,15 +1937,19 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
 
                     <div class="form-group" ${catchAll ? 'style="opacity:0.4;pointer-events:none;"' : ''}>
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-                            <label class="form-label" style="margin:0;">Keywords (${keywords.length})</label>
-                            ${keywords.length > 0 ? `<div class="kw-bulk-actions" style="display:flex;gap:6px;align-items:center;">
+                            <label class="form-label" style="margin:0;">SEOs (${seoCount})</label>
+                            ${!seoHidden && keywords.length > 0 ? `<div class="kw-bulk-actions" style="display:flex;gap:6px;align-items:center;">
                                 <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwToggleSelectAll('${b}','${c}','${t}')">Select All</button>
                                 <button class="btn btn-danger btn-sm kw-del-sel-btn" style="font-size:10px;padding:2px 8px;display:none;" data-topic="${b}|${c}|${t}" onclick="kwDeleteSelected('${b}','${c}','${t}')">Delete Selected</button>
                                 <button class="btn btn-danger btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwDeleteAll('${b}','${c}','${t}')">Delete All</button>
                             </div>` : ''}
                         </div>
                         <div class="tags-container tags-scrollable" id="kw-tags-${b}-${c}-${t}">
-                            ${keywords.map((kw, idx) => `
+                            ${seoHidden ? `
+                                <span class="tag" style="background:rgba(99,102,241,.12);color:var(--text-muted);border:1px dashed var(--border-color);cursor:default;pointer-events:none;">
+                                    🔒 ${seoCount} SEO${seoCount !== 1 ? 's' : ''} active — details hidden by admin
+                                </span>` :
+                            keywords.map((kw, idx) => `
                                 <span class="tag kw-selectable" data-idx="${idx}">
                                     <input type="checkbox" class="kw-cb" style="margin:0 4px 0 0;accent-color:var(--accent-primary);cursor:pointer;" onchange="kwSelectionChanged('${b}','${c}','${t}')">
                                     ${escapeHtmlSys(kw)}
@@ -1951,13 +1957,13 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                           onclick="removeKeyword('${b}', '${c}', '${t}', ${idx})">×</span>
                                 </span>
                             `).join('')}
-                            <input type="text" class="tag-input" placeholder="+ Add keywords (comma-separated)"
+                            <input type="text" class="tag-input" placeholder="+ Add SEOs (comma-separated)"
                                    onkeydown="return handleKeywordInput(event, '${b}', '${c}', '${t}')">
                         </div>
                     </div>
 
                     <div class="form-group">
-                        <label class="form-label">Linked Topics (inherit keywords)</label>
+                        <label class="form-label">Linked Topics (inherit SEOs)</label>
                         <div class="tags-container">
                             ${linkedTopics.map((linkedTopic, idx) => `
                                 <span class="tag">
@@ -1970,7 +1976,7 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                 onclick="showLinkTopicModal('${b}', '${c}', '${t}')">
                             + Link Existing Topic
                         </button>
-                        <small class="text-muted d-block mt-1">Link to other topics to inherit their keywords</small>
+                        <small class="text-muted d-block mt-1">Link to other topics to inherit their SEOs</small>
                     </div>
                 </div>
 
@@ -2708,7 +2714,7 @@ function showLinkTopicModal(botName, categoryName, currentTopicName) {
                             <option value="${topic}">${topic}</option>
                         `).join('')}
                     </select>
-                    <small class="text-muted">This topic will inherit all keywords from the linked topic</small>
+                    <small class="text-muted">This topic will inherit all SEOs from the linked topic</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2792,6 +2798,28 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
 
     if (keywordsToAdd.length === 0) return;
 
+    const seoHidden = topic._keyword_count != null;
+
+    // When keyword text is hidden, use per-keyword add (don't overwrite admin's keywords)
+    if (seoHidden) {
+        let addedCount = 0;
+        for (const kw of keywordsToAdd) {
+            const result = await api('/api/topic/keyword/add', {
+                bot_name: botName, category_name: categoryName,
+                topic_name: topicName, keyword: kw
+            });
+            if (result.status === 'ok' && result.inserted) addedCount++;
+        }
+        if (addedCount > 0) {
+            await loadAllData();
+            const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+            const categoryId = `categories-${botName}`;
+            renderBotsPage([topicId, categoryId]);
+            showNotification(addedCount === 1 ? 'SEO added' : `${addedCount} SEOs added`, 'success');
+        }
+        return;
+    }
+
     let addedCount = 0;
     const skipped = [];
     keywordsToAdd.forEach(kw => {
@@ -2817,7 +2845,7 @@ async function addKeyword(botName, categoryName, topicName, keyword) {
             const topicId = `topic-${botName}-${categoryName}-${topicName}`;
             const categoryId = `categories-${botName}`;
             renderBotsPage([topicId, categoryId]);
-            const message = addedCount === 1 ? 'Keyword added' : `${addedCount} keywords added`;
+            const message = addedCount === 1 ? 'SEO added' : `${addedCount} SEOs added`;
             showNotification(message, 'success');
         }
     }
@@ -3722,6 +3750,18 @@ async function loadMonitorData() {
         }
     });
 
+    // Load missed badge count in background
+    api('/api/monitor/missed?limit=1').then(r => {
+        if (r.status === 'ok') {
+            const total = (r.stats || []).reduce((s, x) => s + (x.cnt || 0), 0);
+            const badge = document.getElementById('mon-missed-badge');
+            if (badge) {
+                badge.textContent = total;
+                badge.style.display = total > 0 ? 'inline-block' : 'none';
+            }
+        }
+    });
+
     // Restore scroll position after paint
     if (!isFirstLoad) {
         window.scrollTo(0, scrollY);
@@ -3737,12 +3777,13 @@ function switchMonTab(tab) {
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
-    ['schedules', 'summaries', 'messages', 'unclassified'].forEach(t => {
+    ['schedules', 'summaries', 'messages', 'unclassified', 'missed'].forEach(t => {
         const el = document.getElementById('mon-tab-' + t);
         if (el) el.style.display = t === tab ? '' : 'none';
     });
     if (tab === 'messages' && !_allMessages.length) loadMonitorMessages();
     if (tab === 'unclassified' && !_unclMessages.length) loadUnclassifiedMessages();
+    if (tab === 'missed' && !_missedMessages.length) loadMissedMessages();
 }
 
 // ---------- Topics & Schedules ----------
@@ -4370,8 +4411,9 @@ function _populateMonSelect(id, values, allLabel) {
 
 // ---------- Unclassified messages ----------
 let _unclInitialized = false;
-let _unclMessages = [];
-let _unclGrouped = false;
+let _unclMessages    = [];
+let _unclGrouped     = false;
+let _unclClearedAt   = null; // ISO string or null — UI-only clear
 
 function toggleUnclGroupView() {
     _unclGrouped = !_unclGrouped;
@@ -4426,10 +4468,19 @@ function _renderUnclassified(messages) {
     const content = document.getElementById('mon-uncl-content');
     if (!content) return;
 
-    if (!messages.length) {
-        content.innerHTML = '<p class="mon-empty">No unclassified messages found.</p>';
+    const visible = _unclClearedAt
+        ? messages.filter(m => m.timestamp && m.timestamp > _unclClearedAt)
+        : messages;
+
+    if (!visible.length) {
+        content.innerHTML = _unclClearedAt
+            ? '<p class="mon-empty">No new unclassified messages since last clear. <button class="btn btn-sm btn-secondary" onclick="showAllUnclassifiedView()">Show all</button></p>'
+            : '<p class="mon-empty">No unclassified messages found.</p>';
         return;
     }
+
+    // use the filtered list for rendering
+    messages = visible;
 
     if (_unclGrouped) {
         _renderUnclGroupedByWords(messages, content);
@@ -4641,6 +4692,160 @@ async function loadUnclassifiedMessages(append = false) {
 
     _renderUnclassified(_unclMessages);
     window.scrollTo(0, scrollY);
+}
+
+// --- Unclassified clear/show-all ---
+function clearUnclassifiedView() {
+    _unclClearedAt = new Date().toISOString();
+    document.getElementById('uncl-clear-btn').style.display = 'none';
+    document.getElementById('uncl-showall-btn').style.display = '';
+    _renderUnclassified(_unclMessages);
+}
+
+function showAllUnclassifiedView() {
+    _unclClearedAt = null;
+    document.getElementById('uncl-clear-btn').style.display = '';
+    document.getElementById('uncl-showall-btn').style.display = 'none';
+    _renderUnclassified(_unclMessages);
+}
+
+// ---------- Missed messages ----------
+let _missedMessages  = [];
+let _missedOffset    = 0;
+let _missedHasMore   = true;
+let _missedClearedAt = null; // ISO string or null
+const _MISSED_PAGE_SIZE = 50;
+
+async function loadMissedMessages(append = false) {
+    const content = document.getElementById('mon-missed-content');
+    if (!append) {
+        _missedOffset   = 0;
+        _missedHasMore  = true;
+        _missedMessages = [];
+        if (content) content.innerHTML = '<p class="mon-empty">Loading…</p>';
+    }
+    const scrollY = window.scrollY;
+
+    const bot    = document.getElementById('missed-filter-bot')?.value   || '';
+    const topic  = document.getElementById('missed-filter-topic')?.value || '';
+    const search = document.getElementById('missed-search')?.value        || '';
+
+    let url = `/api/monitor/missed?limit=${_MISSED_PAGE_SIZE}&offset=${_missedOffset}`;
+    if (bot)    url += `&bot=${encodeURIComponent(bot)}`;
+    if (topic)  url += `&topic=${encodeURIComponent(topic)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+
+    const data = await api(url);
+    if (!data || data.status !== 'ok') return;
+
+    const newMsgs = data.messages || [];
+    const stats   = data.stats    || [];
+    _missedHasMore = newMsgs.length === _MISSED_PAGE_SIZE;
+    _missedMessages = _missedMessages.concat(newMsgs);
+    _missedOffset  += newMsgs.length;
+
+    // Populate filters on first load
+    if (!append) {
+        const botSel   = document.getElementById('missed-filter-bot');
+        const topicSel = document.getElementById('missed-filter-topic');
+        if (botSel && botSel.options.length <= 1) {
+            const bots = [...new Set(_missedMessages.map(m => m.bot_name).filter(Boolean))].sort();
+            bots.forEach(b => {
+                const o = document.createElement('option'); o.value = b; o.textContent = b;
+                botSel.appendChild(o);
+            });
+            if (bot) botSel.value = bot;
+        }
+        if (topicSel && topicSel.options.length <= 1) {
+            const topics = [...new Set(_missedMessages.map(m => m.topic_name).filter(Boolean))].sort();
+            topics.forEach(t => {
+                const o = document.createElement('option'); o.value = t; o.textContent = t;
+                topicSel.appendChild(o);
+            });
+            if (topic) topicSel.value = topic;
+        }
+    }
+
+    // Update badge
+    const totalMissed = stats.reduce((s, r) => s + (r.cnt || 0), 0);
+    const badge = document.getElementById('mon-missed-badge');
+    if (badge) { badge.textContent = totalMissed; badge.style.display = totalMissed > 0 ? 'inline-block' : 'none'; }
+
+    // Render stats bar
+    const statsEl = document.getElementById('mon-missed-stats');
+    if (statsEl) {
+        statsEl.innerHTML = stats.length
+            ? `<div class="mon-uncl-stats-bar">${stats.map(s =>
+                `<span class="yt-filter-tag">${escapeHtml(s.bot_name || '?')} / ${escapeHtml(s.topic_name || '?')}: <strong>${s.cnt}</strong></span>`
+              ).join('')}</div>`
+            : '';
+    }
+
+    _renderMissed(_missedMessages);
+    window.scrollTo(0, scrollY);
+}
+
+function _renderMissed(messages) {
+    const content = document.getElementById('mon-missed-content');
+    if (!content) return;
+
+    const visible = _missedClearedAt
+        ? messages.filter(m => m.timestamp && m.timestamp > _missedClearedAt)
+        : messages;
+
+    if (!visible.length) {
+        content.innerHTML = _missedClearedAt
+            ? '<p class="mon-empty">No new missed messages since last clear. <button class="btn btn-sm btn-secondary" onclick="showAllMissedView()">Show all</button></p>'
+            : '<p class="mon-empty">No missed messages found.</p>';
+        return;
+    }
+
+    // Group by bot / topic
+    const groups = {};
+    for (const m of visible) {
+        const key = `${m.bot_name || '?'} › ${m.topic_name || '?'}`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(m);
+    }
+
+    let html = '';
+    for (const [key, msgs] of Object.entries(groups)) {
+        const rows = msgs.map(m => `
+            <tr>
+                <td style="white-space:nowrap;font-size:11px;">${m.timestamp ? m.timestamp.replace('T',' ').slice(0,16) : '—'}</td>
+                <td><span class="mon-tag">${escapeHtml(m.channel_username || String(m.channel_id || '?'))}</span></td>
+                <td><span class="mon-tag cat">${escapeHtml(m.schedule_type || '—')}</span></td>
+                <td class="mon-ellipsis">${escapeHtml(m.preview || '—')}</td>
+            </tr>`).join('');
+        html += `<div class="mon-ch-hdr">⏭ ${escapeHtml(key)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(${msgs.length})</span></div>
+            <div style="overflow-x:auto;">
+            <table class="mon-table">
+                <thead><tr><th>Time</th><th>Source</th><th>Schedule</th><th>Preview</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`;
+    }
+    content.innerHTML = html;
+
+    if (_missedHasMore) {
+        content.insertAdjacentHTML('beforeend', `<div style="text-align:center;padding:16px;">
+            <button class="btn btn-secondary" onclick="loadMissedMessages(true)">Load more…</button>
+            <span class="text-muted" style="margin-left:8px;font-size:12px;">${_missedMessages.length} loaded</span>
+        </div>`);
+    }
+}
+
+function clearMissedView() {
+    _missedClearedAt = new Date().toISOString();
+    document.getElementById('missed-clear-btn').style.display   = 'none';
+    document.getElementById('missed-showall-btn').style.display = '';
+    _renderMissed(_missedMessages);
+}
+
+function showAllMissedView() {
+    _missedClearedAt = null;
+    document.getElementById('missed-clear-btn').style.display   = '';
+    document.getElementById('missed-showall-btn').style.display = 'none';
+    _renderMissed(_missedMessages);
 }
 
 // ---------- Collapsible sections ----------
