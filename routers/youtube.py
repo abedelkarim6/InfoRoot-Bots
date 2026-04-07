@@ -345,7 +345,13 @@ async def list_keywords(request: Request):
         db = get_db()
         inheritances = db.get_user_yt_inheritances(user_id)
         allowed_ids = {i['source_id'] for i in inheritances if i['source_type'] == 'keyword'}
+
+        # Include SEOs created by the user
+        user_created_seos = db.get_user_created_seos(user_id)
+        allowed_ids.update({seo['id'] for seo in user_created_seos})
+
         keywords = [kw for kw in keywords if kw['id'] in allowed_ids]
+
         # Check if user has permission to see full SEO details
         user_row = db.get_user_by_id(user_id)
         seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
