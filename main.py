@@ -331,6 +331,11 @@ async def read_channel_messages(event):
             )
             # logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
 
+            # Trigger rolling 25-message interim summarization (fire-and-forget)
+            if topics:
+                for t in topics:
+                    asyncio.create_task(check_and_run_interim_summary(bot_name, t))
+
     except Exception as e:
         logger.error(f"Error in read_channel_messages: {e}", exc_info=True)
 
@@ -404,11 +409,11 @@ def _compute_window_start(job_data) -> datetime.datetime:
             return candidate - datetime.timedelta(days=1)
 
         elif schedule_type == 'minute':
-            # Every N minutes — floor current minutes to nearest N
+            # Every N minutes — window_start = previous fire time = current floored minute - N
             n = int(job_data.get('sch_minute') or 1)
             floored_m = (now.minute // n) * n
-            window_start = now.replace(minute=floored_m, second=0, microsecond=0)
-            return window_start
+            current_fire = now.replace(minute=floored_m, second=0, microsecond=0)
+            return current_fire - datetime.timedelta(minutes=n)
 
     except Exception as e:
         logger.warning(f"[WINDOW] Could not compute window_start for {job_data}: {e}")
@@ -456,13 +461,15 @@ def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: 
 # ==================== Summary Handler ====================
 async def generate_and_send_summary(job_data):
     """
-    Generate and send summaries for topics based on their schedules.
-    job_data: { 'schedule_type': str, 'bot_name': str, 'topic_name': str, 'category_name': str, 'prompt_key': str }
+    Two-tier summary handler:
+      Tier 1 (rolling): messages are batched into interim summaries every 25 msgs (see check_and_run_interim_summary).
+      Tier 2 (this function): on schedule fire, merge all unsent interim summaries within the
+      time window into one final summary and send it. If there are leftover raw messages
+      (< 25, not yet interim-summarized), summarize them directly as well.
     """
     schedule_type = job_data.get('schedule_type')
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
-    category_name = job_data.get('category_name')
     prompt_key = job_data.get('prompt_key')
 
     if not all([schedule_type, bot_name, topic_name, prompt_key]):
@@ -470,78 +477,89 @@ async def generate_and_send_summary(job_data):
         return
 
     try:
-        # Get unsummarized messages for this specific (bot, topic, schedule_type)
-        messages = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
-
-        # Filter to only messages that actually have this topic in their topics list
-        topic_messages = []
-        for msg in messages:
-            if msg.get('topics'):
-                msg_topics = [t.strip() for t in msg['topics'].split(',')]
-                if topic_name in msg_topics:
-                    topic_messages.append(msg)
-
-        logger.info(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | raw_msgs={len(messages)} | topic_msgs={len(topic_messages)}")
-
-        if not topic_messages:
-            logger.info(f"[SKIP] No messages match topic '{topic_name}' after filter")
-            return
-
-        # ── Time-window enforcement ──────────────────────────────────────────
-        if schedule_type != 'minute':
-            window_start = _compute_window_start(job_data)
-            logger.info(f"[WINDOW] window_start={window_start} | now={datetime.datetime.now(BEIRUT_TZ)} | Bot={bot_name} | Topic={topic_name}")
-
-            in_window = []
-            expired   = []
-            for msg in topic_messages:
-                ts = msg.get('timestamp')
-                if ts:
-                    if isinstance(ts, str):
-                        try:
-                            ts = datetime.datetime.fromisoformat(ts)
-                        except ValueError:
-                            ts = None
-                    if ts:
-                        # Make naive timestamps tz-aware (treat as Beirut time)
-                        if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=BEIRUT_TZ)
-                        if ts < window_start:
-                            expired.append(msg)
-                            continue
-                in_window.append(msg)
-
-            if expired:
-                expired_ids = [m['id'] for m in expired]
-                db.mark_as_missed(expired_ids, schedule_type, bot_name, topic_name)
-                logger.info(f"[MISSED] {len(expired_ids)} msgs outside window | Bot={bot_name} | Topic={topic_name} | window_start={window_start}")
-
-            logger.info(f"[WINDOW] in_window={len(in_window)} | expired={len(expired)} | Bot={bot_name} | Topic={topic_name}")
-            topic_messages = in_window
-            if not topic_messages:
-                logger.info(f"[SKIP] All messages outside window for Bot={bot_name} | Topic={topic_name}")
-                return
-
-        # Check minimum messages requirement
         bots_cfg = db.get_all_bots_config()
         bot_cfg = bots_cfg.get(bot_name, {})
         min_messages = bot_cfg.get('minimum_messages', 1)
-        if len(topic_messages) < min_messages:
-            logger.info(f"[SKIP] Not enough messages ({len(topic_messages)}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
+
+        # ── Compute time window ──────────────────────────────────────────────
+        window_start = _compute_window_start(job_data)
+        logger.info(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | window_start={window_start}")
+
+        # ── Tier 1: collect unsent interim summaries within window ───────────
+        interim_rows = db.get_unsent_interim_summaries(bot_name, topic_name, window_start)
+        interim_texts = [r['summary_text'] for r in interim_rows]
+        interim_ids   = [r['id'] for r in interim_rows]
+        total_interim_msgs = sum(r['message_count'] for r in interim_rows)
+
+        # ── Tier 1b: leftover raw messages (< 25, not yet interim-summarized) ─
+        raw_messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
+        # Filter to window
+        leftover = []
+        expired_raw_ids = []
+        for msg in raw_messages:
+            ts = msg.get('timestamp')
+            if ts:
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.datetime.fromisoformat(ts)
+                    except ValueError:
+                        ts = None
+                if ts:
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=BEIRUT_TZ)
+                    if ts < window_start:
+                        expired_raw_ids.append(msg['id'])
+                        continue
+            leftover.append(msg)
+
+        if expired_raw_ids:
+            db.mark_as_summarized(expired_raw_ids, 'interim', bot_name, topic_name, status='missed')
+            logger.info(f"[MISSED] {len(expired_raw_ids)} raw msgs outside window | Bot={bot_name} | Topic={topic_name}")
+
+        total_msg_count = total_interim_msgs + len(leftover)
+        logger.info(f"[SUMMARY] interim_batches={len(interim_rows)} | leftover_raw={len(leftover)} | total_msgs~={total_msg_count} | Bot={bot_name} | Topic={topic_name}")
+
+        if not interim_texts and not leftover:
+            logger.info(f"[SKIP] Nothing to summarize | Bot={bot_name} | Topic={topic_name}")
             return
 
-        logger.info(f"[SUMMARY] START | Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | msgs={len(topic_messages)}")
+        if total_msg_count < min_messages:
+            logger.info(f"[SKIP] Not enough messages ({total_msg_count}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
+            return
 
-        texts = [m['text'] for m in topic_messages]
-
-        logger.info(f"[AI] Calling LLM | Bot={bot_name} | Topic={topic_name} | prompt_key={prompt_key} | msgs={len(texts)}")
+        # ── Build final summary ──────────────────────────────────────────────
         loop = asyncio.get_event_loop()
-        summary_text = await loop.run_in_executor(
-            None, _chunked_summarize, texts, bot_name, prompt_key, topic_name
-        )
+
+        # If there are leftover raw messages, summarize them first
+        leftover_summary = None
+        leftover_ids = [m['id'] for m in leftover]
+        if leftover:
+            leftover_texts = [m['text'] for m in leftover]
+            leftover_prompt = get_summary_prompt(leftover_texts, bot_name, prompt_key, topic_name=topic_name)
+            leftover_summary = await loop.run_in_executor(None, llm_client.generate_summary, leftover_prompt)
+            db.mark_as_summarized(leftover_ids, 'interim', bot_name, topic_name)
+
+        # Merge all parts (interim texts + leftover summary) into one final summary
+        all_parts = interim_texts + ([leftover_summary] if leftover_summary else [])
+
+        if len(all_parts) == 1:
+            # Only one piece — use it directly via the schedule prompt for proper formatting
+            final_prompt = get_summary_prompt(
+                [all_parts[0]], bot_name, prompt_key, topic_name=topic_name
+            )
+            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, final_prompt)
+        else:
+            # Multiple interim summaries — merge them
+            merge_prompt = (
+                "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
+                "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+                + "\n---\n".join(all_parts)
+            )
+            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
+
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)}")
 
-        # Get target channels
+        # ── Resolve target channels ──────────────────────────────────────────
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
         if schedule_targets:
             target_channels = list(set(schedule_targets))
@@ -555,13 +573,11 @@ async def generate_and_send_summary(job_data):
                     target_channels.extend(targets)
             target_channels = list(set(target_channels))
 
-        logger.info(f"[TARGETS] Bot={bot_name} | Topic={topic_name} | targets={target_channels}")
-
         if not target_channels:
             logger.warning(f"[SKIP] No target channels for bot {bot_name}")
             return
 
-        # Build message text
+        # ── Build header ─────────────────────────────────────────────────────
         header_text = job_data.get('header', '').strip()
         if header_text:
             if job_data.get('header_datetime'):
@@ -582,27 +598,26 @@ async def generate_and_send_summary(job_data):
         else:
             message_text = summary_text
 
-        msg_ids = [m['id'] for m in topic_messages]
+        # ── Send ─────────────────────────────────────────────────────────────
         for target_chat in target_channels:
             try:
                 await client.send_message(target_chat, message_text, parse_mode='md')
                 logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
                 db.save_summary(
                     summary_text=summary_text,
-                    message_count=len(topic_messages),
+                    message_count=total_msg_count,
                     summary_type=schedule_type,
                     target_entity=str(target_chat),
                     bot_name=bot_name,
                     topic_name=topic_name,
-                    message_ids=msg_ids
+                    message_ids=leftover_ids,
                 )
             except Exception as e:
                 logger.error(f"[ERROR] send_message to {target_chat}: {e}")
 
-        db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
-        # Verify the mark actually persisted
-        remaining = db.get_messages_for_schedule(schedule_type, bot_name, topic_name)
-        logger.info(f"[DONE] Bot={bot_name} | Topic={topic_name} | marked {len(msg_ids)} | remaining_pending={len(remaining)}")
+        # ── Mark interim summaries as sent ───────────────────────────────────
+        db.mark_interim_summaries_sent(interim_ids)
+        logger.info(f"[DONE] Bot={bot_name} | Topic={topic_name} | interim_batches={len(interim_ids)} | leftover={len(leftover_ids)}")
 
     except Exception as e:
         logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
@@ -762,6 +777,79 @@ async def trigger_summary(job_data):
     except Exception as e:
         logger.error(f"[ERROR] trigger_summary failed | Bot: {job_data.get('bot_name')} | Topic: {job_data.get('topic_name')} | Error: {e}", exc_info=True)
 
+
+async def cleanup_message_backlog():
+    """
+    Mark all messages older than 2 hours as 'missed' for the interim schedule type.
+    Prevents stale accumulated messages from being processed after restarts.
+    """
+    cutoff = datetime.datetime.now(BEIRUT_TZ) - datetime.timedelta(hours=2)
+    try:
+        old_msgs = db.get_old_unsummarized_messages(cutoff)
+        if not old_msgs:
+            return
+        for msg in old_msgs:
+            bot_name = msg.get('bot_name')
+            topics_str = msg.get('topics') or ''
+            topics = [t.strip() for t in topics_str.split(',') if t.strip()]
+            if not bot_name or not topics:
+                continue
+            for topic_name in topics:
+                db.mark_as_summarized([msg['id']], 'interim', bot_name, topic_name, status='missed')
+        logger.info(f"[CLEANUP] Marked {len(old_msgs)} stale messages as missed")
+    except Exception as e:
+        logger.warning(f"[CLEANUP] backlog cleanup failed: {e}")
+
+
+def _get_prompt_key_for_topic(bot_name: str, topic_name: str) -> str:
+    """Look up any prompt_key configured for this (bot, topic). Returns first found or 'default'."""
+    try:
+        bots_cfg = db.get_all_bots_config()
+        bot_cfg = bots_cfg.get(bot_name, {})
+        for cat_data in bot_cfg.get('categories', {}).values():
+            topic_data = cat_data.get('topics', {}).get(topic_name)
+            if topic_data:
+                schedules = topic_data.get('schedules', [])
+                for sch in schedules:
+                    pk = sch.get('prompt_key')
+                    if pk:
+                        return pk
+    except Exception:
+        pass
+    return 'default'
+
+
+async def check_and_run_interim_summary(bot_name: str, topic_name: str):
+    """
+    Called after every message save.
+    If ≥ 25 unsummarized messages exist for (bot, topic), summarize exactly 25
+    and store the result as an interim summary. Loops until count drops below 25.
+    """
+    try:
+        while True:
+            count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
+            if count < 25:
+                break
+
+            messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
+            if len(messages) < 25:
+                break
+
+            prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
+            texts = [m['text'] for m in messages]
+            msg_ids = [m['id'] for m in messages]
+
+            prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+            loop = asyncio.get_event_loop()
+            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+
+            db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
+            db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name)
+            logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
+    except Exception as e:
+        logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+
+
 async def schedule_summaries():
     """
     Set up APScheduler jobs for all enabled topic schedules.
@@ -910,6 +998,7 @@ async def scheduler_watcher():
             if current_version != last_version:
                 await schedule_summaries()
                 await build_source_channel_map()
+                await cleanup_message_backlog()
                 last_version = current_version
                 asyncio.create_task(save_dialogs_to_db())
 
@@ -996,6 +1085,9 @@ async def main():
 
         # Pre-resolve all source channels to numeric IDs so private channels work
         await build_source_channel_map()
+
+        # Mark stale accumulated messages as missed so they don't flood the first run
+        await cleanup_message_backlog()
 
         # Cache dialog list in DB so the channel validator UI can read it without
         # opening a second Telegram connection. Awaited directly so the cache is

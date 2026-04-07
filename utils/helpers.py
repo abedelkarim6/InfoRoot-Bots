@@ -183,6 +183,12 @@ def categorizer(text, bot_name, db=None):
     bot = bots[bot_name]
     categories = bot.get('categories', {})
 
+    # Build a flat name→keywords lookup so linked_topics resolution is O(1)
+    all_topic_keywords: dict = {}
+    for cat_data in categories.values():
+        for t_name, t_data in cat_data.get('topics', {}).items():
+            all_topic_keywords[t_name] = t_data.get('keywords', [])
+
     # Iterate through categories → topics → keywords
     for category_name, category_data in categories.items():
         if not category_data.get('enabled', True):
@@ -193,11 +199,13 @@ def categorizer(text, bot_name, db=None):
             if not topic_data.get('enabled', True):
                 continue
 
-            # Keywords: from DB-loaded config (already includes keywords), or config.yaml
-            if db is not None:
-                keywords = topic_data.get('keywords', [])
-            else:
-                keywords = topic_data.get('keywords', [])
+            # Own keywords + keywords inherited from every linked topic
+            own_keywords = topic_data.get('keywords', [])
+            linked = topic_data.get('linked_topics') or []
+            linked_keywords = []
+            for lt in linked:
+                linked_keywords.extend(all_topic_keywords.get(lt, []))
+            keywords = own_keywords + linked_keywords
 
             topic_matched = False
 

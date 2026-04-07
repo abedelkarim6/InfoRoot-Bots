@@ -447,6 +447,7 @@ async def process_queue_item(queue_item: dict) -> bool:
         duration_secs=int(duration_secs) if duration_secs else None,
         input_tokens=inp_tokens or None,
         output_tokens=out_tokens or None,
+        prompt=user_prompt,
     )
 
     # Send via Telegram if target is set and sender is available

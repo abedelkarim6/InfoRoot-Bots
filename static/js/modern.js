@@ -1513,7 +1513,7 @@ function _renderBotDetailView(name, bot, keepOpen = null) {
             });
         }
         // If the prompts tab is already active on render, load fixed prompts
-        const savedTab = localStorage.getItem(`bot-tab-${name}`) || 'basic';
+        const savedTab = 'categories';
         if (savedTab === 'prompts') {
             const isAdmin = !currentUser || currentUser.role === 'admin';
             if (isAdmin) loadSummariesFixedPrompts();
@@ -1526,7 +1526,7 @@ function createBotConfigCard(name, bot) {
     card.className = 'bot-config-card';
     card.id = `bot-${name}`;
 
-    const savedTab  = localStorage.getItem(`bot-tab-${name}`) || 'basic';
+    const savedTab  = 'categories';
     const tabs      = ['basic', 'rules', 'prompts', 'categories'];
     const tabLabels = { basic: '⚙️ Basic', rules: '🔧 Rules', prompts: '📝 Prompts', categories: '📂 Categories & Topics' };
 
@@ -1562,7 +1562,6 @@ function switchBotTab(botName, tab) {
     if (!card) return;
     card.querySelectorAll('.bot-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     card.querySelectorAll('.bot-tab-pane').forEach(p => p.classList.toggle('active', p.dataset.tab === tab));
-    localStorage.setItem(`bot-tab-${botName}`, tab);
     if (tab === 'prompts') {
         const isAdmin = !currentUser || currentUser.role === 'admin';
         if (isAdmin) loadSummariesFixedPrompts();
@@ -4616,8 +4615,9 @@ function _renderUnclassified(messages) {
     const content = document.getElementById('mon-uncl-content');
     if (!content) return;
 
-    const visible = _unclClearedAt
-        ? messages.filter(m => m.timestamp && m.timestamp > _unclClearedAt)
+    const clearedAtMs = _unclClearedAt ? new Date(_unclClearedAt).getTime() : null;
+    const visible = clearedAtMs
+        ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > clearedAtMs)
         : messages;
 
     if (!visible.length) {

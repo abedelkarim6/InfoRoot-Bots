@@ -201,6 +201,19 @@ class Database:
                     PRIMARY KEY (message_id, bot_name, topic_name, schedule_type)
                 )
             """)
+
+            # Interim (rolling 25-message batch) summaries — fed into the final schedule summary
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS topic_interim_summaries (
+                    id SERIAL PRIMARY KEY,
+                    bot_name TEXT NOT NULL,
+                    topic_name TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    message_count INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    sent_at TIMESTAMP
+                )
+            """)
             # Migrate: add status column if missing
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'message_summarizations'")
             ms_cols = [r['column_name'] for r in cursor.fetchall()]
@@ -1241,6 +1254,146 @@ class Database:
                        bot_name: str, topic_name: str):
         """Mark messages as missed (outside schedule window) so they are never re-processed."""
         self.mark_as_summarized(message_ids, schedule_type, bot_name, topic_name, status='missed')
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Interim (rolling 25-message batch) summarization
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_unsummarized_count_for_interim(self, bot_name: str, topic_name: str) -> int:
+        """Count messages for (bot, topic) not yet consumed by the interim summarizer."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT COUNT(*) AS cnt FROM messages m
+                   WHERE m.bot_name = %s
+                     AND (
+                         m.topics = %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM message_summarizations ms
+                         WHERE ms.message_id = m.id
+                           AND ms.bot_name = %s
+                           AND ms.topic_name = %s
+                           AND ms.schedule_type = 'interim'
+                     )""",
+                (
+                    bot_name,
+                    topic_name,
+                    topic_name + ',%',
+                    '%,' + topic_name + ',%',
+                    '%,' + topic_name,
+                    bot_name, topic_name,
+                )
+            )
+            row = cursor.fetchone()
+            return row['cnt'] if row else 0
+        finally:
+            self._commit()
+
+    def get_messages_for_interim(self, bot_name: str, topic_name: str, limit: int = 25) -> list:
+        """Get the oldest `limit` messages for (bot, topic) not yet interim-summarized."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT m.* FROM messages m
+                   WHERE m.bot_name = %s
+                     AND (
+                         m.topics = %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM message_summarizations ms
+                         WHERE ms.message_id = m.id
+                           AND ms.bot_name = %s
+                           AND ms.topic_name = %s
+                           AND ms.schedule_type = 'interim'
+                     )
+                   ORDER BY m.timestamp ASC
+                   LIMIT %s""",
+                (
+                    bot_name,
+                    topic_name,
+                    topic_name + ',%',
+                    '%,' + topic_name + ',%',
+                    '%,' + topic_name,
+                    bot_name, topic_name,
+                    limit,
+                )
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            self._commit()
+
+    def save_interim_summary(self, bot_name: str, topic_name: str,
+                             summary_text: str, message_count: int) -> int:
+        """Insert a new interim summary and return its id."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """INSERT INTO topic_interim_summaries
+                       (bot_name, topic_name, summary_text, message_count)
+                   VALUES (%s, %s, %s, %s)
+                   RETURNING id""",
+                (bot_name, topic_name, summary_text, message_count)
+            )
+            row = cursor.fetchone()
+            return row['id']
+        finally:
+            self._commit()
+
+    def get_unsent_interim_summaries(self, bot_name: str, topic_name: str,
+                                     since_dt) -> list:
+        """Return all unsent interim summaries for (bot, topic) created after since_dt."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT * FROM topic_interim_summaries
+                   WHERE bot_name = %s
+                     AND topic_name = %s
+                     AND sent_at IS NULL
+                     AND created_at >= %s
+                   ORDER BY created_at ASC""",
+                (bot_name, topic_name, since_dt)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            self._commit()
+
+    def mark_interim_summaries_sent(self, ids: List[int]):
+        """Mark interim summaries as included in a final send."""
+        if not ids:
+            return
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "UPDATE topic_interim_summaries SET sent_at = NOW() WHERE id = ANY(%s)",
+                (ids,)
+            )
+        finally:
+            self._commit()
+
+    def get_old_unsummarized_messages(self, before_dt) -> list:
+        """Return all messages older than before_dt that have no interim tracking record."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT m.id, m.bot_name, m.topics FROM messages m
+                   WHERE m.timestamp < %s
+                     AND m.bot_name IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM message_summarizations ms
+                         WHERE ms.message_id = m.id AND ms.schedule_type = 'interim'
+                     )""",
+                (before_dt,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            self._commit()
 
     def save_summary(self, summary_text: str, message_count: int,
                      summary_type: str, target_entity: str,

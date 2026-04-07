@@ -3,6 +3,7 @@ Database operations for the YouTube Monitor feature.
 All new tables — does not touch existing tables.
 """
 
+import hashlib
 import logging
 import json
 from datetime import datetime
@@ -183,6 +184,7 @@ class YouTubeDB:
         _ensure_col('yt_channels', 'min_view_count', 'INTEGER', '0')
         _ensure_col('yt_channels', 'language', 'TEXT')
         _ensure_col('yt_channels', 'upload_type', 'TEXT')
+        _ensure_col('yt_summaries', 'prompt_hash', 'TEXT')
 
         # Migrate old single telegram_target into new telegram_targets array
         cursor.execute("""
@@ -550,10 +552,14 @@ class YouTubeDB:
 
     # ── yt_video_queue ───────────────────────────────────────────
 
-    def is_video_already_queued_or_summarized(self, video_id: str) -> str | None:
-        """Return a reason string if the video is already queued or summarized, else None."""
+    def is_video_already_queued_or_summarized(self, video_id: str, prompt: str = None) -> str | None:
+        """Return a reason string if the video is already queued or summarized, else None.
+
+        The 'already summarized' check is scoped to (video_id, prompt_hash) so that
+        changing the prompt allows re-processing the same video.
+        """
         cursor = self._get_cursor()
-        # Check if already in the queue (pending or processing)
+        # Check if already in the queue (pending or processing) regardless of prompt
         cursor.execute("""
             SELECT id, status FROM yt_video_queue
             WHERE video_id = %s AND status IN ('pending', 'processing')
@@ -562,10 +568,17 @@ class YouTubeDB:
         row = cursor.fetchone()
         if row:
             return f"already in queue ({row['status']})"
-        # Check if already summarized
-        cursor.execute("""
-            SELECT id FROM yt_summaries WHERE video_id = %s LIMIT 1
-        """, (video_id,))
+        # Check if already summarized with the same prompt
+        if prompt:
+            ph = hashlib.md5(prompt.encode('utf-8')).hexdigest()
+            cursor.execute("""
+                SELECT id FROM yt_summaries WHERE video_id = %s AND prompt_hash = %s LIMIT 1
+            """, (video_id, ph))
+        else:
+            # No prompt context — fall back to video_id-only check
+            cursor.execute("""
+                SELECT id FROM yt_summaries WHERE video_id = %s LIMIT 1
+            """, (video_id,))
         if cursor.fetchone():
             return "already summarized"
         return None
@@ -573,7 +586,7 @@ class YouTubeDB:
     def enqueue_video(self, video_id: str, telegram_target: str = None, prompt: str = None,
                       source_channel_id: str = None, source_keyword_id: int = None,
                       added_by_user_id: int = None):
-        reason = self.is_video_already_queued_or_summarized(video_id)
+        reason = self.is_video_already_queued_or_summarized(video_id, prompt=prompt)
         if reason:
             logger.info(f"[YT-DB] Skipping enqueue for {video_id}: {reason}")
             return None
@@ -1000,16 +1013,18 @@ class YouTubeDB:
     def save_summary(self, video_id: str, title: str, channel_name: str,
                      published_at, transcript_source: str, summary_text: str,
                      telegram_target: str = None,
-                     duration_secs: int = None, input_tokens: int = None, output_tokens: int = None):
+                     duration_secs: int = None, input_tokens: int = None, output_tokens: int = None,
+                     prompt: str = None):
+        prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
-                 telegram_target, duration_secs, input_tokens, output_tokens)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
-              telegram_target, duration_secs, input_tokens, output_tokens))
+              telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
