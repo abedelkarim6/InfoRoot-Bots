@@ -352,6 +352,10 @@ class Database:
                     cursor.execute("ALTER TABLE schedules ADD COLUMN telegram_targets JSONB DEFAULT '[]'")
                 if 'wait_time' not in sch_cols:
                     cursor.execute('ALTER TABLE schedules ADD COLUMN wait_time INTEGER')
+                if 'end_hour' not in sch_cols:
+                    cursor.execute('ALTER TABLE schedules ADD COLUMN end_hour INTEGER')
+                if 'end_minute' not in sch_cols:
+                    cursor.execute('ALTER TABLE schedules ADD COLUMN end_minute INTEGER')
 
             # Migrate: add default_schedules to bots if missing
             cursor.execute("""
@@ -2868,8 +2872,8 @@ class Database:
                 INSERT INTO schedules (topic_id, name, type, enabled, prompt_key, header, header_datetime,
                                        header_date_arabic, header_time_arabic,
                                        minute, hour, hours, minutes, start_hour, start_minute,
-                                       telegram_targets, wait_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                       telegram_targets, wait_time, end_hour, end_minute)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 topic_id,
@@ -2889,6 +2893,8 @@ class Database:
                 schedule.get('start_minute'),
                 json.dumps(_parse_jsonb_list(schedule.get('telegram_targets'))),
                 schedule.get('wait_time'),
+                schedule.get('end_hour'),
+                schedule.get('end_minute'),
             ))
             row = cursor.fetchone()
             self._bump_config_version()
@@ -2901,7 +2907,8 @@ class Database:
             allowed = {'name', 'type', 'enabled', 'prompt_key', 'header',
                        'header_datetime', 'header_date_arabic', 'header_time_arabic',
                        'minute', 'hour', 'hours', 'minutes',
-                       'start_hour', 'start_minute', 'telegram_targets', 'wait_time'}
+                       'start_hour', 'start_minute', 'telegram_targets', 'wait_time',
+                       'end_hour', 'end_minute'}
             fields = {k: v for k, v in schedule.items() if k in allowed}
             if not fields:
                 return False

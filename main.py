@@ -362,6 +362,8 @@ def _compute_window_start(job_data) -> datetime.datetime:
             start_h = int(job_data.get('sch_start_hour') or 0)
             start_m = int(job_data.get('sch_start_minute') or 0)
             hours   = int(job_data.get('sch_hours') or 1)
+            end_h   = job_data.get('sch_end_hour')
+            end_m   = job_data.get('sch_end_minute')
 
             # Build anchor as today's start time; if it's in the future, go back one day
             anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
@@ -371,14 +373,24 @@ def _compute_window_start(job_data) -> datetime.datetime:
             # How many complete intervals have elapsed since the anchor?
             elapsed_seconds = (now - anchor).total_seconds()
             n = math.floor(elapsed_seconds / (hours * 3600))
-            # n is the current interval index; (n-1) is the previous fire → window start
-            window_start = anchor + datetime.timedelta(hours=max(n - 1, 0) * hours)
+
+            # Day-restart case: we're in the first interval (n==0) at the start of a new
+            # daily window. If an end time is configured, the previous "window" closed at
+            # yesterday's end time — use that as window_start so messages accumulated
+            # overnight are included in this first send.
+            if n == 0 and end_h is not None and end_m is not None:
+                yesterday_anchor = anchor - datetime.timedelta(days=1)
+                window_start = yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
+            else:
+                window_start = anchor + datetime.timedelta(hours=max(n - 1, 0) * hours)
             return window_start
 
         elif schedule_type == 'interval_minutes':
             start_h = int(job_data.get('sch_start_hour') or 0)
             start_m = int(job_data.get('sch_start_minute') or 0)
             minutes = int(job_data.get('sch_minutes') or 1)
+            end_h   = job_data.get('sch_end_hour')
+            end_m   = job_data.get('sch_end_minute')
 
             anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
             if anchor > now:
@@ -386,8 +398,13 @@ def _compute_window_start(job_data) -> datetime.datetime:
 
             elapsed_seconds = (now - anchor).total_seconds()
             n = math.floor(elapsed_seconds / (minutes * 60))
-            # n is the current interval index; (n-1) is the previous fire → window start
-            window_start = anchor + datetime.timedelta(minutes=max(n - 1, 0) * minutes)
+
+            # Day-restart case (same logic as interval hours above)
+            if n == 0 and end_h is not None and end_m is not None:
+                yesterday_anchor = anchor - datetime.timedelta(days=1)
+                window_start = yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
+            else:
+                window_start = anchor + datetime.timedelta(minutes=max(n - 1, 0) * minutes)
             return window_start
 
         elif schedule_type == 'hourly':
@@ -475,6 +492,16 @@ async def generate_and_send_summary(job_data):
     if not all([schedule_type, bot_name, topic_name, prompt_key]):
         logger.error(f"Missing required job data: {job_data}")
         return
+
+    # ── End-time gate: skip this fire if we're past the daily end window ───
+    _end_h = job_data.get('sch_end_hour')
+    _end_m = job_data.get('sch_end_minute')
+    if _end_h is not None and _end_m is not None:
+        _now_local = datetime.datetime.now(BEIRUT_TZ)
+        _end_today = _now_local.replace(hour=int(_end_h), minute=int(_end_m), second=0, microsecond=0)
+        if _now_local > _end_today:
+            logger.info(f"[SKIP] Past end time {int(_end_h):02d}:{int(_end_m):02d} | Bot={bot_name} | Topic={topic_name}")
+            return
 
     try:
         bots_cfg = db.get_all_bots_config()
@@ -925,6 +952,8 @@ async def schedule_summaries():
                         'sch_minutes':      schedule.get('minutes'),
                         'sch_start_hour':   schedule.get('start_hour', 0),
                         'sch_start_minute': schedule.get('start_minute', 0),
+                        'sch_end_hour':     schedule.get('end_hour'),
+                        'sch_end_minute':   schedule.get('end_minute'),
                         # speeches_interval specific
                         'sch_wait_time':    schedule.get('wait_time', 5),
                         'job_id':           job_id,

@@ -2137,12 +2137,16 @@ function formatSchedule(schedule) {
     if (type === 'interval_minutes') {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
-        return `Every ${schedule.minutes || 30}min — starts ${sh}:${sm}`;
+        const endPart = (schedule.end_hour != null && schedule.end_minute != null)
+            ? ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}` : '';
+        return `Every ${schedule.minutes || 30}min — starts ${sh}:${sm}${endPart}`;
     }
     if (type === 'interval') {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
-        return `Every ${schedule.hours || 1}h — starts ${sh}:${sm}`;
+        const endPart = (schedule.end_hour != null && schedule.end_minute != null)
+            ? ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}` : '';
+        return `Every ${schedule.hours || 1}h — starts ${sh}:${sm}${endPart}`;
     }
     if (type === 'daily') return `Daily at ${String(schedule.hour || 0).padStart(2, '0')}:${String(schedule.minute || 0).padStart(2, '0')}`;
     if (type === 'speeches_interval') {
@@ -2464,11 +2468,18 @@ async function updateBotSetting(botName, key, value) {
 }
 
 async function updateBotPrompt(botName, promptKey) {
-    const text = document.getElementById(`prompt-${botName}-${promptKey}`)?.value || '';
+    const ta = document.getElementById(`prompt-${botName}-${promptKey}`);
+    const text = ta?.value || '';
     const result = await api('/api/prompts/update', { bot_name: botName, key: promptKey, text });
     if (result.status === 'ok') {
-        await loadAllData();
-        renderBotsPage();
+        // Update in-memory cache only — no re-render needed
+        if (globalPrompts[botName]) {
+            if (typeof globalPrompts[botName][promptKey] === 'object') {
+                globalPrompts[botName][promptKey].text = text;
+            } else {
+                globalPrompts[botName][promptKey] = text;
+            }
+        }
         showNotification('Prompt updated', 'success');
     }
 }
@@ -3182,23 +3193,33 @@ function updateTopicScheduleInputs() {
         container.innerHTML = `
             <label class="form-label">Every X Minutes</label>
             <input type="number" class="input" id="topic-schedule-minutes" min="1" max="1440" value="30">
-            <label class="form-label mt-1">Starting at (HH : MM)</label>
+            <label class="form-label mt-1">Starts at (HH : MM)</label>
             <div style="display:flex;gap:8px;">
                 <input type="number" class="input" id="topic-schedule-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="topic-schedule-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at this time, then every X minutes</small>
+            <label class="form-label mt-1">Ends at (HH : MM) — leave blank to run indefinitely</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="topic-schedule-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="topic-schedule-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>
         `;
     } else if (type === 'interval') {
         container.innerHTML = `
             <label class="form-label">Every X Hours</label>
             <input type="number" class="input" id="topic-schedule-hours" min="1" max="24" value="2">
-            <label class="form-label mt-1">Starting at (HH : MM)</label>
+            <label class="form-label mt-1">Starts at (HH : MM)</label>
             <div style="display:flex;gap:8px;">
                 <input type="number" class="input" id="topic-schedule-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="topic-schedule-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at this time, then every X hours</small>
+            <label class="form-label mt-1">Ends at (HH : MM) — leave blank to run indefinitely</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="topic-schedule-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="topic-schedule-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at start time, then every X hours until end time. Next day resumes at start time and sends all messages since end time.</small>
         `;
     } else if (type === 'daily') {
         container.innerHTML = `
@@ -3240,10 +3261,16 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         schedule.minutes      = Number(document.getElementById('topic-schedule-minutes').value);
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
+        const ehM = document.getElementById('topic-schedule-end-hour').value;
+        const emM = document.getElementById('topic-schedule-end-minute').value;
+        if (ehM !== '' && emM !== '') { schedule.end_hour = Number(ehM); schedule.end_minute = Number(emM); }
     } else if (type === 'interval') {
         schedule.hours        = Number(document.getElementById('topic-schedule-hours').value);
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
+        const ehI = document.getElementById('topic-schedule-end-hour').value;
+        const emI = document.getElementById('topic-schedule-end-minute').value;
+        if (ehI !== '' && emI !== '') { schedule.end_hour = Number(ehI); schedule.end_minute = Number(emI); }
     } else if (type === 'daily') {
         schedule.hour   = Number(document.getElementById('topic-schedule-hour').value);
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
@@ -3498,23 +3525,37 @@ function buildEditScheduleInputs(schedule) {
         return `<label class="form-label">Minute</label>
                 <input type="number" class="input" id="edit-sch-minute" min="0" max="59" value="${schedule.minute || 0}">`;
     } else if (type === 'interval_minutes') {
+        const ehM = schedule.end_hour   != null ? schedule.end_hour   : '';
+        const emM = schedule.end_minute != null ? schedule.end_minute : '';
         return `<label class="form-label">Every X Minutes</label>
                 <input type="number" class="input" id="edit-sch-minutes" min="1" max="1440" value="${schedule.minutes || 30}">
-                <label class="form-label mt-1">Starting at (HH : MM)</label>
+                <label class="form-label mt-1">Starts at (HH : MM)</label>
                 <div style="display:flex;gap:8px;">
                     <input type="number" class="input" id="edit-sch-start-hour" min="0" max="23" value="${schedule.start_hour ?? 0}" placeholder="HH" style="width:80px;">
                     <input type="number" class="input" id="edit-sch-start-minute" min="0" max="59" value="${schedule.start_minute ?? 0}" placeholder="MM" style="width:80px;">
                 </div>
-                <small class="text-muted">First run at this time, then every X minutes</small>`;
+                <label class="form-label mt-1">Ends at (HH : MM) — leave blank to run indefinitely</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" class="input" id="edit-sch-end-hour" min="0" max="23" value="${ehM}" placeholder="HH" style="width:80px;">
+                    <input type="number" class="input" id="edit-sch-end-minute" min="0" max="59" value="${emM}" placeholder="MM" style="width:80px;">
+                </div>
+                <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>`;
     } else if (type === 'interval') {
+        const ehI = schedule.end_hour   != null ? schedule.end_hour   : '';
+        const emI = schedule.end_minute != null ? schedule.end_minute : '';
         return `<label class="form-label">Every X Hours</label>
                 <input type="number" class="input" id="edit-sch-hours" min="1" max="24" value="${schedule.hours || 2}">
-                <label class="form-label mt-1">Starting at (HH : MM)</label>
+                <label class="form-label mt-1">Starts at (HH : MM)</label>
                 <div style="display:flex;gap:8px;">
                     <input type="number" class="input" id="edit-sch-start-hour" min="0" max="23" value="${schedule.start_hour ?? 0}" placeholder="HH" style="width:80px;">
                     <input type="number" class="input" id="edit-sch-start-minute" min="0" max="59" value="${schedule.start_minute ?? 0}" placeholder="MM" style="width:80px;">
                 </div>
-                <small class="text-muted">First run at this time, then every X hours</small>`;
+                <label class="form-label mt-1">Ends at (HH : MM) — leave blank to run indefinitely</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" class="input" id="edit-sch-end-hour" min="0" max="23" value="${ehI}" placeholder="HH" style="width:80px;">
+                    <input type="number" class="input" id="edit-sch-end-minute" min="0" max="59" value="${emI}" placeholder="MM" style="width:80px;">
+                </div>
+                <small class="text-muted">First run at start time, then every X hours until end time. Next day resumes at start time and sends all messages since end time.</small>`;
     } else if (type === 'daily') {
         return `<label class="form-label">Hour</label>
                 <input type="number" class="input" id="edit-sch-hour" min="0" max="23" value="${schedule.hour || 0}">
@@ -3559,10 +3600,18 @@ async function saveEditedSchedule(scheduleId) {
         schedule.minutes      = Number(document.getElementById('edit-sch-minutes').value);
         schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
         schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
+        const ehM = document.getElementById('edit-sch-end-hour').value;
+        const emM = document.getElementById('edit-sch-end-minute').value;
+        schedule.end_hour   = (ehM !== '' && emM !== '') ? Number(ehM) : null;
+        schedule.end_minute = (ehM !== '' && emM !== '') ? Number(emM) : null;
     } else if (type === 'interval') {
         schedule.hours        = Number(document.getElementById('edit-sch-hours').value);
         schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
         schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
+        const ehI = document.getElementById('edit-sch-end-hour').value;
+        const emI = document.getElementById('edit-sch-end-minute').value;
+        schedule.end_hour   = (ehI !== '' && emI !== '') ? Number(ehI) : null;
+        schedule.end_minute = (ehI !== '' && emI !== '') ? Number(emI) : null;
     } else if (type === 'daily') {
         schedule.hour   = Number(document.getElementById('edit-sch-hour').value);
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
@@ -3836,7 +3885,7 @@ style.textContent = `
 let _monitorData = null;
 let _monitorTimerInterval = null;
 let _monitorRefreshInterval = null;
-let _monActiveTab = 'schedules';
+let _monActiveTab = localStorage.getItem('mon-active-tab') || 'schedules';
 let _allSummaries = [];
 let _allMessages  = [];
 
@@ -3903,6 +3952,9 @@ async function loadMonitorData() {
         });
     }
 
+    // Restore active monitor tab (always, so the saved tab is applied after HTML re-render)
+    switchMonTab(_monActiveTab);
+
     // Restore scroll position after paint
     if (!isFirstLoad) {
         window.scrollTo(0, scrollY);
@@ -3915,6 +3967,7 @@ async function loadMonitorData() {
 
 function switchMonTab(tab) {
     _monActiveTab = tab;
+    localStorage.setItem('mon-active-tab', tab);
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
@@ -4151,12 +4204,16 @@ function scheduleSpec(sch) {
     if (sch.type === 'interval_minutes') {
         const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
         const sm = String(sch.start_minute ?? 0).padStart(2, '0');
-        return `every ${sch.minutes || 30}m — starts ${sh}:${sm}`;
+        const endPart = (sch.end_hour != null && sch.end_minute != null)
+            ? ` → ${String(sch.end_hour).padStart(2,'0')}:${String(sch.end_minute).padStart(2,'0')}` : '';
+        return `every ${sch.minutes || 30}m — starts ${sh}:${sm}${endPart}`;
     }
     if (sch.type === 'interval') {
         const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
         const sm = String(sch.start_minute ?? 0).padStart(2, '0');
-        return `every ${sch.hours || 1}h — starts ${sh}:${sm}`;
+        const endPart = (sch.end_hour != null && sch.end_minute != null)
+            ? ` → ${String(sch.end_hour).padStart(2,'0')}:${String(sch.end_minute).padStart(2,'0')}` : '';
+        return `every ${sch.hours || 1}h — starts ${sh}:${sm}${endPart}`;
     }
     if (sch.type === 'speeches_interval') {
         return `every 1m check — send after ${sch.wait_time || 5}m idle`;
@@ -4791,9 +4848,10 @@ async function loadUnclassifiedMessages(append = false) {
     const search = document.getElementById('uncl-search')?.value?.trim() || '';
 
     let url = `/api/monitor/unclassified?limit=${_UNCL_PAGE_SIZE}&offset=${_unclOffset}`;
-    if (bot)    url += `&bot=${encodeURIComponent(bot)}`;
-    if (coll)   url += `&collection=${encodeURIComponent(coll)}`;
-    if (search) url += `&search=${encodeURIComponent(search)}`;
+    if (bot)            url += `&bot=${encodeURIComponent(bot)}`;
+    if (coll)           url += `&collection=${encodeURIComponent(coll)}`;
+    if (search)         url += `&search=${encodeURIComponent(search)}`;
+    if (_unclClearedAt) url += `&since=${encodeURIComponent(_unclClearedAt)}`;
 
     const data = await api(url);
     if (data.status !== 'ok') {
@@ -4884,9 +4942,10 @@ async function loadMissedMessages(append = false) {
     const search = document.getElementById('missed-search')?.value        || '';
 
     let url = `/api/monitor/missed?limit=${_MISSED_PAGE_SIZE}&offset=${_missedOffset}`;
-    if (bot)    url += `&bot=${encodeURIComponent(bot)}`;
-    if (topic)  url += `&topic=${encodeURIComponent(topic)}`;
-    if (search) url += `&search=${encodeURIComponent(search)}`;
+    if (bot)              url += `&bot=${encodeURIComponent(bot)}`;
+    if (topic)            url += `&topic=${encodeURIComponent(topic)}`;
+    if (search)           url += `&search=${encodeURIComponent(search)}`;
+    if (_missedClearedAt) url += `&since=${encodeURIComponent(_missedClearedAt)}`;
 
     const data = await api(url);
     if (!data || data.status !== 'ok') return;
@@ -4942,8 +5001,9 @@ function _renderMissed(messages) {
     const content = document.getElementById('mon-missed-content');
     if (!content) return;
 
-    const visible = _missedClearedAt
-        ? messages.filter(m => m.timestamp && m.timestamp > _missedClearedAt)
+    const missedClearedAtMs = _missedClearedAt ? new Date(_missedClearedAt).getTime() : null;
+    const visible = missedClearedAtMs
+        ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > missedClearedAtMs)
         : messages;
 
     if (!visible.length) {
