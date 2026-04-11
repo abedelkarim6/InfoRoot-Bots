@@ -570,6 +570,30 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class ChangeUsernameRequest(BaseModel):
+    new_username: str
+
+@router.post("/auth/profile/change-username")
+def change_username(req: ChangeUsernameRequest, request: Request):
+    token   = _get_bearer(request)
+    user_id = get_token_user_id(token) if token else None
+    if not user_id:
+        return JSONResponse({"error": "Not available for admin account."}, status_code=400)
+
+    new_username = req.new_username.strip()
+    if len(new_username) < 3:
+        return JSONResponse({"error": "Username must be at least 3 characters."}, status_code=400)
+    if len(new_username) > 40:
+        return JSONResponse({"error": "Username must be 40 characters or fewer."}, status_code=400)
+    if not all(c.isalnum() or c in ('_', '-', ' ') for c in new_username):
+        return JSONResponse({"error": "Username may only contain letters, numbers, spaces, hyphens, and underscores."}, status_code=400)
+
+    result = get_db().change_username(user_id, new_username)
+    if 'error' in result:
+        return JSONResponse({"error": result['error']}, status_code=400)
+    return {"status": "ok", "username": new_username}
+
+
 @router.post("/auth/profile/change-password")
 def change_password(req: ChangePasswordRequest, request: Request):
     token   = _get_bearer(request)

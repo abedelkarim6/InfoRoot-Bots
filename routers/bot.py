@@ -11,13 +11,22 @@ router = APIRouter()
 
 
 def _can_modify_bot(request: Request, bot_name: str) -> bool:
-    """Return True if the requester is admin or owns the bot."""
+    """Return True if the requester owns the bot (admin only for owner_id IS NULL bots)."""
     if is_admin_request(request):
-        return True
+        owner_id = get_db().get_bot_owner_id(bot_name)
+        return owner_id is None  # admin can only modify admin-managed bots
     user_id = get_request_user_id(request)
     if not user_id:
         return False
-    return get_db().get_bot_owner_id(bot_name) == user_id
+    owner_id = get_db().get_bot_owner_id(bot_name, requesting_user_id=user_id)
+    return owner_id == user_id
+
+
+def _get_request_owner_id(request: Request):
+    """Return None for admin, user_id for regular users."""
+    if is_admin_request(request):
+        return None
+    return get_request_user_id(request)
 
 
 @router.post("/bot/enable")
@@ -62,19 +71,32 @@ def save_bot(request: Request, data: dict = Body(...)):
     if not name:
         return {"status": "error", "message": "Missing bot name"}
 
+    create_only = bool(data.get('create_only'))
     db = get_db()
-    all_bots = db.get_all_bots_config()
-    existing = all_bots.get(name, {})
-    is_new   = name not in all_bots
 
-    # For existing bots, verify ownership / admin
-    if not is_new and not _can_modify_bot(request, name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-
-    # Stamp owner_id only on first creation by a non-admin
-    owner_id = None
-    if is_new and not is_admin_request(request):
-        owner_id = get_request_user_id(request)
+    if is_admin_request(request):
+        # Admin path: operate on admin-managed bots
+        all_bots = db.get_all_bots_config()
+        existing = all_bots.get(name, {})
+        is_new   = name not in all_bots
+        if not is_new and create_only:
+            return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
+        if not is_new and not _can_modify_bot(request, name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+        owner_id = None
+    else:
+        # User path: operate on this user's own bots (each user has their own namespace)
+        user_id   = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+        user_bots = db.get_owned_bots_config(user_id)
+        existing  = user_bots.get(name, {})
+        is_new    = name not in user_bots
+        if not is_new and create_only:
+            return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
+        if not is_new and not _can_modify_bot(request, name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+        owner_id = user_id
 
     db.save_bot(name, {
         'enabled': data.get('enabled', existing.get('enabled', True)),
@@ -96,15 +118,19 @@ def delete_bot(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    user_id = get_request_user_id(request)
-    all_bots = db.get_all_bots_config()
-    bot_data = all_bots.get(name)
+    owner_id = _get_request_owner_id(request)
+
+    # Snapshot before deletion for recycle bin
+    if owner_id is None:
+        bot_data = db.get_all_bots_config().get(name)
+    else:
+        bot_data = db.get_owned_bots_config(owner_id).get(name)
     if bot_data:
         snapshot = {**bot_data, 'name': name}
         snapshot['prompts'] = db.get_bot_prompts(name)
-        db.recycle_bin_add('bot', name, snapshot, owner_id=user_id)
+        db.recycle_bin_add('bot', name, snapshot, owner_id=owner_id)
 
-    if db.delete_bot(name):
+    if db.delete_bot(name, owner_id=owner_id):
         return {"status": "ok"}
     return {"status": "error", "message": "Bot not found"}
 
@@ -124,13 +150,18 @@ def rename_bot(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    all_bots = db.get_all_bots_config()
+    owner_id = _get_request_owner_id(request)
 
-    if old_name not in all_bots:
+    if owner_id is None:
+        bots = db.get_all_bots_config()
+    else:
+        bots = db.get_owned_bots_config(owner_id)
+
+    if old_name not in bots:
         return {"status": "error", "message": "Bot not found"}
-    if new_name in all_bots and new_name != old_name:
+    if new_name in bots and new_name != old_name:
         return {"status": "error", "message": "New name already exists"}
 
-    if db.rename_bot(old_name, new_name):
+    if db.rename_bot(old_name, new_name, owner_id=owner_id):
         return {"status": "ok", "old_name": old_name, "new_name": new_name}
     return {"status": "error", "message": "Rename failed"}

@@ -8,11 +8,20 @@ router = APIRouter()
 
 def _can_modify_bot(request: Request, bot_name: str) -> bool:
     if is_admin_request(request):
-        return True
+        owner_id = get_db().get_bot_owner_id(bot_name)
+        return owner_id is None  # admin can only modify admin-managed bots
     user_id = get_request_user_id(request)
     if not user_id:
         return False
-    return get_db().get_bot_owner_id(bot_name) == user_id
+    owner_id = get_db().get_bot_owner_id(bot_name, requesting_user_id=user_id)
+    return owner_id == user_id
+
+
+def _get_request_owner_id(request: Request):
+    """Return None for admin requests, user_id for regular users."""
+    if is_admin_request(request):
+        return None
+    return get_request_user_id(request)
 
 
 # ==================== Category Operations ====================
@@ -29,7 +38,7 @@ def add_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.add_category(bot_name, category_name):
+    if db.add_category(bot_name, category_name, owner_id=_get_request_owner_id(request)):
         return {"status": "ok", "category_name": category_name}
     return {"status": "error", "message": "Category already exists or bot not found"}
 
@@ -45,15 +54,16 @@ def delete_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    all_bots = db.get_all_bots_config()
-    bot = all_bots.get(bot_name, {})
+    owner_id = _get_request_owner_id(request)
+    bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
+    bot = bots.get(bot_name, {})
     cat_data = bot.get('categories', {}).get(category_name)
     if cat_data:
         db.recycle_bin_add('category', f"{bot_name}/{category_name}",
                            {'bot_name': bot_name, 'category_name': category_name, **cat_data},
                            owner_id=get_request_user_id(request))
 
-    if db.delete_category(bot_name, category_name):
+    if db.delete_category(bot_name, category_name, owner_id=owner_id):
         return {"status": "ok"}
     return {"status": "error", "message": "Category not found"}
 
@@ -70,7 +80,7 @@ def toggle_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.toggle_category(bot_name, category_name, enabled):
+    if db.toggle_category(bot_name, category_name, enabled, owner_id=_get_request_owner_id(request)):
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Category not found"}
 
@@ -89,7 +99,7 @@ def add_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.add_topic(bot_name, category_name, topic_name):
+    if db.add_topic(bot_name, category_name, topic_name, owner_id=_get_request_owner_id(request)):
         return {"status": "ok", "topic_name": topic_name}
     return {"status": "error", "message": "Topic already exists or category not found"}
 
@@ -106,7 +116,7 @@ def rename_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.rename_topic(bot_name, category_name, old_name, new_name):
+    if db.rename_topic(bot_name, category_name, old_name, new_name, owner_id=_get_request_owner_id(request)):
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found or name already taken"}
 
@@ -123,8 +133,9 @@ def delete_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    all_bots = db.get_all_bots_config()
-    topic_data = (all_bots.get(bot_name, {}).get('categories', {})
+    owner_id = _get_request_owner_id(request)
+    bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
+    topic_data = (bots.get(bot_name, {}).get('categories', {})
                   .get(category_name, {}).get('topics', {}).get(topic_name))
     if topic_data:
         db.recycle_bin_add('topic', f"{bot_name}/{category_name}/{topic_name}", {
@@ -132,7 +143,7 @@ def delete_topic(request: Request, data: dict = Body(...)):
             'topic_name': topic_name, **topic_data
         }, owner_id=get_request_user_id(request))
 
-    if db.delete_topic(bot_name, category_name, topic_name):
+    if db.delete_topic(bot_name, category_name, topic_name, owner_id=owner_id):
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found"}
 
@@ -169,7 +180,7 @@ def toggle_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.toggle_topic(bot_name, category_name, topic_name, enabled):
+    if db.toggle_topic(bot_name, category_name, topic_name, enabled, owner_id=_get_request_owner_id(request)):
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Topic not found"}
 
@@ -248,7 +259,8 @@ def delete_topic_schedule(request: Request, data: dict = Body(...)):
         return {"status": "error", "message": "Missing schedule_id"}
 
     db = get_db()
-    all_bots = db.get_all_bots_config()
+    owner_id = _get_request_owner_id(request)
+    all_bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
     schedule_data = None
     for bn, bot in all_bots.items():
         for cn, cat in bot.get('categories', {}).items():

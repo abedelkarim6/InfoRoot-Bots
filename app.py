@@ -282,14 +282,6 @@ def get_config(request: Request):
     user_row = db.get_user_by_id(user_id)
     seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
     bots = db.get_filtered_bots_config(user_id)
-    if not seo_visible:
-        # Hide keyword text — replace arrays with count metadata so UI can show "X SEOs active"
-        for bot_cfg in bots.values():
-            for cat in bot_cfg.get('categories', {}).values():
-                for topic in cat.get('topics', {}).values():
-                    kws = topic.get('keywords') or []
-                    topic['_keyword_count'] = len(kws)
-                    topic['keywords'] = []
     return {
         'system': {'enabled': db.get_system_enabled()},
         'bots': bots,

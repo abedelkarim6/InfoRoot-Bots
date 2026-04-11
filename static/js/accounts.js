@@ -241,15 +241,6 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
       <span style="font-size:13px">💬 Video Chat</span>
     </div>
 
-    <div class="ac-feature-row">
-      <label class="toggle-switch">
-        <input type="checkbox" ${u.seo_visible !== false ? 'checked' : ''}
-          onchange="setUserFlag(${u.id}, 'seo_visible', this.checked)">
-        <span class="toggle-slider"></span>
-      </label>
-      <span style="font-size:13px">🔎 SEO Details Visible</span>
-      <span class="ac-chip" style="font-size:10px;margin-left:4px">${u.seo_visible !== false ? 'Full details' : 'Count only'}</span>
-    </div>
 
   </div>
 
@@ -330,9 +321,6 @@ function renderUserCard(u, allBots, allChans, allKws, cats, allColls) {
       <div style="display:flex;align-items:center;gap:8px">
         ${pendingYt ? `<span class="ac-chip ac-chip-warn">${pendingYt} pending</span>` : ''}
         <span class="ac-chip">${(u.yt_inheritances || []).length} items</span>
-        ${u.seo_visible === false && (u.yt_inheritances || []).some(i => i.source_type === 'keyword')
-          ? `<span class="ac-chip" style="background:rgba(245,158,11,.15);color:#fcd34d;border-color:rgba(245,158,11,.3)">🔎 SEO: count only</span>`
-          : ''}
         <span class="ac-chevron" id="chevron-yt-${u.id}">▶</span>
       </div>
     </div>
@@ -411,6 +399,7 @@ function renderBotInheritance(u, allBots, cats) {
                     const inclSched = ts.include_schedules !== false;
                     const inclProm  = ts.include_prompts  !== false;
                     const kwPct     = ts.keyword_pct != null ? ts.keyword_pct : 100;
+                    const seoVis    = ts.seo_visible !== false;
                     return `
                       <div class="ac-topic-row">
                         <label class="ac-check">
@@ -429,6 +418,11 @@ function renderBotInheritance(u, allBots, cats) {
                             <input type="checkbox" ${inclProm ? 'checked' : ''}
                               onchange="updateTopicSetting(${u.id},${g.bot_id},${t.id},'include_prompts',this.checked)">
                             💬 Prompts
+                          </label>
+                          <label class="ac-check ac-check-sm">
+                            <input type="checkbox" ${seoVis ? 'checked' : ''}
+                              onchange="updateTopicSetting(${u.id},${g.bot_id},${t.id},'seo_visible',this.checked)">
+                            🔎 SEO visible
                           </label>
                           <div class="ac-kw-pct">
                             <span class="ac-check-sm">🔑 Keywords</span>
@@ -467,7 +461,7 @@ function renderBotInheritance(u, allBots, cats) {
 </div>`;
     }).join('');
 
-    const available = allBots.filter(b => !grantedIds.has(b.id));
+    const available = allBots.filter(b => !grantedIds.has(b.id) && b.owner_id !== u.id);
     const grantRow  = available.length ? `
 <div class="ac-add-row">
   <select class="select" style="font-size:12px;padding:4px 8px;height:28px"

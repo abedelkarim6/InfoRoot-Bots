@@ -1084,61 +1084,62 @@ async def main():
         logger.info("[SESSION] Using session string from config.yaml (no DB session found)")
     client = TelegramClient(StringSession(active_session), API_ID, API_HASH)
 
-    # Register message handler for all new messages
+    # Register message handler once — persists across reconnects
     @client.on(events.NewMessage)
     async def message_handler(event):
         await read_channel_messages(event)
 
+    watcher_task = None
+    first_connect = True
+
     try:
-        # Connect and verify the session — don't call start() which blocks on auth prompts.
-        # logger.info("[AUTH] Connecting to Telegram…")
-        await client.connect()
-        # logger.info("[AUTH] TCP connected — checking session authorization (30s timeout)…")
-        try:
-            authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=30)
-        except asyncio.TimeoutError:
-            # logger.error(
-            #     "[FATAL] is_user_authorized() timed out after 30s. "
-            #     "The session is likely expired or the auth key is invalid. "
-            #     "Run get_ss.py to generate a new string_session."
-            # )
-            return
-        if not authorized:
-            # logger.error(
-            #     "[FATAL] Userbot session is NOT authorized. "
-            #     "The string_session in config.yaml is invalid or expired. "
-            #     "Run get_ss.py to generate a new session string."
-            # )
-            return
-        # logger.info("Userbot connected successfully")
+        while True:
+            try:
+                await client.connect()
 
-        # Pre-resolve all source channels to numeric IDs so private channels work
-        await build_source_channel_map()
+                try:
+                    authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=30)
+                except asyncio.TimeoutError:
+                    logger.error("[RECONNECT] Auth check timed out (session may be expired). Retrying in 60s...")
+                    await asyncio.sleep(60)
+                    continue
 
-        # Mark stale accumulated messages as missed so they don't flood the first run
-        await cleanup_message_backlog()
+                if not authorized:
+                    logger.error("[RECONNECT] Session not authorized. Retrying in 60s...")
+                    await asyncio.sleep(60)
+                    continue
 
-        # Cache dialog list in DB so the channel validator UI can read it without
-        # opening a second Telegram connection. Awaited directly so the cache is
-        # guaranteed to be populated before the bot starts accepting events.
-        await save_dialogs_to_db()
+                await build_source_channel_map()
 
-        # Start scheduler watcher (also rebuilds the channel map on config changes)
-        asyncio.create_task(scheduler_watcher())
+                if first_connect:
+                    # Only mark stale messages as missed on the very first start,
+                    # not on reconnects (recent messages should still be processed)
+                    await cleanup_message_backlog()
+                    first_connect = False
 
-        # logger.info("Userbot is running... Press Ctrl+C to stop")
-        await client.run_until_disconnected()
+                await save_dialogs_to_db()
+
+                # Start watcher only if not already running
+                if watcher_task is None or watcher_task.done():
+                    watcher_task = asyncio.create_task(scheduler_watcher())
+
+                logger.info("[MAIN] Userbot connected successfully.")
+                await client.run_until_disconnected()
+                logger.warning("[RECONNECT] Disconnected from Telegram. Reconnecting in 15s...")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[RECONNECT] Connection error: {e}. Retrying in 30s...")
+
+            await asyncio.sleep(15)
 
     except KeyboardInterrupt:
-        # logger.info("Userbot stopped by user")
         pass
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
         db.close()
         if SCHEDULER and SCHEDULER.running:
             SCHEDULER.shutdown()
-        # logger.info("Userbot shutdown complete")
 
 
 if __name__ == "__main__":

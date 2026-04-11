@@ -28,7 +28,6 @@ def save_collection(request: Request, data: dict = Body(...)):
             return {"status": "error", "message": "At least one target channel required"}
         db = get_db()
         db.save_collection(collection_name, {
-            "name": data.get("name", collection_name),
             "source_channels": data.get("source_channels", []),
             "target_channels": target_channels,
             "enabled": data.get("enabled", True),
@@ -40,7 +39,6 @@ def save_collection(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
     db = get_db()
     db.save_user_collection(user_id, collection_name, {
-        "name": data.get("name", collection_name),
         "source_channels": data.get("source_channels", []),
         "target_channels": data.get("target_channels", []),
         "enabled": data.get("enabled", True),
@@ -78,6 +76,25 @@ def delete_collection(request: Request, data: dict = Body(...)):
     if db.delete_user_collection(user_id, collection_name):
         return {"status": "ok"}
     return {"status": "error", "message": "Collection not found"}
+
+@router.post("/collection/rename")
+def rename_collection(request: Request, data: dict = Body(...)):
+    old_name = data.get("old_name")
+    new_name = data.get("new_name", "").strip()
+    if not old_name or not new_name:
+        return {"status": "error", "message": "Missing old_name or new_name"}
+    if old_name == new_name:
+        return {"status": "ok"}
+
+    if is_admin_request(request):
+        db = get_db()
+        return db.rename_collection(old_name, new_name)
+
+    user_id = get_request_user_id(request)
+    if not user_id:
+        return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+    db = get_db()
+    return db.rename_user_collection(user_id, old_name, new_name)
 
 @router.post("/collection/toggle")
 def toggle_collection(request: Request, data: dict = Body(...)):

@@ -286,7 +286,12 @@ function showPage(pageName) {
     // YouTube pages
     else if (pageName === 'yt-channels') loadYtChannelsData();
     else if (pageName === 'yt-keywords') loadYtKeywordsData();
-    else if (pageName === 'yt-videos') loadYtVideosData();
+    else if (pageName === 'yt-videos') {
+        loadYtVideosData();
+        // Start auto-refresh if the checkbox is checked (it defaults to checked in HTML)
+        const arCb = document.getElementById('yt-queue-autorefresh');
+        if (arCb && arCb.checked && !_ytQueueInterval) toggleYtQueueAutoRefresh(true);
+    }
     else if (pageName === 'yt-chat') ytChatInit();
     else if (pageName === 'agent-chat') agentChatInit();
     else if (pageName === 'recycle-bin') loadRecycleBinData();
@@ -338,37 +343,51 @@ async function loadWarnings() {
 }
 
 function renderWarningsPanel(warnings) {
-    const panel = document.getElementById('warnings-panel');
-    const body = document.getElementById('warn-panel-body');
-    const count = document.getElementById('warn-panel-count');
-    const title = document.getElementById('warn-panel-title');
-    if (!panel) return;
+    const bell = document.getElementById('notif-bell-btn');
+    const body = document.getElementById('notif-panel-body');
+    const count = document.getElementById('notif-bell-count');
+    const title = document.getElementById('notif-panel-title');
+    if (!bell) return;
 
     if (!warnings.length) {
-        panel.style.display = 'none';
+        bell.style.display = 'none';
         return;
     }
 
-    panel.style.display = '';
+    bell.style.display = '';
     count.textContent = warnings.length;
 
     const errCount = warnings.filter(w => w.level === 'error').length;
+    bell.classList.toggle('notif-bell-has-error', errCount > 0);
     title.textContent = errCount
-        ? `⛔ System Warnings (${errCount} error${errCount > 1 ? 's' : ''})`
-        : '⚠️ System Warnings';
+        ? `⛔ Missing Definitions (${errCount} error${errCount > 1 ? 's' : ''})`
+        : `⚠️ Missing Definitions (${warnings.length})`;
 
-    body.innerHTML = warnings.map(w => `
-        <div class="warn-item warn-${w.level}">
-            <span class="warn-item-icon">${w.level === 'error' ? '⛔' : '⚠️'}</span>
-            <span class="warn-item-text">${escapeHtmlSys(w.message)}</span>
+    const groups = {
+        error: warnings.filter(w => w.level === 'error'),
+        warning: warnings.filter(w => w.level === 'warning'),
+    };
+
+    body.innerHTML = [...groups.error, ...groups.warning].map(w => `
+        <div class="notif-item notif-${w.level}">
+            <span class="notif-item-icon">${w.level === 'error' ? '⛔' : '⚠️'}</span>
+            <span class="notif-item-text">${escapeHtmlSys(w.message)}</span>
         </div>
     `).join('');
 }
 
-function toggleWarningsPanel() {
-    const panel = document.getElementById('warnings-panel');
+function toggleNotifPanel() {
+    const panel = document.getElementById('notif-panel');
     if (panel) panel.classList.toggle('open');
 }
+
+// Close notification panel on outside click
+document.addEventListener('click', e => {
+    const wrap = document.getElementById('notif-bell-wrap');
+    if (wrap && !wrap.contains(e.target)) {
+        document.getElementById('notif-panel')?.classList.remove('open');
+    }
+});
 
 
 // ==================== System Control ====================
@@ -818,7 +837,7 @@ function createCollectionCard(collectionName, collection) {
                                onchange="toggleCollection('${collectionName}', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
-                    <h3>${collection.name || collectionName}</h3>
+                    <h3>${escapeHtmlSys(collectionName)}</h3>
                 </div>
                 <div class="collection-actions">
                     <button class="btn btn-secondary btn-sm" onclick="editCollection('${collectionName}')">
@@ -1296,15 +1315,8 @@ function showAddCollectionModal(existingName = null) {
                 <div class="form-group">
                     <label class="form-label">Collection Name</label>
                     <input type="text" class="input" id="collection-name"
-                           placeholder="e.g., news_sources"
-                           value="${existingName || ''}"
-                           ${existingName ? 'disabled' : ''}>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Display Name</label>
-                    <input type="text" class="input" id="collection-display-name"
                            placeholder="e.g., News Sources"
-                           value="${existing ? (existing.name || '') : ''}">
+                           value="${existingName || ''}">
                 </div>
                 <div class="form-group">
                     <div class="form-label-row">
@@ -1336,8 +1348,8 @@ function showAddCollectionModal(existingName = null) {
 }
 
 async function saveCollection(existingName = null) {
-    const collectionName = existingName || document.getElementById('collection-name').value.trim();
-    const displayName = document.getElementById('collection-display-name').value.trim();
+    const newName = document.getElementById('collection-name').value.trim();
+    const collectionName = newName || existingName;
 
     // Commit any partially-typed channel in the input fields
     ['source', 'target'].forEach(type => {
@@ -1356,9 +1368,24 @@ async function saveCollection(existingName = null) {
         return;
     }
 
+    // Check for duplicate name when creating new or renaming
+    const allNames = Object.keys(globalConfig.collections || {});
+    if (newName && newName !== existingName && allNames.includes(newName)) {
+        showAlert(`A collection named "${newName}" already exists.`, { icon: '⚠️' });
+        return;
+    }
+
+    // Rename if the name changed
+    if (existingName && newName && newName !== existingName) {
+        const renameResult = await api('/api/collection/rename', { old_name: existingName, new_name: newName });
+        if (renameResult.status !== 'ok') {
+            showAlert(renameResult.message || 'Failed to rename collection', { icon: '⚠️' });
+            return;
+        }
+    }
+
     const result = await api('/api/collection/save', {
         collection_name: collectionName,
-        name: displayName || collectionName,
         source_channels: sources,
         target_channels: targets,
         enabled: true
@@ -1367,6 +1394,8 @@ async function saveCollection(existingName = null) {
     if (result.status === 'ok') {
         await loadAllData();
         renderCollectionsPage();
+        // Re-render bots page too so collection name updates are reflected there
+        if (existingName && newName && newName !== existingName) renderBotsPage();
         closeModal('collection-modal');
         showNotification('Collection saved', 'success');
     } else {
@@ -1939,6 +1968,12 @@ function createCategoryBox(botName, categoryName, category) {
     const defaultOpen = savedState !== null ? savedState : true; // Default open for Categories
     const b = jsAttr(botName), c = jsAttr(categoryName);
 
+    // Lazy rendering: only render full topic content when the category is open.
+    // Closed categories get a lightweight placeholder that is populated on first open.
+    const topicsContent = defaultOpen
+        ? _buildCategoryTopicsHtml(botName, categoryName, category)
+        : `<div class="topics-container" data-lazy-bot="${b}" data-lazy-cat="${c}"></div>`;
+
     return `
         <div class="category-box collapsible-section ${defaultOpen ? 'open' : ''}" id="${sectionId}">
             <div class="category-header-row" onclick="toggleCollapsible('${jsAttr(sectionId)}')">
@@ -1948,7 +1983,7 @@ function createCategoryBox(botName, categoryName, category) {
                 </div>
                 <div class="category-controls" onclick="event.stopPropagation()">
                     <button class="btn btn-secondary btn-sm"
-                            onclick="toggleCollapsible('${jsAttr(sectionId)}'); document.getElementById('new-topic-${botName}-${categoryName}').focus()">
+                            onclick="openCategoryAndFocusNewTopic('${jsAttr(sectionId)}', '${b}', '${c}')">
                         + Add Topic
                     </button>
                     <label class="toggle-switch">
@@ -1963,24 +1998,58 @@ function createCategoryBox(botName, categoryName, category) {
             </div>
 
             <div class="collapsible-content">
-                <div class="topics-container">
-                    ${Object.entries(topics).map(([topicName, topic]) =>
-                        createTopicBox(botName, categoryName, topicName, topic, category.enabled)
-                    ).join('')}
-
-                    <div style="margin-top: 16px;">
-                        <input type="text" class="input" id="new-topic-${botName}-${categoryName}"
-                               placeholder="New topic name"
-                               onkeydown="if(event.key==='Enter'){event.preventDefault(); event.stopPropagation(); addTopic('${b}', '${c}'); return false;}"
-                               style="display:inline-block; width:auto; margin-right:8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="addTopic('${b}', '${c}')">
-                            Add
-                        </button>
-                    </div>
-                </div>
+                ${topicsContent}
             </div>
         </div>
     `;
+}
+
+function _buildCategoryTopicsHtml(botName, categoryName, category) {
+    const topics = category.topics || {};
+    const b = jsAttr(botName), c = jsAttr(categoryName);
+    return `
+        <div class="topics-container">
+            ${Object.entries(topics).map(([topicName, topic]) =>
+                createTopicBox(botName, categoryName, topicName, topic, category.enabled)
+            ).join('')}
+            <div style="margin-top: 16px;">
+                <input type="text" class="input" id="new-topic-${botName}-${categoryName}"
+                       placeholder="New topic name"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault(); event.stopPropagation(); addTopic('${b}', '${c}'); return false;}"
+                       style="display:inline-block; width:auto; margin-right:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="addTopic('${b}', '${c}')">
+                    Add
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function _renderLazyCategoryContent(section) {
+    const placeholder = section.querySelector('[data-lazy-bot]');
+    if (!placeholder) return;
+    const botName = placeholder.getAttribute('data-lazy-bot');
+    const catName = placeholder.getAttribute('data-lazy-cat');
+    placeholder.removeAttribute('data-lazy-bot');
+    placeholder.removeAttribute('data-lazy-cat');
+    const bot = globalConfig.bots?.[botName];
+    const category = bot?.categories?.[catName];
+    if (!category) return;
+    placeholder.outerHTML = _buildCategoryTopicsHtml(botName, catName, category);
+}
+
+function openCategoryAndFocusNewTopic(sectionId, b, c) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const wasOpen = section.classList.contains('open');
+    if (!wasOpen) {
+        section.classList.add('open');
+        saveCollapsibleState(sectionId, true);
+        _renderLazyCategoryContent(section);
+    }
+    // Focus the new-topic input (may be just rendered)
+    const input = document.getElementById(`new-topic-${b}-${c}`);
+    if (input) input.focus();
 }
 
 function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled = true) {
@@ -2053,7 +2122,7 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                                     🔒 ${seoCount} SEO${seoCount !== 1 ? 's' : ''} active — details hidden by admin
                                 </span>
                                 ${userKws.map(kw => `
-                                    <span class="tag" style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);color:#6ee7b7;">
+                                    <span class="tag tag-user-kw">
                                         ${escapeHtmlSys(kw)}
                                         <span class="tag-remove" onclick="removeUserKeyword('${b}','${c}','${t}','${jsAttr(kw)}')">×</span>
                                     </span>
@@ -2169,9 +2238,10 @@ async function createNewBot() {
         collections: [],
         minimum_messages: 5,
         summaries: [],
-        categories: {}
+        categories: {},
+        create_only: true
     };
-    
+
     const result = await api('/api/bot/save', botData);
     if (result.status === 'updated') {
         document.getElementById('new-bot-name').value = '';
@@ -3676,6 +3746,9 @@ function toggleCollapsible(id) {
         // Save state to localStorage
         const isOpen = section.classList.contains('open');
         saveCollapsibleState(id, isOpen);
+
+        // Lazy-render category topics on first open
+        if (isOpen) _renderLazyCategoryContent(section);
     }
 }
 

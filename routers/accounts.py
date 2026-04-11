@@ -214,6 +214,7 @@ class TopicSettingsRequest(BaseModel):
     include_schedules: Optional[bool] = None
     include_prompts:   Optional[bool] = None
     keyword_pct:       Optional[int]  = None   # 0-100
+    seo_visible:       Optional[bool] = None
 
 
 @router.post("/admin/accounts/{user_id}/bots/{bot_id}/topics/{topic_id}")

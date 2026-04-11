@@ -108,6 +108,24 @@ function renderProfilePage(u) {
     <div id="pf-gemini-usage"><p class="text-muted" style="font-size:13px">Loading…</p></div>
   </div>` : ''}
 
+  <!-- ── Change username (DB users only) ── -->
+  ${!isAdmin ? `
+  <div class="card" style="margin-bottom:20px">
+    <h3 style="font-size:14px;font-weight:600;margin:0 0 14px">✏️ Change Name</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;max-width:360px">
+      <div>
+        <label class="form-label">New name</label>
+        <input id="pf-un-new" type="text" class="input" style="margin-top:4px"
+          placeholder="Your new display name" maxlength="40"
+          value="${escapeHtmlSys(u.username)}">
+      </div>
+      <div id="pf-un-msg" class="pf-err"></div>
+      <button class="btn btn-primary" style="align-self:flex-start" onclick="pfChangeUsername()">
+        Update Name
+      </button>
+    </div>
+  </div>` : ''}
+
   <!-- ── Change password (DB users only) ── -->
   ${!isAdmin ? `
   <div class="card">
@@ -498,6 +516,41 @@ function _reloadTgSetup() {
     if (_profileUser) {
         loadTgSetupPage();
     }
+}
+
+// ── Change username ───────────────────────────────────────────────────────────
+
+async function pfChangeUsername() {
+    const newName = (document.getElementById('pf-un-new')?.value || '').trim();
+    const msgEl   = document.getElementById('pf-un-msg');
+    msgEl.style.color = 'var(--danger)';
+    msgEl.textContent = '';
+
+    if (newName.length < 3) { msgEl.textContent = 'Name must be at least 3 characters.'; return; }
+
+    const btn = document.querySelector('#pf-un-msg ~ button');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+    const token = localStorage.getItem('auth_token');
+    const r = await fetch('/api/auth/profile/change-username', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ new_username: newName }),
+    });
+    const data = await r.json();
+    if (btn) { btn.disabled = false; btn.textContent = 'Update Name'; }
+
+    if (data.error) { msgEl.textContent = data.error; return; }
+
+    msgEl.style.color = 'var(--success, #10b981)';
+    msgEl.textContent = 'Name updated successfully.';
+
+    // Update the sidebar label and the profile avatar initial
+    const navLbl = document.getElementById('profile-nav-username');
+    if (navLbl) navLbl.textContent = newName;
+    const avatar = document.querySelector('.pf-avatar');
+    if (avatar) avatar.textContent = newName[0].toUpperCase();
+    if (_profileUser) _profileUser.username = newName;
 }
 
 // ── Change password ───────────────────────────────────────────────────────────

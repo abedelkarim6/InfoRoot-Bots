@@ -971,6 +971,7 @@ class YouTubeDB:
             FROM yt_video_queue q
             LEFT JOIN yt_seen_videos sv ON q.video_id = sv.video_id
             LEFT JOIN yt_channels ch ON sv.channel_id = ch.channel_id
+            LEFT JOIN yt_keywords kw ON q.source_keyword_id = kw.id
             LEFT JOIN LATERAL (
                 SELECT id, title, channel_name, transcript_source, summary_text,
                        telegram_sent, duration_secs, input_tokens, output_tokens
@@ -995,7 +996,10 @@ class YouTubeDB:
                    COALESCE(sv.title, s.title, q.video_id) AS title,
                    COALESCE(ch.channel_name, s.channel_name, sv.channel_id) AS channel_name,
                    s.id AS summary_id, s.transcript_source, s.summary_text,
-                   s.telegram_sent, s.duration_secs, s.input_tokens, s.output_tokens
+                   s.telegram_sent, s.duration_secs, s.input_tokens, s.output_tokens,
+                   q.source_keyword_id,
+                   kw.keyword AS source_keyword_name,
+                   q.source_channel_id
             {base_query}
             ORDER BY q.created_at DESC
             LIMIT %s OFFSET %s

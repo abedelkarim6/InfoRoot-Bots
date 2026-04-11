@@ -165,15 +165,22 @@
     <!-- Main Content -->
     <main class="main-content">
 
-        <!-- ══ Warnings Panel ════════════════════════════════════════════ -->
-        <div id="warnings-panel" style="display:none">
-            <div class="warn-panel-header" onclick="toggleWarningsPanel()">
-                <span class="warn-panel-icon" id="warn-panel-toggle-icon">▶</span>
-                <span id="warn-panel-title">⚠️ System Warnings</span>
-                <span class="warn-panel-count badge" id="warn-panel-count">0</span>
-                <button class="btn btn-secondary btn-sm warn-panel-refresh" onclick="event.stopPropagation(); loadWarnings()" title="Refresh warnings">↻</button>
+        <!-- ══ Notification Bell ══════════════════════════════════════════ -->
+        <div id="notif-bell-wrap">
+            <button id="notif-bell-btn" class="notif-bell-btn" onclick="toggleNotifPanel()" title="Notifications" style="display:none">
+                <span class="notif-bell-icon">🔔</span>
+                <span id="notif-bell-count" class="notif-bell-badge">0</span>
+            </button>
+            <div id="notif-panel" class="notif-panel">
+                <div class="notif-panel-header">
+                    <span id="notif-panel-title">⚠️ Missing Definitions</span>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();loadWarnings()" title="Refresh">↻</button>
+                        <button class="btn-icon" onclick="toggleNotifPanel()">×</button>
+                    </div>
+                </div>
+                <div id="notif-panel-body" class="notif-panel-body"></div>
             </div>
-            <div class="warn-panel-body" id="warn-panel-body"></div>
         </div>
 
         <!-- ══ Dashboard Page ══════════════════════════════════════════ -->

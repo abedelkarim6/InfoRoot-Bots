@@ -1017,6 +1017,7 @@ async function loadYtVideosData() {
                 <tr>
                     <th>Video</th>
                     <th>Channel</th>
+                    <th>Origin</th>
                     <th>Status</th>
                     <th>Source</th>
                     ${_ytIsAdmin ? '<th>Cost</th>' : ''}
@@ -1042,6 +1043,17 @@ async function loadYtVideosData() {
         const sourceLabel = item.transcript_source
             ? ({ 'gemini_video': 'Video', 'transcript_api': 'Transcript', 'metadata': 'Metadata' }[item.transcript_source] || item.transcript_source)
             : '';
+
+        // Tracker vs Channel origin badge
+        let originBadge = '';
+        if (item.source_keyword_id) {
+            const kwName = item.source_keyword_name ? escapeHtml(item.source_keyword_name) : `#${item.source_keyword_id}`;
+            originBadge = `<span class="yt-origin-badge yt-origin-tracker" title="Tracked via keyword: ${kwName}">🔎 ${kwName}</span>`;
+        } else if (item.source_channel_id) {
+            originBadge = `<span class="yt-origin-badge yt-origin-channel" title="Channel subscription">📺 Channel</span>`;
+        } else {
+            originBadge = `<span class="yt-origin-badge yt-origin-manual" title="Added manually">➕ Manual</span>`;
+        }
 
         // Cost estimate — Gemini 2.5 Flash Lite: $0.10/1M input, $0.40/1M output
         // Token estimation for gemini_video (1 FPS native video): ~299 tokens/sec
@@ -1091,6 +1103,7 @@ async function loadYtVideosData() {
                     </a>
                 </td>
                 <td>${escapeHtml(item.channel_name || '—')}</td>
+                <td>${originBadge}</td>
                 <td><span class="yt-status-badge ${statusClass}">${item.status}</span></td>
                 <td>${sourceLabel ? `<span class="yt-filter-tag">${sourceLabel}</span>` : '<span class="text-muted">—</span>'}</td>
                 ${_ytIsAdmin ? `<td>${costCell}</td>` : ''}
