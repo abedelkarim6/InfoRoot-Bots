@@ -92,6 +92,8 @@ def get_summary_messages(request: Request, id: int = Query(...)):
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
+    finally:
+        db._commit()
 
 
 @router.get("/monitor/messages")

@@ -613,8 +613,10 @@ def change_password(req: ChangePasswordRequest, request: Request):
         return JSONResponse({"error": "New password must be at least 6 characters."}, status_code=400)
 
     new_hash = hash_password(req.new_password)
-    db._get_cursor().execute(
-        "UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id)
-    )
-    db.connection.commit()
+    try:
+        db._get_cursor().execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, user_id)
+        )
+    finally:
+        db._commit()
     return {"status": "ok"}
