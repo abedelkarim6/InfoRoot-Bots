@@ -527,6 +527,51 @@ class Database:
             if ubts_cols and 'seo_visible' not in ubts_cols:
                 cursor.execute("ALTER TABLE user_bot_topic_settings ADD COLUMN seo_visible BOOLEAN DEFAULT TRUE")
 
+            # Migrate topic_keywords — add owner_id for per-user isolation
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'topic_keywords'")
+            tk_cols = [r['column_name'] for r in cursor.fetchall()]
+            if tk_cols and 'owner_id' not in tk_cols:
+                cursor.execute("ALTER TABLE topic_keywords ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE DEFAULT NULL")
+                # Replace the old global unique constraint with two partial indexes
+                cursor.execute("""
+                    SELECT conname FROM pg_constraint
+                    WHERE conrelid = 'topic_keywords'::regclass AND contype = 'u'
+                """)
+                old_kw_constraint = cursor.fetchone()
+                if old_kw_constraint:
+                    cursor.execute(f"ALTER TABLE topic_keywords DROP CONSTRAINT IF EXISTS {old_kw_constraint['conname']}")
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS topic_keywords_admin_idx
+                    ON topic_keywords(bot_name, category_name, topic_name, keyword)
+                    WHERE owner_id IS NULL
+                """)
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS topic_keywords_user_idx
+                    ON topic_keywords(bot_name, category_name, topic_name, keyword, owner_id)
+                    WHERE owner_id IS NOT NULL
+                """)
+
+            # Migrate prompts — add owner_id for per-user isolation
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'prompts'")
+            pr_cols = [r['column_name'] for r in cursor.fetchall()]
+            if pr_cols and 'owner_id' not in pr_cols:
+                cursor.execute("ALTER TABLE prompts ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE DEFAULT NULL")
+                cursor.execute("""
+                    SELECT conname FROM pg_constraint
+                    WHERE conrelid = 'prompts'::regclass AND contype = 'u'
+                """)
+                old_pr_constraint = cursor.fetchone()
+                if old_pr_constraint:
+                    cursor.execute(f"ALTER TABLE prompts DROP CONSTRAINT IF EXISTS {old_pr_constraint['conname']}")
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS prompts_admin_idx
+                    ON prompts(bot_name, key) WHERE owner_id IS NULL
+                """)
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS prompts_user_idx
+                    ON prompts(bot_name, key, owner_id) WHERE owner_id IS NOT NULL
+                """)
+
             # Per-user bot inheritance configuration
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_bot_inheritance (
@@ -626,10 +671,11 @@ class Database:
                 cursor.execute("DELETE FROM topic_keywords WHERE id = %s", (row['id'],))
                 # Insert each part
                 for part in parts:
+                    owner_id = row.get('owner_id')
                     cursor.execute("""
-                        INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-                        VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
-                    """, (row['bot_name'], row['category_name'], row['topic_name'], part))
+                        INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                        VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                    """, (row['bot_name'], row['category_name'], row['topic_name'], part, owner_id))
                 fixed += 1
             if fixed:
                 logger.info(f"[KEYWORDS] Migrated {fixed} comma-separated keyword rows into individual entries")
@@ -2066,8 +2112,8 @@ class Database:
                     for topic_name, topic_data in category_data.get('topics', {}).items():
                         for kw in self._split_keywords(topic_data.get('keywords', [])):
                             cursor.execute("""
-                                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-                                VALUES (%s, %s, %s, %s)
+                                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                                VALUES (%s, %s, %s, %s, NULL)
                                 ON CONFLICT DO NOTHING
                             """, (bot_name, category_name, topic_name, kw))
                             inserted += 1
@@ -2184,15 +2230,22 @@ class Database:
             self._commit()
 
 
-    def get_topic_keywords(self, bot_name: str, category_name: str, topic_name: str) -> list:
+    def get_topic_keywords(self, bot_name: str, category_name: str, topic_name: str, owner_id: int = None) -> list:
         try:
             """Return the keyword list for a specific topic, always split into individual entries."""
             cursor = self._get_cursor()
-            cursor.execute("""
-                SELECT keyword FROM topic_keywords
-                WHERE bot_name = %s AND category_name = %s AND topic_name = %s
-                ORDER BY id
-            """, (bot_name, category_name, topic_name))
+            if owner_id is None:
+                cursor.execute("""
+                    SELECT keyword FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL
+                    ORDER BY id
+                """, (bot_name, category_name, topic_name))
+            else:
+                cursor.execute("""
+                    SELECT keyword FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s
+                    ORDER BY id
+                """, (bot_name, category_name, topic_name, owner_id))
             return self._split_keywords([row['keyword'] for row in cursor.fetchall()])
         finally:
             self._commit()
@@ -2210,34 +2263,41 @@ class Database:
                     result.append(kw)
         return result
 
-    def set_topic_keywords(self, bot_name: str, category_name: str, topic_name: str, keywords: list):
+    def set_topic_keywords(self, bot_name: str, category_name: str, topic_name: str, keywords: list, owner_id: int = None):
         try:
             """Replace all keywords for a topic with the given list."""
             cursor = self._get_cursor()
-            cursor.execute("""
-                DELETE FROM topic_keywords
-                WHERE bot_name = %s AND category_name = %s AND topic_name = %s
-            """, (bot_name, category_name, topic_name))
+            if owner_id is None:
+                cursor.execute("""
+                    DELETE FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL
+                """, (bot_name, category_name, topic_name))
+            else:
+                cursor.execute("""
+                    DELETE FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s
+                """, (bot_name, category_name, topic_name, owner_id))
             for kw in self._split_keywords(keywords):
                 cursor.execute("""
-                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
-                """, (bot_name, category_name, topic_name, kw))
+                """, (bot_name, category_name, topic_name, kw, owner_id))
+            self._bump_config_version()
         finally:
             self._commit()
 
-    def add_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
+    def add_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str, owner_id: int = None) -> bool:
         try:
             """Add one or more keywords (splits comma-separated input). Returns True if any were inserted."""
             cursor = self._get_cursor()
             total_inserted = 0
             for kw in self._split_keywords([keyword]):
                 cursor.execute("""
-                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
-                """, (bot_name, category_name, topic_name, kw))
+                """, (bot_name, category_name, topic_name, kw, owner_id))
                 total_inserted += cursor.rowcount
             if total_inserted > 0:
                 self._bump_config_version()
@@ -2245,14 +2305,20 @@ class Database:
         finally:
             self._commit()
 
-    def delete_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str) -> bool:
+    def delete_keyword(self, bot_name: str, category_name: str, topic_name: str, keyword: str, owner_id: int = None) -> bool:
         try:
             """Remove a single keyword. Returns True if deleted."""
             cursor = self._get_cursor()
-            cursor.execute("""
-                DELETE FROM topic_keywords
-                WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND keyword = %s
-            """, (bot_name, category_name, topic_name, keyword.strip()))
+            if owner_id is None:
+                cursor.execute("""
+                    DELETE FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND keyword = %s AND owner_id IS NULL
+                """, (bot_name, category_name, topic_name, keyword.strip()))
+            else:
+                cursor.execute("""
+                    DELETE FROM topic_keywords
+                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND keyword = %s AND owner_id = %s
+                """, (bot_name, category_name, topic_name, keyword.strip(), owner_id))
             deleted = cursor.rowcount
             if deleted > 0:
                 self._bump_config_version()
@@ -2551,7 +2617,7 @@ class Database:
             for t in topics_rows:
                 bn, cn = t['bot_name'], t['category_name']
                 if bn in result and cn in result[bn]['categories']:
-                    kws = self.get_topic_keywords(bn, cn, t['name'])
+                    kws = self.get_topic_keywords(bn, cn, t['name'], owner_id=owner_id)
                     result[bn]['categories'][cn]['topics'][t['name']] = {
                         'enabled': t['enabled'],
                         'catch_all': bool(t.get('catch_all')),
@@ -2754,6 +2820,93 @@ class Database:
     def get_owned_bots_config(self, user_id: int) -> dict:
         """Return full config for all bots owned by this user."""
         return self.get_all_bots_config(owner_id=user_id, _admin_only=False)
+
+    def clone_bot_for_user(self, bot_name: str, user_id: int) -> bool:
+        """Copy an admin-managed bot into the user's own namespace (copy-on-write).
+
+        Returns True if a new copy was created, False if the user already owns one.
+        """
+        try:
+            cursor = self._get_cursor()
+            # Already has their own copy — nothing to do
+            cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id = %s", (bot_name, user_id))
+            if cursor.fetchone():
+                return False
+
+            # Fetch the admin bot
+            cursor.execute("SELECT * FROM bots WHERE name = %s AND owner_id IS NULL", (bot_name,))
+            admin_bot = cursor.fetchone()
+            if not admin_bot:
+                return False
+            admin_bot_id = admin_bot['id']
+
+            # Create user-owned copy of the bot
+            cursor.execute("""
+                INSERT INTO bots (name, enabled, minimum_messages, collection_names, rules, default_schedules, owner_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (bot_name, admin_bot['enabled'], admin_bot['minimum_messages'],
+                  admin_bot['collection_names'], admin_bot['rules'],
+                  admin_bot['default_schedules'], user_id))
+            new_bot_id = cursor.fetchone()['id']
+
+            # Copy categories
+            cursor.execute("SELECT * FROM categories WHERE bot_id = %s ORDER BY id", (admin_bot_id,))
+            categories = cursor.fetchall()
+            for cat in categories:
+                cursor.execute("""
+                    INSERT INTO categories (bot_id, name, enabled) VALUES (%s, %s, %s) RETURNING id
+                """, (new_bot_id, cat['name'], cat['enabled']))
+                new_cat_id = cursor.fetchone()['id']
+
+                # Copy topics in this category
+                cursor.execute("SELECT * FROM topics WHERE category_id = %s ORDER BY id", (cat['id'],))
+                topics = cursor.fetchall()
+                for topic in topics:
+                    cursor.execute("""
+                        INSERT INTO topics (category_id, name, enabled, catch_all, linked_topics)
+                        VALUES (%s, %s, %s, %s, %s) RETURNING id
+                    """, (new_cat_id, topic['name'], topic['enabled'],
+                          topic.get('catch_all', False), topic.get('linked_topics', '[]')))
+                    new_topic_id = cursor.fetchone()['id']
+
+                    # Copy schedules
+                    cursor.execute("SELECT * FROM schedules WHERE topic_id = %s", (topic['id'],))
+                    schedules = cursor.fetchall()
+                    for sch in schedules:
+                        cursor.execute("""
+                            INSERT INTO schedules
+                                (topic_id, name, type, enabled, prompt_key, header, header_datetime,
+                                 header_date_arabic, header_time_arabic, minute, hour, hours, minutes,
+                                 start_hour, start_minute, wait_time, end_hour, end_minute, telegram_targets)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (new_topic_id, sch['name'], sch['type'], sch['enabled'],
+                              sch.get('prompt_key'), sch.get('header'), sch.get('header_datetime', False),
+                              sch.get('header_date_arabic', False), sch.get('header_time_arabic', False),
+                              sch.get('minute'), sch.get('hour'), sch.get('hours'), sch.get('minutes'),
+                              sch.get('start_hour'), sch.get('start_minute'), sch.get('wait_time'),
+                              sch.get('end_hour'), sch.get('end_minute'),
+                              json.dumps(sch.get('telegram_targets') or [])))
+
+            # Copy admin keywords (owner_id IS NULL) into user's namespace (owner_id = user_id)
+            cursor.execute("""
+                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                SELECT bot_name, category_name, topic_name, keyword, %s
+                FROM topic_keywords WHERE bot_name = %s AND owner_id IS NULL
+                ON CONFLICT DO NOTHING
+            """, (user_id, bot_name))
+
+            # Copy admin prompts (owner_id IS NULL) into user's namespace
+            cursor.execute("""
+                INSERT INTO prompts (bot_name, key, text, owner_id)
+                SELECT bot_name, key, text, %s
+                FROM prompts WHERE bot_name = %s AND owner_id IS NULL
+                ON CONFLICT DO NOTHING
+            """, (user_id, bot_name))
+
+            self._bump_config_version()
+            return True
+        finally:
+            self._commit()
 
     def toggle_bot(self, name: str, enabled: bool, owner_id: int = None) -> bool:
         try:
@@ -2981,20 +3134,26 @@ class Database:
         finally:
             self._commit()
 
-    def rename_prompt_key_in_schedules(self, bot_name: str, old_key: str, new_key: str) -> int:
+    def rename_prompt_key_in_schedules(self, bot_name: str, old_key: str, new_key: str, owner_id: int = None) -> int:
         try:
             """Update prompt_key in all schedules of a bot when a prompt is renamed."""
             cursor = self._get_cursor()
-            cursor.execute("""
+            if owner_id is None:
+                owner_filter = "b.owner_id IS NULL"
+                params = (new_key, old_key, bot_name)
+            else:
+                owner_filter = "b.owner_id = %s"
+                params = (new_key, old_key, bot_name, owner_id)
+            cursor.execute(f"""
                 UPDATE schedules SET prompt_key = %s
                 WHERE prompt_key = %s
                   AND topic_id IN (
                       SELECT s.id FROM topics s
                       JOIN categories c ON s.category_id = c.id
                       JOIN bots b ON c.bot_id = b.id
-                      WHERE b.name = %s
+                      WHERE b.name = %s AND {owner_filter}
                   )
-            """, (new_key, old_key, bot_name))
+            """, params)
             count = cursor.rowcount
             if count > 0:
                 self._bump_config_version()
@@ -3133,11 +3292,14 @@ class Database:
             self._commit()
 
     # --- Prompts ---
-    def get_all_prompts(self) -> dict:
+    def get_all_prompts(self, owner_id: int = None) -> dict:
         try:
             """Return prompts grouped by bot_name: {bot_name: {key: {text: ...}}}"""
             cursor = self._get_cursor()
-            cursor.execute("SELECT bot_name, key, text FROM prompts ORDER BY id")
+            if owner_id is None:
+                cursor.execute("SELECT bot_name, key, text FROM prompts WHERE owner_id IS NULL ORDER BY id")
+            else:
+                cursor.execute("SELECT bot_name, key, text FROM prompts WHERE owner_id = %s ORDER BY id", (owner_id,))
             result = {}
             for row in cursor.fetchall():
                 bn = row['bot_name']
@@ -3148,28 +3310,40 @@ class Database:
         finally:
             self._commit()
 
-    def get_bot_prompts(self, bot_name: str) -> dict:
+    def get_bot_prompts(self, bot_name: str, owner_id: int = None) -> dict:
         try:
             cursor = self._get_cursor()
-            cursor.execute("SELECT key, text FROM prompts WHERE bot_name = %s ORDER BY id", (bot_name,))
+            if owner_id is None:
+                cursor.execute("SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id IS NULL ORDER BY id", (bot_name,))
+            else:
+                cursor.execute("SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id = %s ORDER BY id", (bot_name, owner_id))
             return {row['key']: {'text': row['text']} for row in cursor.fetchall()}
         finally:
             self._commit()
 
-    def save_prompt(self, bot_name: str, key: str, text: str):
+    def save_prompt(self, bot_name: str, key: str, text: str, owner_id: int = None):
         try:
             cursor = self._get_cursor()
-            cursor.execute("""
-                INSERT INTO prompts (bot_name, key, text) VALUES (%s, %s, %s)
-                ON CONFLICT (bot_name, key) DO UPDATE SET text = EXCLUDED.text
-            """, (bot_name, key, text))
+            if owner_id is None:
+                cursor.execute("""
+                    INSERT INTO prompts (bot_name, key, text, owner_id) VALUES (%s, %s, %s, NULL)
+                    ON CONFLICT (bot_name, key) WHERE owner_id IS NULL DO UPDATE SET text = EXCLUDED.text
+                """, (bot_name, key, text))
+            else:
+                cursor.execute("""
+                    INSERT INTO prompts (bot_name, key, text, owner_id) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (bot_name, key, owner_id) WHERE owner_id IS NOT NULL DO UPDATE SET text = EXCLUDED.text
+                """, (bot_name, key, text, owner_id))
         finally:
             self._commit()
 
-    def delete_prompt(self, bot_name: str, key: str) -> bool:
+    def delete_prompt(self, bot_name: str, key: str, owner_id: int = None) -> bool:
         try:
             cursor = self._get_cursor()
-            cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s", (bot_name, key))
+            if owner_id is None:
+                cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s AND owner_id IS NULL", (bot_name, key))
+            else:
+                cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s AND owner_id = %s", (bot_name, key, owner_id))
             deleted = cursor.rowcount > 0
             return deleted
         finally:
@@ -3189,19 +3363,25 @@ class Database:
         finally:
             self._commit()
 
-    def get_prompt_schedules(self, bot_name: str, key: str) -> list:
+    def get_prompt_schedules(self, bot_name: str, key: str, owner_id: int = None) -> list:
         try:
             """Return schedules (with topic/category context) that reference this prompt key."""
             cursor = self._get_cursor()
-            cursor.execute("""
+            if owner_id is None:
+                owner_filter = "b.owner_id IS NULL"
+                params = (bot_name, key)
+            else:
+                owner_filter = "b.owner_id = %s"
+                params = (bot_name, key, owner_id)
+            cursor.execute(f"""
                 SELECT s.name AS schedule_name, t.name AS topic_name, c.name AS category_name
                 FROM schedules s
                 JOIN topics t ON t.id = s.topic_id
                 JOIN categories c ON c.id = t.category_id
                 JOIN bots b ON b.id = c.bot_id
-                WHERE b.name = %s AND s.prompt_key = %s
+                WHERE b.name = %s AND s.prompt_key = %s AND {owner_filter}
                 ORDER BY c.name, t.name, s.name
-            """, (bot_name, key))
+            """, params)
             return [dict(r) for r in cursor.fetchall()]
         finally:
             self._commit()

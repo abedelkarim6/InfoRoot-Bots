@@ -12,6 +12,9 @@ def _resolve_bot_access(request: Request, bot_name: str):
     owner_id_for_db is what to pass to DB operations:
       - None  → operate on admin-managed bot
       - int   → operate on this user's own bot
+
+    When a user tries to modify an inherited admin bot, we clone it into their
+    namespace first (copy-on-write), so the admin original is never affected.
     """
     db = get_db()
     if is_admin_request(request):
@@ -19,13 +22,15 @@ def _resolve_bot_access(request: Request, bot_name: str):
     user_id = get_request_user_id(request)
     if not user_id:
         return False, None
-    # User owns the bot → full ownership, use their owner_id
+    # User already owns this bot — direct access
     bot_owner = db.get_bot_owner_id(bot_name, requesting_user_id=user_id)
     if bot_owner == user_id:
         return True, user_id
-    # User has inherited access to an admin bot → allow but operate as admin (owner_id=None)
+    # User has inherited access to an admin bot → clone it into their namespace first,
+    # then all writes go to their own copy (admin original stays untouched)
     if db.user_has_bot_access(user_id, bot_name):
-        return True, None
+        db.clone_bot_for_user(bot_name, user_id)
+        return True, user_id
     return False, None
 
 
@@ -217,7 +222,8 @@ def update_topic(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name:
         return {"status": "error", "message": "Missing required fields"}
 
-    if not _can_modify_bot(request, bot_name):
+    allowed, owner_id = _resolve_bot_access(request, bot_name)
+    if not allowed:
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
@@ -237,7 +243,7 @@ def update_topic(request: Request, data: dict = Body(...)):
                 if kw and kw not in seen:
                     seen.add(kw)
                     unique_keywords.append(kw)
-            db.set_topic_keywords(bot_name, category_name, topic_name, unique_keywords)
+            db.set_topic_keywords(bot_name, category_name, topic_name, unique_keywords, owner_id=owner_id)
 
     if linked_topics is not None:
         db.update_topic_linked(bot_name, category_name, topic_name, linked_topics)
@@ -350,14 +356,12 @@ def add_topic_keyword(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name or not keyword:
         return {"status": "error", "message": "Missing required fields"}
 
-    db = get_db()
-    # Allow bot owners, admins, AND users who have inherited this bot
-    user_id = get_request_user_id(request)
-    if not _can_modify_bot(request, bot_name):
-        if not user_id or not db.user_has_bot_access(user_id, bot_name):
-            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+    allowed, owner_id = _resolve_bot_access(request, bot_name)
+    if not allowed:
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
-    inserted = db.add_keyword(bot_name, category_name, topic_name, keyword)
+    db = get_db()
+    inserted = db.add_keyword(bot_name, category_name, topic_name, keyword, owner_id=owner_id)
     return {"status": "ok", "inserted": inserted, "keyword": keyword}
 
 @router.post("/topic/keyword/delete")
@@ -370,11 +374,10 @@ def delete_topic_keyword(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name or not keyword:
         return {"status": "error", "message": "Missing required fields"}
 
-    db = get_db()
-    user_id = get_request_user_id(request)
-    if not _can_modify_bot(request, bot_name):
-        if not user_id or not db.user_has_bot_access(user_id, bot_name):
-            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+    allowed, owner_id = _resolve_bot_access(request, bot_name)
+    if not allowed:
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
-    deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword)
+    db = get_db()
+    deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword, owner_id=owner_id)
     return {"status": "ok", "deleted": deleted, "keyword": keyword}

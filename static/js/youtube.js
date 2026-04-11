@@ -1218,7 +1218,7 @@ async function ytProcessOneItem(id, btn) {
         btn.title = 'Processing…';
         const row = btn.closest('tr');
         if (row) {
-            const statusCell = row.querySelector('td:nth-child(3)');
+            const statusCell = row.querySelector('td:nth-child(4)');
             if (statusCell) statusCell.innerHTML = '<span class="yt-status-badge yt-status-processing">processing</span>';
         }
     }

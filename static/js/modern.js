@@ -2781,7 +2781,7 @@ async function toggleCategory(botName, categoryName, enabled) {
     if (result.status === 'ok') {
         await loadAllData();
         renderBotsPage();
-        showNotification(`Category and all topics ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        showNotification(`Category ${enabled ? 'enabled (all topics restored)' : 'disabled'}`, 'success');
     }
 }
 
