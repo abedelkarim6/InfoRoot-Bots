@@ -2872,6 +2872,14 @@ class Database:
                            (enabled, bot_id, category_name))
             updated = cursor.rowcount > 0
             if updated:
+                # When enabling a category, also enable all its topics
+                if enabled:
+                    cursor.execute("""
+                        UPDATE topics SET enabled = TRUE
+                        WHERE category_id = (
+                            SELECT id FROM categories WHERE bot_id = %s AND name = %s
+                        )
+                    """, (bot_id, category_name))
                 self._bump_config_version()
             return updated
         finally:

@@ -6,19 +6,41 @@ from routers.auth import is_admin_request, get_request_user_id
 router = APIRouter()
 
 
-def _can_modify_bot(request: Request, bot_name: str) -> bool:
+def _resolve_bot_access(request: Request, bot_name: str):
+    """Return (allowed: bool, owner_id_for_db).
+
+    owner_id_for_db is what to pass to DB operations:
+      - None  → operate on admin-managed bot
+      - int   → operate on this user's own bot
+    """
+    db = get_db()
     if is_admin_request(request):
-        owner_id = get_db().get_bot_owner_id(bot_name)
-        return owner_id is None  # admin can only modify admin-managed bots
+        return True, None  # admin always works on admin bots
     user_id = get_request_user_id(request)
     if not user_id:
-        return False
-    owner_id = get_db().get_bot_owner_id(bot_name, requesting_user_id=user_id)
-    return owner_id == user_id
+        return False, None
+    # User owns the bot → full ownership, use their owner_id
+    bot_owner = db.get_bot_owner_id(bot_name, requesting_user_id=user_id)
+    if bot_owner == user_id:
+        return True, user_id
+    # User has inherited access to an admin bot → allow but operate as admin (owner_id=None)
+    if db.user_has_bot_access(user_id, bot_name):
+        return True, None
+    return False, None
 
 
-def _get_request_owner_id(request: Request):
-    """Return None for admin requests, user_id for regular users."""
+def _can_modify_bot(request: Request, bot_name: str) -> bool:
+    allowed, _ = _resolve_bot_access(request, bot_name)
+    return allowed
+
+
+def _get_request_owner_id(request: Request, bot_name: str = None):
+    """Return the owner_id to pass to DB operations.
+    If bot_name is provided, resolves inherited-bot access properly.
+    Falls back to None for admin, user_id for regular users."""
+    if bot_name:
+        _, owner_id = _resolve_bot_access(request, bot_name)
+        return owner_id
     if is_admin_request(request):
         return None
     return get_request_user_id(request)
@@ -38,7 +60,7 @@ def add_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.add_category(bot_name, category_name, owner_id=_get_request_owner_id(request)):
+    if db.add_category(bot_name, category_name, owner_id=_get_request_owner_id(request, bot_name)):
         return {"status": "ok", "category_name": category_name}
     return {"status": "error", "message": "Category already exists or bot not found"}
 
@@ -54,7 +76,7 @@ def delete_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    owner_id = _get_request_owner_id(request)
+    owner_id = _get_request_owner_id(request, bot_name)
     bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
     bot = bots.get(bot_name, {})
     cat_data = bot.get('categories', {}).get(category_name)
@@ -80,7 +102,7 @@ def toggle_category(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.toggle_category(bot_name, category_name, enabled, owner_id=_get_request_owner_id(request)):
+    if db.toggle_category(bot_name, category_name, enabled, owner_id=_get_request_owner_id(request, bot_name)):
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Category not found"}
 
@@ -99,7 +121,7 @@ def add_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.add_topic(bot_name, category_name, topic_name, owner_id=_get_request_owner_id(request)):
+    if db.add_topic(bot_name, category_name, topic_name, owner_id=_get_request_owner_id(request, bot_name)):
         return {"status": "ok", "topic_name": topic_name}
     return {"status": "error", "message": "Topic already exists or category not found"}
 
@@ -116,7 +138,7 @@ def rename_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.rename_topic(bot_name, category_name, old_name, new_name, owner_id=_get_request_owner_id(request)):
+    if db.rename_topic(bot_name, category_name, old_name, new_name, owner_id=_get_request_owner_id(request, bot_name)):
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found or name already taken"}
 
@@ -133,7 +155,7 @@ def delete_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    owner_id = _get_request_owner_id(request)
+    owner_id = _get_request_owner_id(request, bot_name)
     bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
     topic_data = (bots.get(bot_name, {}).get('categories', {})
                   .get(category_name, {}).get('topics', {}).get(topic_name))
@@ -180,7 +202,7 @@ def toggle_topic(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.toggle_topic(bot_name, category_name, topic_name, enabled, owner_id=_get_request_owner_id(request)):
+    if db.toggle_topic(bot_name, category_name, topic_name, enabled, owner_id=_get_request_owner_id(request, bot_name)):
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Topic not found"}
 
@@ -259,8 +281,12 @@ def delete_topic_schedule(request: Request, data: dict = Body(...)):
         return {"status": "error", "message": "Missing schedule_id"}
 
     db = get_db()
-    owner_id = _get_request_owner_id(request)
-    all_bots = db.get_owned_bots_config(owner_id) if owner_id else db.get_all_bots_config()
+    # Use a broad search first to find which bot this schedule belongs to
+    if is_admin_request(request):
+        all_bots = db.get_all_bots_config()
+    else:
+        user_id_for_search = get_request_user_id(request)
+        all_bots = db.get_filtered_bots_config(user_id_for_search) if user_id_for_search else {}
     schedule_data = None
     for bn, bot in all_bots.items():
         for cn, cat in bot.get('categories', {}).items():
