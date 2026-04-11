@@ -4531,9 +4531,11 @@ function _renderSumMsgTable() {
         const txt = escapeHtml(m.preview || '');
         return `<tr>
             <td style="white-space:nowrap;font-size:11px;">${ts}</td>
-            <td>${topicTags || '<span style="color:var(--text-muted)">—</span>'}</td>
-            <td>${catTags  || '<span style="color:var(--text-muted)">—</span>'}</td>
-            <td>${kwTags   || '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td>${src}</td>
+            <td>${col}</td>
+            <td>${bot}</td>
+            <td>${top}</td>
+            <td>${kw}</td>
             <td class="smp-msg-cell" title="${txt}">${txt}</td>
         </tr>`;
     }).join('');
@@ -4648,10 +4650,17 @@ function applyMonMessageFilters() {
         const chHtml = Object.entries(channels).map(([chName, msgs]) => {
             const rowsHtml = msgs.map(m => {
                 const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-                const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '';
+                const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
+                    .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
+                    .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
+                    .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
                 return `<tr>
                     <td style="white-space:nowrap;font-size:11px;">${ts}</td>
-                    <td>${botTag}</td>
+                    <td>${topicTags}</td>
+                    <td>${catTags}</td>
+                    <td>${kwTags}</td>
                     <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
                 </tr>`;
             }).join('');
@@ -4790,7 +4799,7 @@ function _renderUnclByChannel(messages, content) {
         const chHtml = Object.entries(channels).map(([chName, msgs]) => {
             const rowsHtml = msgs.map(m => {
                 const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-                const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '';
+                const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '—';
                 return `<tr>
                     <td style="white-space:nowrap;font-size:11px;">${ts}</td>
                     <td>${botTag}</td>
@@ -4800,7 +4809,7 @@ function _renderUnclByChannel(messages, content) {
             return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
                 <div style="overflow-x:auto;">
                 <table class="mon-table">
-                    <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
+                    <thead><tr><th>Time</th><th>Bot</th><th>Preview</th></tr></thead>
                     <tbody>${rowsHtml}</tbody>
                 </table></div>`;
         }).join('');

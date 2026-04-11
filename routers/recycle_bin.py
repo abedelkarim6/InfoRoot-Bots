@@ -35,9 +35,7 @@ def restore_item(request: Request, data: dict = Body(...)):
         return {"status": "error", "message": "Missing id"}
 
     db = get_db()
-    cursor = db._get_cursor()
-    cursor.execute("SELECT * FROM recycle_bin WHERE id = %s", (item_id,))
-    row = cursor.fetchone()
+    row = db.recycle_bin_get(item_id)
     if not row:
         return {"status": "error", "message": "Item not found in recycle bin"}
 
@@ -84,9 +82,7 @@ def permanently_delete(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if not is_admin_request(request):
-        cursor = db._get_cursor()
-        cursor.execute("SELECT owner_id FROM recycle_bin WHERE id = %s", (item_id,))
-        row = cursor.fetchone()
+        row = db.recycle_bin_get(item_id)
         if not row:
             return {"status": "error", "message": "Item not found"}
         if row['owner_id'] != get_request_user_id(request):
@@ -102,8 +98,5 @@ def empty_recycle_bin(request: Request):
     if not is_admin_request(request):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
     db = get_db()
-    cursor = db._get_cursor()
-    cursor.execute("DELETE FROM recycle_bin")
-    count = cursor.rowcount
-    db.connection.commit()
+    count = db.recycle_bin_purge(days=0)
     return {"status": "ok", "deleted": count}
