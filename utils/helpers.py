@@ -5,6 +5,7 @@ import io
 import os
 import re
 import sys
+import time
 import yaml
 import logging
 from logging.handlers import RotatingFileHandler
@@ -184,80 +185,157 @@ async def stop_bot_task(app_state):
     _logger.info("[BOT] Bot task stopped.")
     return True
 
+# ==================== Categorizer cache ====================
+
+_BOTS_CACHE_TTL: float = 30.0  # seconds between DB fetches
+
+_bots_cache: dict = {}
+_bots_cache_time: float = 0.0
+# bot_name → cat_name → topic_name → (compiled_pattern | None, {lower_kw: original_kw})
+_topic_patterns: dict = {}
+
+
+def _build_topic_pattern(keywords: list):
+    """
+    Compile a single combined regex for all keywords in a topic.
+    Also builds a lowercase→original-keyword map for result reconstruction.
+    Returns (compiled_re | None, {lower: original}).
+    """
+    kw_lower_map: dict = {}
+    valid_escaped: list = []
+    for kw in keywords:
+        if not kw:
+            continue
+        kw_lower_map[kw.lower()] = kw
+        valid_escaped.append(re.escape(kw))
+    if not valid_escaped:
+        return None, kw_lower_map
+    try:
+        pattern = re.compile(r'\b(' + '|'.join(valid_escaped) + r')\b', re.IGNORECASE)
+        return pattern, kw_lower_map
+    except re.error:
+        # Some keywords couldn't be combined — filter out individually broken ones
+        good_escaped: list = []
+        good_map: dict = {}
+        for kw in keywords:
+            if not kw:
+                continue
+            try:
+                re.compile(rf'\b{re.escape(kw)}\b')
+                good_escaped.append(re.escape(kw))
+                good_map[kw.lower()] = kw
+            except re.error:
+                pass
+        if not good_escaped:
+            return None, good_map
+        return re.compile(r'\b(' + '|'.join(good_escaped) + r')\b', re.IGNORECASE), good_map
+
+
+def _refresh_bots_cache(db=None):
+    """Fetch bots config, compile per-topic patterns, and store in module globals."""
+    global _bots_cache, _bots_cache_time, _topic_patterns
+
+    if db is not None:
+        bots = db.get_all_bots_config()
+    else:
+        cfg = load_config()
+        bots = cfg.get('bots', {})
+
+    patterns: dict = {}
+    for bot_name, bot_data in bots.items():
+        patterns[bot_name] = {}
+        categories = bot_data.get('categories', {})
+
+        # First pass: flat keyword map for linked_topics resolution
+        all_topic_keywords: dict = {}
+        for cat_data in categories.values():
+            for t_name, t_data in cat_data.get('topics', {}).items():
+                all_topic_keywords[t_name] = t_data.get('keywords', [])
+
+        # Second pass: compile one regex per topic
+        for cat_name, cat_data in categories.items():
+            patterns[bot_name][cat_name] = {}
+            for t_name, t_data in cat_data.get('topics', {}).items():
+                own_kws = t_data.get('keywords', [])
+                linked_kws: list = []
+                for lt in (t_data.get('linked_topics') or []):
+                    linked_kws.extend(all_topic_keywords.get(lt, []))
+                pat, kw_map = _build_topic_pattern(own_kws + linked_kws)
+                patterns[bot_name][cat_name][t_name] = (pat, kw_map)
+
+    _bots_cache = bots
+    _bots_cache_time = time.monotonic()
+    _topic_patterns = patterns
+    return bots
+
+
+def _get_bots_cached(db=None) -> dict:
+    """Return bots config from cache, refreshing at most once per TTL window."""
+    if _bots_cache and (time.monotonic() - _bots_cache_time) < _BOTS_CACHE_TTL:
+        return _bots_cache
+    return _refresh_bots_cache(db)
+
+
+def invalidate_categorizer_cache():
+    """Force the next categorizer call to re-fetch bot config from DB.
+    Call this after any mutation that changes keywords, topics, or categories."""
+    global _bots_cache_time
+    _bots_cache_time = 0.0
+
+
 # ==================== Categorizer ====================
 def categorizer(text, bot_name, db=None):
     """
     Match message text against topics' keywords for a specific bot.
-    Uses the database for bot/category/topic structure and keywords when
-    db is provided; falls back to config.yaml otherwise.
+    Uses a TTL-cached bot config and pre-compiled per-topic regexes so that
+    the hot path (called on every incoming Telegram message) is O(topics)
+    regex evals instead of O(topics × keywords).
 
     Returns: (matched_topics, matched_categories, matched_keywords)
     """
-    found_topics = []
-    found_categories = []
-    found_keywords = []
+    found_topics: list = []
+    found_categories: list = []
+    found_keywords: list = []
+    found_kw_set: set = set()  # dedup guard
 
-    # Get bot config from DB (primary) or config.yaml (fallback)
-    if db is not None:
-        bots = db.get_all_bots_config()
-    else:
-        config = load_config()
-        bots = config.get('bots', {})
-
+    bots = _get_bots_cached(db)
     if bot_name not in bots:
         return None, None, None
 
-    bot = bots[bot_name]
-    categories = bot.get('categories', {})
+    categories = bots[bot_name].get('categories', {})
+    bot_patterns = _topic_patterns.get(bot_name, {})
 
-    # Build a flat name→keywords lookup so linked_topics resolution is O(1)
-    all_topic_keywords: dict = {}
-    for cat_data in categories.values():
-        for t_name, t_data in cat_data.get('topics', {}).items():
-            all_topic_keywords[t_name] = t_data.get('keywords', [])
-
-    # Iterate through categories → topics → keywords
     for category_name, category_data in categories.items():
         if not category_data.get('enabled', True):
             continue
 
-        topics = category_data.get('topics', {})
-        for topic_name, topic_data in topics.items():
+        cat_patterns = bot_patterns.get(category_name, {})
+
+        for topic_name, topic_data in category_data.get('topics', {}).items():
             if not topic_data.get('enabled', True):
                 continue
 
-            # Own keywords + keywords inherited from every linked topic
-            own_keywords = topic_data.get('keywords', [])
-            linked = topic_data.get('linked_topics') or []
-            linked_keywords = []
-            for lt in linked:
-                linked_keywords.extend(all_topic_keywords.get(lt, []))
-            keywords = own_keywords + linked_keywords
-
             topic_matched = False
+            pattern, kw_lower_map = cat_patterns.get(topic_name, (None, {}))
 
-            for kw in keywords:
-                if not kw:
-                    continue
-                try:
-                    if re.search(rf'\b{re.escape(kw)}\b', text, re.IGNORECASE):
-                        if topic_name not in found_topics:
-                            found_topics.append(topic_name)
-                            topic_matched = True
-                        if kw not in found_keywords:
-                            found_keywords.append(kw)
-                except re.error:
-                    if kw.lower() in text.lower():
-                        if topic_name not in found_topics:
-                            found_topics.append(topic_name)
-                            topic_matched = True
-                        if kw not in found_keywords:
-                            found_keywords.append(kw)
+            if pattern is not None:
+                # Single regex call replaces N individual re.search() calls
+                matches = pattern.findall(text)
+                if matches:
+                    topic_matched = True
+                    if topic_name not in found_topics:
+                        found_topics.append(topic_name)
+                    for m in matches:
+                        orig = kw_lower_map.get(m.lower(), m)
+                        if orig not in found_kw_set:
+                            found_kw_set.add(orig)
+                            found_keywords.append(orig)
 
             # Catch-all: match every message regardless of keywords
             if not topic_matched and topic_data.get('catch_all'):
-                found_topics.append(topic_name)
                 topic_matched = True
+                if topic_name not in found_topics:
+                    found_topics.append(topic_name)
 
             if topic_matched and category_name not in found_categories:
                 found_categories.append(category_name)

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from utils.database import get_db
+from utils.helpers import invalidate_categorizer_cache
 from routers.auth import is_admin_request, get_request_user_id
 
 router = APIRouter()
@@ -66,6 +67,7 @@ def add_category(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.add_category(bot_name, category_name, owner_id=_get_request_owner_id(request, bot_name)):
+        invalidate_categorizer_cache()
         return {"status": "ok", "category_name": category_name}
     return {"status": "error", "message": "Category already exists or bot not found"}
 
@@ -91,6 +93,7 @@ def delete_category(request: Request, data: dict = Body(...)):
                            owner_id=get_request_user_id(request))
 
     if db.delete_category(bot_name, category_name, owner_id=owner_id):
+        invalidate_categorizer_cache()
         return {"status": "ok"}
     return {"status": "error", "message": "Category not found"}
 
@@ -108,6 +111,7 @@ def toggle_category(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.toggle_category(bot_name, category_name, enabled, owner_id=_get_request_owner_id(request, bot_name)):
+        invalidate_categorizer_cache()
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Category not found"}
 
@@ -127,6 +131,7 @@ def add_topic(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.add_topic(bot_name, category_name, topic_name, owner_id=_get_request_owner_id(request, bot_name)):
+        invalidate_categorizer_cache()
         return {"status": "ok", "topic_name": topic_name}
     return {"status": "error", "message": "Topic already exists or category not found"}
 
@@ -144,6 +149,7 @@ def rename_topic(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.rename_topic(bot_name, category_name, old_name, new_name, owner_id=_get_request_owner_id(request, bot_name)):
+        invalidate_categorizer_cache()
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found or name already taken"}
 
@@ -171,6 +177,7 @@ def delete_topic(request: Request, data: dict = Body(...)):
         }, owner_id=get_request_user_id(request))
 
     if db.delete_topic(bot_name, category_name, topic_name, owner_id=owner_id):
+        invalidate_categorizer_cache()
         return {"status": "ok"}
     return {"status": "error", "message": "Topic not found"}
 
@@ -189,6 +196,7 @@ def set_topic_catch_all(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.set_topic_catch_all(bot_name, category_name, topic_name, bool(value)):
+        invalidate_categorizer_cache()
         return {"status": "ok", "catch_all": bool(value)}
     return {"status": "error", "message": "Topic not found"}
 
@@ -208,6 +216,7 @@ def toggle_topic(request: Request, data: dict = Body(...)):
 
     db = get_db()
     if db.toggle_topic(bot_name, category_name, topic_name, enabled, owner_id=_get_request_owner_id(request, bot_name)):
+        invalidate_categorizer_cache()
         return {"status": "ok", "enabled": enabled}
     return {"status": "error", "message": "Topic not found"}
 
@@ -248,6 +257,7 @@ def update_topic(request: Request, data: dict = Body(...)):
     if linked_topics is not None:
         db.update_topic_linked(bot_name, category_name, topic_name, linked_topics)
 
+    invalidate_categorizer_cache()
     return {"status": "ok"}
 
 # ==================== Schedule Operations ====================
@@ -362,6 +372,7 @@ def add_topic_keyword(request: Request, data: dict = Body(...)):
 
     db = get_db()
     inserted = db.add_keyword(bot_name, category_name, topic_name, keyword, owner_id=owner_id)
+    invalidate_categorizer_cache()
     return {"status": "ok", "inserted": inserted, "keyword": keyword}
 
 @router.post("/topic/keyword/delete")
@@ -380,4 +391,5 @@ def delete_topic_keyword(request: Request, data: dict = Body(...)):
 
     db = get_db()
     deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword, owner_id=owner_id)
+    invalidate_categorizer_cache()
     return {"status": "ok", "deleted": deleted, "keyword": keyword}
