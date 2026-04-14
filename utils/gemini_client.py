@@ -7,7 +7,7 @@ Authentication uses Application Default Credentials (ADC) set by:
 import logging
 import google.genai as genai
 from google.genai import types
-from utils.prompts import get_system_prompt
+from summaries.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 

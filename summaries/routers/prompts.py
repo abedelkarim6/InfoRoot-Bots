@@ -9,7 +9,7 @@ router = APIRouter()
 
 def _resolve_prompt_access(request: Request, bot_name: str):
     """Return (allowed, owner_id) — delegates to topic.py's copy-on-write logic."""
-    from routers.topic import _resolve_bot_access
+    from summaries.routers.topic import _resolve_bot_access
     return _resolve_bot_access(request, bot_name)
 
 

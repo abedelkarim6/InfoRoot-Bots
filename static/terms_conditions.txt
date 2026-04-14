@@ -1,0 +1,106 @@
+Terms of Service
+Effective Date: April 7, 2026
+
+Welcome to **Inforoot.org**, a platform operated by individuals based in Lebanon.
+By accessing or using our services, you agree to these Terms of Service.
+
+# 1. Description of Service
+Inforoot is an automation and content processing platform that allows users to:
+
+- Connect data sources such as Telegram, WhatsApp, and YouTube
+- Read and process publicly available content from these sources
+- Apply AI-powered transformations such as summaries and structured outputs
+- Configure automated workflows to distribute content to selected destinations
+
+Inforoot operates strictly as a tool. Users are solely responsible for configuring and using the platform.
+
+# 2. Eligibility
+You must be at least 18 years old to use the service. By using Inforoot, you confirm that you meet this requirement.
+
+# 3. User Accounts
+To use the service, you must create an account. You are responsible for:
+
+- Maintaining the confidentiality of your account
+- All activities performed under your account
+
+We are not responsible for unauthorized access caused by user negligence.
+
+# 4. Third-Party Services
+Inforoot interacts with third-party platforms including, but not limited to: Telegram, WhatsApp, and YouTube. We do not control these platforms and are not responsible for:
+
+- Changes to their APIs or policies
+- Service interruptions
+- Account restrictions imposed by these platforms
+
+You are responsible for complying with the terms of any third-party services you use.
+
+# 5. Third-Party Risk and Automation Disclaimer
+Certain features of Inforoot may involve automation or interaction with third-party platforms in ways that may carry inherent risks. By using such features, you acknowledge and agree that:
+
+- You use these integrations at your own risk
+- Third-party platforms may restrict, limit, or suspend accounts at their sole discretion
+- Inforoot is not responsible for any account bans, limitations, or penalties imposed by external platforms
+- You are solely responsible for ensuring your use complies with third-party platform policies
+
+# 6. Content and Ownership
+Inforoot processes content that users choose to access and configure.
+
+- Users do not gain ownership of original or transformed content obtained through the platform
+- Users may own AI-generated outputs only if they meaningfully modify or provide original input/context
+
+Users are solely responsible for the data they access and the way they use and redistribute content.
+
+# 7. Attribution and Source Rights
+Users **must preserve and clearly mention the original source** when redistributing or sharing content obtained through Inforoot. Failure to provide proper attribution may result in suspension of your account.
+
+# 8. Prohibited Use
+You agree **not** to use Inforoot to:
+
+- Access or collect private or non-public data without authorization
+- Violate copyright or intellectual property rights
+- Distribute misleading, manipulated, or false content
+- Engage in spam or abusive messaging
+- Use the service for any illegal purposes
+
+Violation of these rules may result in immediate suspension or termination.
+
+# 9. AI Processing
+Inforoot uses third-party AI services (e.g., OpenAI, Gemini) to process content.
+
+- We **do not use your data to train AI models**
+- Data processed through AI services may be subject to the terms of those providers
+
+# 10. Subscriptions and Free Trial
+Inforoot operates on a subscription model with a free trial.
+
+- Free trials are limited and may be restricted or revoked in cases of abuse
+- All payments are **final**
+- **No refunds** are provided under any circumstances
+
+# 11. Service Changes
+We may modify, update, or discontinue any part of the service at any time, including features and pricing. Continued use of the service constitutes acceptance of such changes.
+
+# 12. Termination
+We reserve the right to suspend or terminate accounts that violate these Terms. Upon termination, access to the service may be revoked immediately and data may be deleted without prior notice.
+
+# 13. Limitation of Liability
+Inforoot is provided **"as is"** without warranties of any kind. We are not liable for:
+
+- Any damages resulting from the use of the service
+- Content processed or distributed through the platform
+- Actions taken by third-party platforms
+
+# 14. Indemnification
+You agree to indemnify and hold harmless Inforoot from any claims, damages, liabilities, or expenses arising from your use of the service, your violation of these Terms, or your misuse of content or third-party platforms.
+
+# 15. Compliance with Laws
+You agree to use the service in compliance with all applicable laws and regulations, including any restrictions related to sanctioned regions.
+
+# 16. Geographic Availability
+The service may not be available in certain regions. Users are responsible for ensuring that their use complies with local laws.
+
+# 17. Changes to Terms
+We may update these Terms at any time. Continued use of the service means you accept the updated Terms.
+
+# 18. Contact
+For any inquiries: Info@inforoot.org

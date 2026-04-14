@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
-from utils.helpers import start_bot_subprocess, stop_bot_subprocess
+from utils.helpers import start_bot_task, stop_bot_task
 from utils.database import get_db
 from routers.auth import is_admin_request, get_request_user_id
 
@@ -30,32 +30,26 @@ def _get_request_owner_id(request: Request):
 
 
 @router.post("/bot/enable")
-def enable_bot(request: Request):
-    bot_lock = request.app.state.bot_lock
-
-    with bot_lock:
-        existing = getattr(request.app.state, 'bot_process', None)
-        if existing and existing.poll() is None:
-            return {"status": "Bot already running"}
-
-    proc = start_bot_subprocess(request.app.state)
-    if proc is None:
-        return {"status": "error", "message": "Bot crashed on startup"}
-    return {"status": "Bot started", "pid": proc.pid}
+async def enable_bot(request: Request):
+    existing = getattr(request.app.state, 'bot_task', None)
+    if existing and not existing.done():
+        return {"status": "Bot already running"}
+    start_bot_task(request.app.state)
+    return {"status": "Bot started"}
 
 @router.post("/bot/disable")
-def disable_bot(request: Request):
-    bot_lock = request.app.state.bot_lock
-    stopped = stop_bot_subprocess(request.app.state, bot_lock)
+async def disable_bot(request: Request):
+    stopped = await stop_bot_task(request.app.state)
     if stopped:
         return {"status": "Bot stopped"}
     return {"status": "Bot is not running"}
 
 @router.post("/bot/reload")
-def reload_bot():
-    with open("reload.flag", "w") as f:
-        f.write("reload")
-    return {"status": "bot_reload_requested"}
+async def reload_bot(request: Request):
+    """Restart the bot task (config reload)."""
+    await stop_bot_task(request.app.state)
+    start_bot_task(request.app.state)
+    return {"status": "bot_restarted"}
 
 @router.get("/bots")
 def list_bots(request: Request):

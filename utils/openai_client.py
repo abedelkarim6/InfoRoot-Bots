@@ -4,7 +4,7 @@ OpenAI client for generating summaries.
 
 import openai
 import logging
-from utils.prompts import get_system_prompt
+from summaries.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 

@@ -14,10 +14,10 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-from utils.database import Database, set_db_instance
+from utils.database import get_db
 from utils.openai_client import OpenAIClient
 from utils.gemini_client import GeminiClient
-from utils.prompts import get_summary_prompt
+from summaries.prompts import get_summary_prompt
 from utils.helpers import load_config, setup_logging, categorizer
 
 import datetime
@@ -45,34 +45,18 @@ if sys.platform == 'win32':
     if hasattr(sys.stderr, 'reconfigure'):
         sys.stderr.reconfigure(encoding='utf-8')
 
-# ==================== Global Variables ====================
-config = load_config()
-logger = setup_logging(config)
-
-# Initialize components
-db = Database(config["database"]["dsn"])
-set_db_instance(db)
-db.seed_keywords_from_config(config)
-if not config.get("gemini"):
-    llm_client = OpenAIClient(
-        api_key=config["openai"]["api_key"],
-        model=config["openai"]["model"],
-        max_tokens=config["openai"]["max_tokens"],
-        temperature=config["openai"]["temperature"]
-    )
-else:
-    llm_client = GeminiClient(
-        project=config["gemini"]["project"],
-        location=config["gemini"].get("location", "us-central1"),
-        model=config["gemini"].get("model", "gemini-2.5-flash"))
-
-# Telegram userbot settings
-API_ID = config["telegram"]["api_id"]
-API_HASH = config["telegram"]["api_hash"]
-STRING_SESSION = config["telegram"].get("string_session")  # fallback; DB value preferred at runtime
+# ==================== Module-level state ====================
+# Initialized inside run_bot() — not at import time (avoids side-effects when imported by app.py)
+config = None
+logger = None
+db = None
+llm_client = None
+API_ID = None
+API_HASH = None
+STRING_SESSION = None
 
 SCHEDULER = None
-client: TelegramClient = None  # Set in main()
+client: TelegramClient = None  # Set in run_bot()
 
 # Pre-resolved map: numeric_channel_id → [collection_names]
 # Built at startup and rebuilt on every config change.
@@ -327,7 +311,8 @@ async def read_channel_messages(event):
                 original_text=original_text,
                 replaced_text=replaced_text,
                 channel_username=channel_username,
-                collection_name=collection_name_str
+                collection_name=collection_name_str,
+                msg_timestamp=event.message.date,
             )
             # logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
 
@@ -510,7 +495,7 @@ async def generate_and_send_summary(job_data):
 
         # ── Compute time window ──────────────────────────────────────────────
         window_start = _compute_window_start(job_data)
-        logger.info(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | window_start={window_start}")
+        logger.debug(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | window_start={window_start}")
 
         # ── Tier 1: collect unsent interim summaries within window ───────────
         interim_rows = db.get_unsent_interim_summaries(bot_name, topic_name, window_start)
@@ -644,7 +629,7 @@ async def generate_and_send_summary(job_data):
 
         # ── Mark interim summaries as sent ───────────────────────────────────
         db.mark_interim_summaries_sent(interim_ids)
-        logger.info(f"[DONE] Bot={bot_name} | Topic={topic_name} | interim_batches={len(interim_ids)} | leftover={len(leftover_ids)}")
+        logger.debug(f"[DONE] Bot={bot_name} | Topic={topic_name} | interim_batches={len(interim_ids)} | leftover={len(leftover_ids)}")
 
     except Exception as e:
         logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
@@ -1038,38 +1023,47 @@ async def scheduler_watcher():
 
 
 # ==============================================
-# ================= Main =======================
+# ================= run_bot ====================
 # ==============================================
-async def main():
-    global client
+async def run_bot():
+    """
+    Long-running coroutine for the Telegram userbot.
+    Called by app.py via asyncio.create_task().
+    Initializes all module-level state from the shared db/config,
+    then runs the Telethon client + APScheduler until cancelled.
+    """
+    global config, db, logger, llm_client, API_ID, API_HASH, STRING_SESSION, client
 
-    # logger.info("="*60)
-    # logger.info("Starting Telegram Summarizer Userbot")
-    # logger.info("="*60)
+    # Initialize from app.py's already-configured db and config
+    # NOTE: do NOT call setup_logging() here — app.py already configured the root logger.
+    # Calling it again would add a second handler → every line prints twice.
+    import logging as _logging
+    config = load_config()
+    logger = _logging.getLogger("bot")
+    db = get_db()  # app.py calls set_db_instance(SummariesDB(...)) before starting this task
+    db.seed_keywords_from_config(config)
 
-    # Log configuration
-    collections = db.get_all_collections()
-    bots = db.get_all_bots_config()
+    if not config.get("gemini"):
+        llm_client = OpenAIClient(
+            api_key=config["openai"]["api_key"],
+            model=config["openai"]["model"],
+            max_tokens=config["openai"]["max_tokens"],
+            temperature=config["openai"]["temperature"]
+        )
+    else:
+        llm_client = GeminiClient(
+            project=config["gemini"]["project"],
+            location=config["gemini"].get("location", "us-central1"),
+            model=config["gemini"].get("model", "gemini-2.5-flash"))
 
-    # logger.info(f"[CONFIG] COLLECTIONS: {len(collections)} configured")
-    # for coll_name, coll_data in collections.items():
-    #     sources = coll_data.get('source_channels', [])
-    #     targets = coll_data.get('target_channels', [])
-    #     logger.info(f"   - {coll_name}: Sources={sources}, Targets={targets}")
-
-    # logger.info(f"[AI] BOTS: {len(bots)} configured")
-    # for bot_name, bot_data in bots.items():
-    #     enabled = bot_data.get('enabled', True)
-    #     bot_colls = bot_data.get('collections', [])
-    #     logger.info(f"   - {bot_name}: Enabled={enabled}, Collections={bot_colls}")
-
-    # logger.info("="*60)
+    API_ID = config["telegram"]["api_id"]
+    API_HASH = config["telegram"]["api_hash"]
+    STRING_SESSION = config["telegram"].get("string_session")
 
     # Prefer session string from DB (admin user), fall back to config.yaml
     _db_session = None
     try:
-        from utils.database import get_db as _get_db
-        _admin_user = _get_db().get_admin_user()
+        _admin_user = get_db().get_admin_user()
         if _admin_user and _admin_user.get('telegram_session'):
             _db_session = _admin_user['telegram_session']
     except Exception as _e:
@@ -1137,10 +1131,11 @@ async def main():
     except KeyboardInterrupt:
         pass
     finally:
-        db.close()
+        # app.py owns the db lifecycle — do NOT call db.close() here
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
         if SCHEDULER and SCHEDULER.running:
             SCHEDULER.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

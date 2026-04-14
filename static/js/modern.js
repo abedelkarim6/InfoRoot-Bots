@@ -252,6 +252,11 @@ function initNavigation() {
 }
 
 function showPage(pageName) {
+    // Stop log auto-refresh when leaving the logs page
+    if (pageName !== 'logs') {
+        clearTimeout(_logsTimer);
+    }
+
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
         if (item.dataset.page === pageName) {
@@ -299,6 +304,8 @@ function showPage(pageName) {
     else if (pageName === 'profile') loadProfileData();
     else if (pageName === 'tg-setup') loadTgSetupPage();
     else if (pageName === 'tg-tester') tgTesterInit();
+    else if (pageName === 'logs') loadLogsPage();
+    else if (pageName === 'privacy') loadPrivacyPage();
 }
 
 // ==================== System Bot FAB ====================
@@ -1671,7 +1678,10 @@ function createBasicSettingsSection(botName, bot) {
                                             <span style="font-size:11px;color:var(--text-muted);">${scheduleSpec(ds)}</span>
                                             ${tgLabel}
                                         </div>
-                                        <button class="btn-icon btn-danger" style="font-size:12px;flex-shrink:0;" onclick="removeDefaultSchedule('${botName}', ${idx})">🗑️</button>
+                                        <div style="display:flex;gap:6px;flex-shrink:0;">
+                                            <button class="btn-icon" style="font-size:12px;" onclick="editDefaultSchedule('${botName}', ${idx})" title="Edit">✏️</button>
+                                            <button class="btn-icon btn-danger" style="font-size:12px;" onclick="removeDefaultSchedule('${botName}', ${idx})" title="Remove">🗑️</button>
+                                        </div>
                                     </div>`;
                                 }).join('')
                             }
@@ -2364,6 +2374,10 @@ function openDefaultScheduleModal(botName) {
                 </div>
                 <div id="ds-type-inputs"></div>
                 <div class="form-group">
+                    <label class="form-label">Prompt</label>
+                    <select class="select" id="ds-prompt">${promptOptions}</select>
+                </div>
+                <div class="form-group">
                     <label class="form-label">Header</label>
                     <input type="text" class="input" id="ds-header" value="*{topic_name}*" placeholder="*{topic_name}*">
                 </div>
@@ -2506,6 +2520,199 @@ async function removeDefaultSchedule(botName, index) {
         await loadAllData();
         renderBotsPage();
     }, { title: 'Remove Default Schedule' });
+}
+
+function editDefaultSchedule(botName, idx) {
+    const bot = globalConfig.bots[botName];
+    if (!bot || !bot.default_schedules) return;
+    const ds = bot.default_schedules[idx];
+    if (!ds) return;
+
+    const botPrompts = globalPrompts[botName] || {};
+    const promptOptions = Object.keys(botPrompts).length
+        ? Object.keys(botPrompts).map(key => `<option value="${key}">${key}</option>`).join('')
+        : '<option value="">No prompts defined</option>';
+
+    const existingModal = document.getElementById('default-schedule-modal');
+    if (existingModal) existingModal.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'default-schedule-modal';
+    modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Edit Default Schedule</h3>
+                <button class="btn-icon" onclick="closeModal('default-schedule-modal')">×</button>
+            </div>
+            <div class="modal-body">
+                <small class="text-muted d-block mb-2">This schedule template will be auto-created on every new topic. Use <code>{topic_name}</code> in name/header to insert the topic name.</small>
+                <div class="form-group">
+                    <label class="form-label">Schedule Name</label>
+                    <input type="text" class="input" id="ds-name" placeholder="{topic_name}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Type</label>
+                    <select class="select" id="ds-type" onchange="updateDsInputs()">
+                        <option value="minute">Minute</option>
+                        <option value="hourly">Hourly</option>
+                        <option value="interval_minutes">Interval (Minutes)</option>
+                        <option value="interval">Interval (Hours)</option>
+                        <option value="daily">Daily</option>
+                        <option value="speeches_interval">Speeches Interval</option>
+                    </select>
+                </div>
+                <div id="ds-type-inputs"></div>
+                <div class="form-group">
+                    <label class="form-label">Prompt</label>
+                    <select class="select" id="ds-prompt">${promptOptions}</select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Header</label>
+                    <input type="text" class="input" id="ds-header" placeholder="*{topic_name}*">
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ds-header-datetime" onchange="toggleSchDatetimeOptions('ds')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="form-label" style="margin:0;">Show date & time in header</span>
+                </div>
+                <div id="ds-datetime-opts" style="display:none;padding-left:16px;">
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="ds-date-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Date in Arabic numerals</span>
+                    </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="ds-time-arabic">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="form-label" style="margin:0;">Time in Arabic numerals</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Telegram Targets (optional)</label>
+                    <div class="tags-container" id="ds-tg-targets"></div>
+                    <input type="text" class="input mt-1" id="ds-tg-input"
+                           placeholder="@channel or chat ID — press Enter to add"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();addSchTgTarget('ds');}">
+                    <small class="text-muted sch-tg-hint" id="ds-tg-hint">Leave empty to use collection targets.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('default-schedule-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveEditedDefaultSchedule('${botName}', ${idx})">Save</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Pre-fill type and render type-specific inputs first
+    const typeSelect = document.getElementById('ds-type');
+    if (typeSelect) typeSelect.value = ds.type || 'daily';
+    updateDsInputs();
+
+    // Pre-fill type-specific numeric fields
+    if (ds.type === 'minute' || ds.type === 'hourly') {
+        const el = document.getElementById('ds-minute');
+        if (el) el.value = ds.minute ?? 0;
+    } else if (ds.type === 'interval_minutes') {
+        const el = document.getElementById('ds-minutes');
+        if (el) el.value = ds.minutes ?? 30;
+        const sh = document.getElementById('ds-start-hour');
+        if (sh) sh.value = ds.start_hour ?? 0;
+        const sm = document.getElementById('ds-start-minute');
+        if (sm) sm.value = ds.start_minute ?? 0;
+    } else if (ds.type === 'interval') {
+        const el = document.getElementById('ds-hours');
+        if (el) el.value = ds.hours ?? 3;
+        const sh = document.getElementById('ds-start-hour');
+        if (sh) sh.value = ds.start_hour ?? 0;
+        const sm = document.getElementById('ds-start-minute');
+        if (sm) sm.value = ds.start_minute ?? 0;
+    } else if (ds.type === 'daily') {
+        const h = document.getElementById('ds-hour');
+        if (h) h.value = ds.hour ?? 18;
+        const m = document.getElementById('ds-minute');
+        if (m) m.value = ds.minute ?? 0;
+    } else if (ds.type === 'speeches_interval') {
+        const el = document.getElementById('ds-wait-time');
+        if (el) el.value = ds.wait_time ?? 5;
+    }
+
+    // Pre-fill remaining fields
+    const nameEl = document.getElementById('ds-name');
+    if (nameEl) nameEl.value = ds.name || '';
+
+    const promptEl = document.getElementById('ds-prompt');
+    if (promptEl && ds.prompt_key) promptEl.value = ds.prompt_key;
+
+    const headerEl = document.getElementById('ds-header');
+    if (headerEl) headerEl.value = ds.header || '';
+
+    const dtCheck = document.getElementById('ds-header-datetime');
+    if (dtCheck && ds.header_datetime) {
+        dtCheck.checked = true;
+        toggleSchDatetimeOptions('ds');
+        const dateAr = document.getElementById('ds-date-arabic');
+        if (dateAr) dateAr.checked = !!ds.header_date_arabic;
+        const timeAr = document.getElementById('ds-time-arabic');
+        if (timeAr) timeAr.checked = !!ds.header_time_arabic;
+    }
+
+    // Pre-fill telegram targets
+    const tgInput = document.getElementById('ds-tg-input');
+    (ds.telegram_targets || []).forEach(t => {
+        if (t && tgInput) { tgInput.value = t; addSchTgTarget('ds'); }
+    });
+}
+
+async function saveEditedDefaultSchedule(botName, idx) {
+    const name = document.getElementById('ds-name')?.value.trim();
+    const type = document.getElementById('ds-type')?.value;
+    const prompt_key = document.getElementById('ds-prompt')?.value;
+    if (!name) { showAlert('Please enter a schedule name', { icon: '✏️' }); return; }
+
+    const ds = {
+        name, type, prompt_key, enabled: true,
+        header: document.getElementById('ds-header')?.value || `*${name}*`,
+        header_datetime: document.getElementById('ds-header-datetime')?.checked || false,
+        header_date_arabic: document.getElementById('ds-date-arabic')?.checked || false,
+        header_time_arabic: document.getElementById('ds-time-arabic')?.checked || false,
+        telegram_targets: getSchTgTargets('ds'),
+    };
+
+    if (type === 'minute' || type === 'hourly') ds.minute = Number(document.getElementById('ds-minute')?.value || 0);
+    if (type === 'interval_minutes') {
+        ds.minutes = Number(document.getElementById('ds-minutes')?.value || 30);
+        ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
+        ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+    }
+    if (type === 'interval') {
+        ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
+        ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
+        ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+    }
+    if (type === 'daily') {
+        ds.hour = Number(document.getElementById('ds-hour')?.value || 0);
+        ds.minute = Number(document.getElementById('ds-minute')?.value || 0);
+    }
+    if (type === 'speeches_interval') {
+        ds.wait_time = Number(document.getElementById('ds-wait-time')?.value || 5);
+    }
+
+    const bot = globalConfig.bots[botName];
+    if (!bot || !bot.default_schedules) return;
+    bot.default_schedules[idx] = ds;
+
+    await updateBotSetting(botName, 'default_schedules', bot.default_schedules);
+    closeModal('default-schedule-modal');
+    await loadAllData();
+    renderBotsPage();
 }
 
 async function updateBotSetting(botName, key, value) {
@@ -3952,6 +4159,12 @@ style.textContent = `
     .rules-row:last-child { margin-bottom:0; }
     .rules-input { flex:1; min-width:0; height:32px; font-size:13px; }
     .rules-arrow { color:var(--text-muted); font-size:14px; flex-shrink:0; }
+
+    /* Export column picker */
+    .export-col-item { display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:var(--radius-sm); cursor:pointer; font-size:13px; color:var(--text-secondary); transition:background 0.1s; user-select:none; }
+    .export-col-item:hover { background:var(--bg-tertiary); }
+    .export-col-item input[type=checkbox] { accent-color:var(--accent-primary); cursor:pointer; width:14px; height:14px; flex-shrink:0; }
+    .export-col-all { font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-color); border-radius:0; margin-bottom:2px; }
 `;
 
 // ==================== Monitor Page ====================
@@ -4575,6 +4788,7 @@ function _closeSummaryMessages() {
                 <option value="minute">Minute</option>
             </select>
             <input type="text" class="input mon-filter-search" id="sum-search" placeholder="🔍 Search preview…" oninput="applyMonSummaryFilters()">
+            <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('summaries')" title="Export visible rows to CSV">⬇ Export</button>
         </div>
         <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>`;
     renderMonSummaries(_allSummaries || []);
@@ -5148,6 +5362,198 @@ function showAllMissedView() {
     _renderMissed(_missedMessages);
 }
 
+// ==================== Export to CSV ====================
+
+const _EXPORT_COLS = {
+    summaries: [
+        { key: 'time',    label: 'Time' },
+        { key: 'bot',     label: 'Bot' },
+        { key: 'topic',   label: 'Topic' },
+        { key: 'type',    label: 'Type' },
+        { key: 'msgs',    label: 'Messages Count' },
+        { key: 'target',  label: 'Target' },
+        { key: 'preview', label: 'Preview' },
+    ],
+    messages: [
+        { key: 'time',       label: 'Time' },
+        { key: 'collection', label: 'Collection' },
+        { key: 'channel',    label: 'Channel' },
+        { key: 'topics',     label: 'Topics' },
+        { key: 'categories', label: 'Categories' },
+        { key: 'keywords',   label: 'Keywords' },
+        { key: 'preview',    label: 'Preview' },
+    ],
+    unclassified: [
+        { key: 'time',       label: 'Time' },
+        { key: 'collection', label: 'Collection' },
+        { key: 'channel',    label: 'Channel' },
+        { key: 'bot',        label: 'Bot' },
+        { key: 'preview',    label: 'Preview' },
+    ],
+};
+
+let _exportTab = null;
+
+function openExportModal(tabName) {
+    _exportTab = tabName;
+    const cols = _EXPORT_COLS[tabName] || [];
+
+    const tabLabels = { summaries: 'Summaries', messages: 'Messages', unclassified: 'Unclassified' };
+    document.getElementById('export-col-title').textContent =
+        `Export ${tabLabels[tabName] || tabName} — Select Columns`;
+
+    document.getElementById('export-col-list').innerHTML = cols.map(c =>
+        `<label class="export-col-item">
+            <input type="checkbox" name="export-col" value="${c.key}" checked>
+            <span>${c.label}</span>
+        </label>`
+    ).join('');
+
+    // Sync the "Select all" checkbox
+    document.getElementById('export-all-cols').checked = true;
+
+    document.getElementById('export-col-modal').style.display = 'flex';
+}
+
+function closeExportModal() {
+    document.getElementById('export-col-modal').style.display = 'none';
+    _exportTab = null;
+}
+
+function toggleAllExportCols(checked) {
+    document.querySelectorAll('#export-col-list input[name="export-col"]')
+        .forEach(cb => cb.checked = checked);
+}
+
+function _syncExportAllCheckbox() {
+    const all = document.querySelectorAll('#export-col-list input[name="export-col"]');
+    const checked = document.querySelectorAll('#export-col-list input[name="export-col"]:checked');
+    const allCb = document.getElementById('export-all-cols');
+    if (allCb) allCb.checked = all.length === checked.length;
+}
+
+function confirmExport() {
+    const selected = [...document.querySelectorAll('#export-col-list input[name="export-col"]:checked')]
+        .map(cb => cb.value);
+    if (!selected.length) {
+        showAlert('Please select at least one column.');
+        return;
+    }
+    const tab = _exportTab;
+    closeExportModal();
+    _doExport(tab, selected);
+}
+
+function _csvCell(v) {
+    const s = (v == null ? '' : String(v)).replace(/"/g, '""');
+    return `"${s}"`;
+}
+
+function _csvRow(values) {
+    return values.map(_csvCell).join(',');
+}
+
+function _getExportSummaries() {
+    const bot    = document.getElementById('sum-filter-bot')?.value   || '';
+    const topic  = document.getElementById('sum-filter-topic')?.value || '';
+    const type   = document.getElementById('sum-filter-type')?.value  || '';
+    const search = (document.getElementById('sum-search')?.value || '').trim().toLowerCase();
+    let d = _allSummaries;
+    if (bot)    d = d.filter(s => s.bot_name     === bot);
+    if (topic)  d = d.filter(s => s.topic_name   === topic);
+    if (type)   d = d.filter(s => s.summary_type === type);
+    if (search) d = d.filter(s => (s.preview || '').toLowerCase().includes(search));
+    return d;
+}
+
+function _getExportMessages() {
+    const coll    = document.getElementById('msg-filter-coll')?.value    || '';
+    const channel = document.getElementById('msg-filter-channel')?.value || '';
+    const topic   = document.getElementById('msg-filter-topic')?.value   || '';
+    const search  = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
+    let d = _allMessages;
+    if (coll)    d = d.filter(m => m.collection === coll);
+    if (channel) d = d.filter(m => `@${m.channel_username}` === channel);
+    if (topic)   d = d.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
+    if (search)  d = d.filter(m => (m.preview || '').toLowerCase().includes(search));
+    return d;
+}
+
+function _getExportUnclassified() {
+    const clearedAtMs = _unclClearedAt ? new Date(_unclClearedAt).getTime() : null;
+    return clearedAtMs
+        ? _unclMessages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > clearedAtMs)
+        : _unclMessages;
+}
+
+function _doExport(tabName, selectedKeys) {
+    const colDefs = (_EXPORT_COLS[tabName] || []).filter(c => selectedKeys.includes(c.key));
+    let rows = [];
+
+    if (tabName === 'summaries') {
+        rows = _getExportSummaries().map(s => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':    return s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+                case 'bot':     return s.bot_name    || '';
+                case 'topic':   return s.topic_name  || '';
+                case 'type':    return s.summary_type || '';
+                case 'msgs':    return s.message_count ?? '';
+                case 'target':  return s.target_entity || '';
+                case 'preview': return s.preview || '';
+                default: return '';
+            }
+        }));
+    } else if (tabName === 'messages') {
+        rows = _getExportMessages().map(m => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':       return m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+                case 'collection': return m.collection || '';
+                case 'channel':    return m.channel_username ? `@${m.channel_username}` : '';
+                case 'topics':     return m.topics || '';
+                case 'categories': return m.categories || '';
+                case 'keywords':   return m.keywords_found || '';
+                case 'preview':    return m.preview || '';
+                default: return '';
+            }
+        }));
+    } else if (tabName === 'unclassified') {
+        rows = _getExportUnclassified().map(m => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':       return m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+                case 'collection': return m.collection_name || '';
+                case 'channel':    return m.channel_username ? `@${m.channel_username}` : '';
+                case 'bot':        return m.bot_name || '';
+                case 'preview':    return m.preview || '';
+                default: return '';
+            }
+        }));
+    }
+
+    if (!rows.length) {
+        showAlert('No data to export. Apply different filters or load more data first.');
+        return;
+    }
+
+    // UTF-8 BOM so Excel reads Arabic / non-ASCII correctly
+    const header = _csvRow(colDefs.map(c => c.label));
+    const csv = '\uFEFF' + header + '\n' + rows.map(_csvRow).join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${tabName}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Sync "Select all" when individual checkboxes change
+document.addEventListener('change', e => {
+    if (e.target.name === 'export-col') _syncExportAllCheckbox();
+});
+
 // ---------- Collapsible sections ----------
 function toggleMonSec(bodyId, iconId) {
     const body = document.getElementById(bodyId);
@@ -5536,4 +5942,202 @@ function clearSearch() {
     if (input) input.value = '';
     if (clearBtn) clearBtn.style.display = 'none';
     hideSearchResults();
+}
+
+// ── Privacy / Legal page loader ─────────────────────────────────────────────
+
+let _privacyLoaded = false;
+
+function loadPrivacyPage() {
+    if (_privacyLoaded) return;
+    const card = document.getElementById('privacy-card');
+    if (!card) return;
+
+    function inlineRender(text) {
+        text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        text = text.replace(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g,
+            '<a href="mailto:$1">$1</a>');
+        return text;
+    }
+
+    fetch('/static/privacy_policy.txt?_=' + Date.now())
+        .then(r => { if (!r.ok) throw new Error(); return r.text(); })
+        .then(raw => {
+            const lines = raw.split('\n');
+            let i = 0;
+            // Skip title + effective date lines (already in page header)
+            let skipped = 0;
+            while (i < lines.length && skipped < 2) {
+                if (lines[i].trim()) skipped++;
+                i++;
+            }
+            // Build blocks
+            const blocks = [];
+            let cur = [];
+            while (i < lines.length) {
+                const l = lines[i++];
+                if (l.trim() === '') { if (cur.length) { blocks.push(cur); cur = []; } }
+                else cur.push(l);
+            }
+            if (cur.length) blocks.push(cur);
+
+            let html = '';
+            for (const block of blocks) {
+                const first = block[0].trim();
+                if (first.startsWith('# ')) {
+                    html += `<h4>${inlineRender(first.slice(2).trim())}</h4>`;
+                    if (block.length > 1)
+                        html += `<p>${inlineRender(block.slice(1).map(l => l.trim()).join(' '))}</p>`;
+                } else if (block.every(l => l.trim().startsWith('- '))) {
+                    html += '<ul>' + block.map(l => `<li>${inlineRender(l.trim().slice(2))}</li>`).join('') + '</ul>';
+                } else {
+                    html += `<p>${inlineRender(block.map(l => l.trim()).join(' '))}</p>`;
+                }
+            }
+            card.innerHTML = html;
+            _privacyLoaded = true;
+        })
+        .catch(() => {
+            card.innerHTML = '<p class="text-muted">Could not load Privacy Policy.</p>';
+        });
+}
+
+// ==================== Logs Page ====================
+let _allLogs       = [];
+let _logsTimer     = null;
+let _logsLoaded    = false;
+
+const _LOG_LEVEL_CLS = {
+    ERROR:   'log-level-error',
+    WARNING: 'log-level-warn',
+    INFO:    'log-level-info',
+    DEBUG:   'log-level-debug',
+};
+
+(function _injectLogStyles() {
+    const s = document.createElement('style');
+    s.textContent = `
+        #logs-table-wrap table { width:100%; border-collapse:collapse; font-size:12.5px; }
+        #logs-table-wrap th { background:var(--bg-tertiary); color:var(--text-secondary);
+            font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+            padding:8px 12px; text-align:left; position:sticky; top:0; z-index:1;
+            border-bottom:1px solid var(--border-color); }
+        #logs-table-wrap td { padding:6px 12px; border-bottom:1px solid var(--border-color);
+            vertical-align:top; }
+        #logs-table-wrap tr:last-child td { border-bottom:none; }
+        #logs-table-wrap tr:hover td { background:var(--bg-tertiary); }
+        .log-time  { white-space:nowrap; color:var(--text-muted); font-size:11.5px; width:155px; }
+        .log-name  { white-space:nowrap; color:var(--text-muted); font-size:11.5px; max-width:110px;
+                     overflow:hidden; text-overflow:ellipsis; }
+        .log-level { font-weight:700; font-size:11px; white-space:nowrap; }
+        .log-msg   { word-break:break-word; color:var(--text-primary); }
+        .log-level-error   { color:#ef4444; }
+        .log-level-warn    { color:#f59e0b; }
+        .log-level-info    { color:#3b82f6; }
+        .log-level-debug   { color:var(--text-muted); }
+        tr.log-row-error td { background:rgba(239,68,68,.04); }
+        tr.log-row-warn  td { background:rgba(245,158,11,.04); }
+    `;
+    document.head.appendChild(s);
+})();
+
+async function loadLogsPage() {
+    const wrap = document.getElementById('logs-table-wrap');
+    if (!wrap) return;
+    if (!_logsLoaded) wrap.innerHTML = '<p class="mon-empty" style="padding:24px">Loading…</p>';
+
+    const level  = document.getElementById('log-filter-level')?.value || '';
+    const search = document.getElementById('log-search')?.value.trim() || '';
+
+    let url = '/api/logs?limit=500';
+    if (level)  url += `&level=${encodeURIComponent(level)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+
+    const data = await api(url);
+    if (data.status !== 'ok') { wrap.innerHTML = `<p class="mon-empty" style="padding:24px">Error: ${escapeHtml(data.message||'')}</p>`; return; }
+
+    _allLogs   = data.logs || [];
+    _logsLoaded = true;
+    _renderLogTable(_allLogs);
+    _updateLogsErrorBadge();
+    _scheduleLogAutoRefresh();
+}
+
+function _renderLogTable(logs) {
+    const wrap = document.getElementById('logs-table-wrap');
+    if (!wrap) return;
+    if (!logs.length) {
+        wrap.innerHTML = '<p class="mon-empty" style="padding:24px">No log records.</p>';
+        return;
+    }
+    const rows = logs.map(r => {
+        const lvlCls  = _LOG_LEVEL_CLS[r.level] || '';
+        const rowCls  = r.level === 'ERROR' ? 'log-row-error' : r.level === 'WARNING' ? 'log-row-warn' : '';
+        return `<tr class="${rowCls}">
+            <td class="log-time">${escapeHtml(r.time || '')}</td>
+            <td class="log-name" title="${escapeHtmlSys(r.name || '')}">${escapeHtml(r.name || '')}</td>
+            <td class="log-level ${lvlCls}">${escapeHtml(r.level || '')}</td>
+            <td class="log-msg">${escapeHtml(r.message || '')}</td>
+        </tr>`;
+    }).join('');
+    wrap.innerHTML = `<table>
+        <thead><tr>
+            <th>Time</th><th>Logger</th><th>Level</th><th>Message</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function applyLogFilters() {
+    // Re-fetch from server (filters applied server-side for efficiency)
+    clearTimeout(_logsTimer);
+    loadLogsPage();
+}
+
+function toggleLogAutoRefresh() {
+    _scheduleLogAutoRefresh();
+}
+
+function _scheduleLogAutoRefresh() {
+    clearTimeout(_logsTimer);
+    const el = document.getElementById('log-auto-refresh');
+    if (el && el.checked && document.getElementById('logs-page')?.style.display !== 'none') {
+        _logsTimer = setTimeout(loadLogsPage, 5000);
+    }
+}
+
+function _updateLogsErrorBadge() {
+    const badge = document.getElementById('logs-error-badge');
+    if (!badge) return;
+    // Count errors from the full unfiltered buffer (fetch separately if needed;
+    // here we count from the current loaded set as a best-effort indicator)
+    const errCount = _allLogs.filter(r => r.level === 'ERROR').length;
+    if (errCount > 0) {
+        badge.textContent = errCount > 99 ? '99+' : errCount;
+        badge.style.display = '';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+async function clearLogs() {
+    showConfirm('Clear all log records from memory?', async () => {
+        await api('/api/logs/clear', {});
+        _allLogs = [];
+        _logsLoaded = false;
+        document.getElementById('logs-table-wrap').innerHTML = '<p class="mon-empty" style="padding:24px">Log buffer cleared.</p>';
+        const badge = document.getElementById('logs-error-badge');
+        if (badge) badge.style.display = 'none';
+        showNotification('Log buffer cleared', 'success');
+    });
+}
+
+function downloadLogs() {
+    const lines = _allLogs.map(r => `${r.time} | ${r.level.padEnd(7)} | ${r.name} | ${r.message}`).join('\n');
+    const blob  = new Blob(['\uFEFF' + lines], { type: 'text/plain;charset=utf-8' });
+    const a     = document.createElement('a');
+    a.href      = URL.createObjectURL(blob);
+    a.download  = `logs_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
 }

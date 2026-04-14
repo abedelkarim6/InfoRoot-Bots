@@ -1,14 +1,73 @@
+import asyncio
+import collections
+import datetime
 import io
 import os
 import re
 import sys
-import time
 import yaml
 import logging
-import threading
-import subprocess
 from logging.handlers import RotatingFileHandler
 
+# ==================== In-memory log buffer ====================
+
+class _MemoryLogHandler(logging.Handler):
+    """Keeps the last `maxlen` log records in a deque for the UI logs page."""
+
+    def __init__(self, maxlen: int = 1000):
+        super().__init__()
+        self._records: collections.deque = collections.deque(maxlen=maxlen)
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._records.append({
+                'time':    datetime.datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S'),
+                'level':   record.levelname,
+                'name':    record.name,
+                'message': record.getMessage(),
+            })
+        except Exception:
+            pass  # Never crash the logging system
+
+    def get_records(self, level: str = None, search: str = None, limit: int = 500):
+        records = list(self._records)
+        if level:
+            records = [r for r in records if r['level'] == level]
+        if search:
+            s = search.lower()
+            records = [r for r in records
+                       if s in r['message'].lower() or s in r['name'].lower()]
+        # Return most-recent last; caller can reverse for newest-first display
+        return records[-limit:]
+
+    def clear(self):
+        self._records.clear()
+
+
+_memory_handler: _MemoryLogHandler = None  # type: ignore[assignment]
+
+
+def init_memory_log_handler(maxlen: int = 1000) -> _MemoryLogHandler:
+    """Attach a memory log handler to the root logger. Call once at app startup."""
+    global _memory_handler
+    _memory_handler = _MemoryLogHandler(maxlen=maxlen)
+    _memory_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(_memory_handler)
+    return _memory_handler
+
+
+def get_log_records(level: str = None, search: str = None, limit: int = 500):
+    if _memory_handler is None:
+        return []
+    return _memory_handler.get_records(level=level, search=search, limit=limit)
+
+
+def clear_log_records():
+    if _memory_handler:
+        _memory_handler.clear()
+
+
+# ==================== Configuration ====================
 CONFIG_FILE = "config.yaml"
 PROMPTS_FILE = "prompts.yaml"
 # ==================== Configuration ====================
@@ -74,88 +133,56 @@ def setup_logging(config):
     
     return logger
 
-def stream_logs(pipe, pipe_name):
-    bot_logger = logging.getLogger("bot_process")
+_BOT_RESTART_DELAY = 5  # seconds before auto-restart after unexpected exit
+
+def start_bot_task(app_state):
+    """Start run_bot() as an asyncio Task and attach it to app_state.bot_task.
+
+    A supervisor wrapper restarts the task automatically after unexpected exits
+    (anything that is not a CancelledError).  Called from app.py lifespan and
+    the bot management router.
+    """
+    _logger = logging.getLogger("bot_task")
+
+    async def _supervisor():
+        from summaries.bot import run_bot
+        while True:
+            _logger.info("[BOT] Starting bot task…")
+            try:
+                await run_bot()
+                # run_bot() returned normally — shouldn't happen; restart anyway
+                _logger.warning("[BOT] run_bot() returned unexpectedly; restarting in %ss", _BOT_RESTART_DELAY)
+            except asyncio.CancelledError:
+                _logger.info("[BOT] Bot task cancelled — shutting down")
+                raise  # propagate so the task truly stops
+            except Exception as exc:
+                _logger.error("[BOT] run_bot() crashed (%s: %s); restarting in %ss",
+                              type(exc).__name__, exc, _BOT_RESTART_DELAY)
+            await asyncio.sleep(_BOT_RESTART_DELAY)
+
+    task = asyncio.create_task(_supervisor(), name="bot_supervisor")
+    app_state.bot_task = task
+    return task
+
+
+async def stop_bot_task(app_state):
+    """Cancel the bot asyncio Task and wait for it to finish.
+
+    Called from app.py lifespan shutdown and the bot management router.
+    """
+    _logger = logging.getLogger("bot_task")
+    task = getattr(app_state, 'bot_task', None)
+    if task is None or task.done():
+        app_state.bot_task = None
+        return False
+    task.cancel()
     try:
-        for line in iter(pipe.readline, ''):
-            line = line.rstrip('\n\r')
-            if line:
-                bot_logger.info(f"[BOT] {line}")
-    except Exception as e:
-        bot_logger.error(f"stream_logs error: {e}")
-    finally:
-        pipe.close()
-
-
-def start_bot_subprocess(app_state):
-    """Start main.py as a subprocess and attach it to app state.
-
-    Returns the Popen process on success, None on failure.
-    Used by app.py lifespan, bot router, and system router.
-    """
-    _logger = logging.getLogger("bot_process")
-
-    bot_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    main_path = os.path.join(bot_dir, "main.py")
-
-    _logger.info(f"Starting bot: {sys.executable} -u {main_path} (cwd: {bot_dir})")
-
-    proc = subprocess.Popen(
-        [sys.executable, "-u", main_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,   # prevent Telethon auth prompts from hanging forever
-        bufsize=1,
-        encoding='utf-8',
-        errors='replace',
-        cwd=bot_dir,
-        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
-    )
-
-    # Wait briefly and check if process crashed immediately
-    time.sleep(1)
-    if proc.poll() is not None:
-        stdout_out = proc.stdout.read()
-        stderr_out = proc.stderr.read()
-        _logger.error(f"Bot crashed on startup (exit code {proc.returncode})")
-        _logger.error(f"STDOUT: {stdout_out}")
-        _logger.error(f"STDERR: {stderr_out}")
-        app_state.bot_process = None
-        return None
-
-    # Stream bot logs to the app's console
-    threading.Thread(target=stream_logs, args=(proc.stdout, "BOT-OUT"), daemon=True).start()
-    threading.Thread(target=stream_logs, args=(proc.stderr, "BOT-ERR"), daemon=True).start()
-
-    app_state.bot_process = proc
-    _logger.info(f"Bot started successfully (PID: {proc.pid})")
-    return proc
-
-
-def stop_bot_subprocess(app_state, bot_lock):
-    """Stop the bot subprocess if running.
-
-    Used by app.py lifespan, bot router, and system router.
-    """
-    _logger = logging.getLogger("bot_process")
-
-    with bot_lock:
-        bot_proc = getattr(app_state, 'bot_process', None)
-        if not bot_proc or bot_proc.poll() is not None:
-            app_state.bot_process = None
-            return False
-
-        try:
-            bot_proc.terminate()
-            bot_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            bot_proc.kill()
-        except Exception as e:
-            _logger.error(f"Error stopping bot: {e}")
-        finally:
-            app_state.bot_process = None
-            _logger.info("Bot subprocess stopped.")
-        return True
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    app_state.bot_task = None
+    _logger.info("[BOT] Bot task stopped.")
+    return True
 
 # ==================== Categorizer ====================
 def categorizer(text, bot_name, db=None):

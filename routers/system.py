@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Body, Request
-from utils.helpers import start_bot_subprocess, stop_bot_subprocess
+from utils.helpers import start_bot_task, stop_bot_task
 from utils.database import get_db
 from routers.auth import is_admin_request
 
@@ -12,8 +12,8 @@ router = APIRouter()
 def get_system_status(request: Request):
     db = get_db()
     full_cfg = db.get_full_config()
-    bot_process = getattr(request.app.state, 'bot_process', None)
-    bot_running = bot_process is not None and bot_process.poll() is None
+    bot_task = getattr(request.app.state, 'bot_task', None)
+    bot_running = bot_task is not None and not bot_task.done()
     return {
         "enabled": full_cfg.get("system", {}).get("enabled", True),
         "bot_running": bot_running,
@@ -22,24 +22,18 @@ def get_system_status(request: Request):
     }
 
 @router.post("/system/toggle")
-def toggle_system(request: Request, enabled: bool = Body(..., embed=True)):
+async def toggle_system(request: Request, enabled: bool = Body(..., embed=True)):
     db = get_db()
     db.set_system_enabled(enabled)
 
-    bot_lock = request.app.state.bot_lock
-
     if enabled:
-        with bot_lock:
-            existing = getattr(request.app.state, 'bot_process', None)
-            if existing and existing.poll() is None:
-                logger.info("Bot already running, skipping start")
-                return {"status": "ok", "enabled": True, "message": "System enabled (bot already running)"}
-
-        proc = start_bot_subprocess(request.app.state)
-        if proc is None:
-            return {"status": "error", "enabled": True, "message": "Bot crashed on startup"}
+        existing = getattr(request.app.state, 'bot_task', None)
+        if existing and not existing.done():
+            logger.info("Bot already running, skipping start")
+            return {"status": "ok", "enabled": True, "message": "System enabled (bot already running)"}
+        start_bot_task(request.app.state)
     else:
-        stop_bot_subprocess(request.app.state, bot_lock)
+        await stop_bot_task(request.app.state)
 
     return {
         "status": "ok",
@@ -60,7 +54,7 @@ def get_summaries_fixed_prefix(request: Request):
     """Return the active summaries system prompt and fixed prefix (admin only)."""
     if not is_admin_request(request):
         return {"status": "error", "message": "Admin only"}
-    from utils.prompts import get_system_prompt, get_fixed_prefix, _DEFAULT_SYSTEM_PROMPT, _DEFAULT_FIXED_PREFIX
+    from summaries.prompts import get_system_prompt, get_fixed_prefix, _DEFAULT_SYSTEM_PROMPT, _DEFAULT_FIXED_PREFIX
     return {
         "status": "ok",
         "system_prompt": get_system_prompt(),
@@ -91,11 +85,8 @@ async def save_summaries_fixed_prefix(request: Request):
 
 
 @router.post("/system/restart")
-def restart_bot(request: Request):
-    """Stop and restart the bot subprocess (used after session changes)."""
-    bot_lock = request.app.state.bot_lock
-    stop_bot_subprocess(request.app.state, bot_lock)
-    proc = start_bot_subprocess(request.app.state)
-    if proc is None:
-        return {"status": "error", "message": "Bot failed to start after restart"}
+async def restart_bot(request: Request):
+    """Stop and restart the bot task (used after session changes)."""
+    await stop_bot_task(request.app.state)
+    start_bot_task(request.app.state)
     return {"status": "ok", "message": "Bot restarted successfully"}

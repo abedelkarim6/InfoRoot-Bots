@@ -45,10 +45,9 @@ def _lookup_channel(channels: list, channel_id: str):
 
 @router.get("/telegram/admin_channels")
 def get_admin_channels(request: Request):
-    """Return all channels the userbot is a member of (from DB cache). Admin only."""
-    from routers.auth import is_admin_request
-    if not is_admin_request(request):
-        return JSONResponse({"error": "Admin only"}, status_code=403)
+    """Return all channels the userbot is a member of (from DB cache).
+    Available to any authenticated user — needed for the channel picker when
+    creating or editing collections."""
     result, err = _get_dialogs()
     if err:
         return err
@@ -513,7 +512,7 @@ async def tester_generate_summary(request: Request, data: dict = Body(...)):
 
     # Generate
     try:
-        from utils.prompts import get_summary_prompt
+        from summaries.prompts import get_summary_prompt
         texts  = [m["text"] for m in topic_messages]
         prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
         summary = llm.generate_summary(prompt)
@@ -588,7 +587,7 @@ async def tester_manual_summary(request: Request, data: dict = Body(...)):
             pass
 
     try:
-        from utils.prompts import get_summary_prompt
+        from summaries.prompts import get_summary_prompt
         prompt  = get_summary_prompt(texts, bot_name or "manual", prompt_key, topic_name=topic_name or None)
         summary = llm.generate_summary(prompt)
         return {

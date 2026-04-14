@@ -18,8 +18,9 @@ from youtube_monitor.websub import (
     process_websub_notification,
 )
 from youtube_monitor.keyword_search import run_keyword_search, run_all_keyword_searches
-from youtube_monitor.worker import (
-    process_pending_queue, process_queue_item, DEFAULT_PROMPT,
+from youtube_monitor.worker import process_pending_queue, process_queue_item
+from youtube_monitor.prompts import (
+    DEFAULT_PROMPT,
     _DEFAULT_FIXED_PREFIX_VIDEO, _DEFAULT_FIXED_PREFIX_TRANSCRIPT,
     _get_fixed_prefix_video, _get_fixed_prefix_transcript,
 )

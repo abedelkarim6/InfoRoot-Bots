@@ -1,7 +1,6 @@
 import os
 import sys
 import logging
-import threading
 from contextlib import asynccontextmanager
 
 # Force UTF-8 on Windows
@@ -18,16 +17,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app")
 
+# Attach in-memory log buffer (used by the admin Logs page)
+# Must be called after basicConfig so the root logger is already configured.
+from utils.helpers import init_memory_log_handler as _init_mem_log
+_init_mem_log(maxlen=1000)
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from routers import bot, telegram, prompts, rules, system, collection, topic, monitor, auth, chatbot, recycle_bin, accounts
+# System routers (auth, user management — unchanged location)
+from routers import auth, accounts, system, chatbot
 from routers.auth import validate_token, hash_password, get_request_user_id, is_admin_request
-from utils.database import Database, set_db_instance, get_db
-from utils.helpers import load_config as _load_cfg, start_bot_subprocess, stop_bot_subprocess
+# Summaries feature routers (moved to summaries/routers/)
+from summaries.routers import bot, telegram, prompts, rules, collection, topic, monitor, recycle_bin
+from summaries.db import SummariesDB
+from utils.database import set_db_instance, get_db
+from utils.helpers import (
+    load_config as _load_cfg, start_bot_task, stop_bot_task,
+    init_memory_log_handler, get_log_records, clear_log_records,
+)
 
 # YouTube monitor imports
 from youtube_monitor.db import YouTubeDB, set_yt_db
@@ -38,7 +49,7 @@ from youtube_monitor.renew_websub import renew_all_subscriptions
 from youtube_monitor.cleanup import run_cleanup
 
 _cfg = _load_cfg()
-db = Database(_cfg["database"]["dsn"])
+db = SummariesDB(_cfg["database"]["dsn"])
 set_db_instance(db)
 db.seed_keywords_from_config(_cfg)  # One-time seed; no-op if DB already has keywords
 db.migrate_config_to_db(_cfg)  # Migrate bots and collections from config.yaml to DB
@@ -144,19 +155,16 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
 
-# Global bot process management
-bot_lock = threading.Lock()
-
-
 @asynccontextmanager
 async def lifespan(app):
     """Auto-start the bot on server startup, start YouTube scheduler, stop on shutdown."""
+    import asyncio
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
     from youtube_monitor.worker import process_pending_queue
     from youtube_monitor.keyword_search import run_due_keyword_searches
 
-    start_bot_subprocess(app.state)
+    start_bot_task(app.state)
 
     # YouTube auto-processing scheduler
     yt_scheduler = AsyncIOScheduler()
@@ -211,15 +219,14 @@ async def lifespan(app):
     yield
 
     yt_scheduler.shutdown(wait=False)
-    stop_bot_subprocess(app.state, bot_lock)
+    await stop_bot_task(app.state)
 
 
 app = FastAPI(title="Telegram Bot Admin", lifespan=lifespan)
 app.add_middleware(TokenAuthMiddleware)
 
-# Make these available to routers
-app.state.bot_process = None
-app.state.bot_lock = bot_lock
+# bot_task is set by start_bot_task() inside lifespan
+app.state.bot_task = None
 
 # Serve static HTML/JS/CSS (no-cache so browser always gets latest)
 @app.middleware("http")
@@ -268,6 +275,34 @@ def get_warnings(request: Request):
     """Return all system dependency warnings (orphaned prompts, orphaned collections)."""
     db = get_db()
     return {"warnings": db.get_all_dependency_warnings()}
+
+
+@app.get("/api/logs")
+def api_get_logs(
+    request: Request,
+    level: str = None,
+    search: str = None,
+    limit: int = 500,
+):
+    """Return buffered log records. Admin only."""
+    if not is_admin_request(request):
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+    records = get_log_records(
+        level=level or None,
+        search=search or None,
+        limit=min(limit, 1000),
+    )
+    # Newest first for the UI
+    return {"status": "ok", "logs": list(reversed(records))}
+
+
+@app.post("/api/logs/clear")
+def api_clear_logs(request: Request):
+    """Clear the in-memory log buffer. Admin only."""
+    if not is_admin_request(request):
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+    clear_log_records()
+    return {"status": "ok"}
 
 
 @app.get("/api/config")

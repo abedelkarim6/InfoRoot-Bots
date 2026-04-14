@@ -102,7 +102,7 @@ function renderProfilePage(u) {
   <!-- ── Gemini API usage (admin only) ── -->
   ${isAdmin ? `<div class="card" style="margin-bottom:20px" id="pf-gemini-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h3 style="font-size:14px;font-weight:600;margin:0">✨ Gemini API Usage</h3>
+      <h3 style="font-size:14px;font-weight:600;margin:0">✨ AI Usage</h3>
       <button class="btn btn-secondary btn-sm" onclick="loadGeminiUsage()">↺ Refresh</button>
     </div>
     <div id="pf-gemini-usage"><p class="text-muted" style="font-size:13px">Loading…</p></div>
