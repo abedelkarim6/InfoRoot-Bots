@@ -653,6 +653,24 @@ class Database:
             """)
 
             self._migrate_comma_keywords()
+
+            # Schedule run history — one row per schedule fire (success or failed)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schedule_runs (
+                    id             SERIAL PRIMARY KEY,
+                    bot_name       TEXT NOT NULL,
+                    topic_name     TEXT NOT NULL,
+                    schedule_type  TEXT,
+                    status         TEXT NOT NULL,
+                    message_count  INTEGER DEFAULT 0,
+                    error_text     TEXT,
+                    fired_at       TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS schedule_runs_fired_at_idx
+                ON schedule_runs(fired_at DESC)
+            """)
         finally:
             self._commit()
 

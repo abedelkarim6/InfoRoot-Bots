@@ -127,6 +127,8 @@ async def build_source_channel_map():
     new_map: dict = {}
     collections_cfg = db.get_all_collections()
     for coll_name, coll_data in collections_cfg.items():
+        if not coll_data.get('enabled', True):
+            continue
         for ch_identifier in coll_data.get('source_channels', []):
             if not ch_identifier:
                 continue
@@ -212,6 +214,8 @@ async def read_channel_messages(event):
         if not matching_collections and channel_username:
             collections_cfg = db.get_all_collections()
             for coll_name, coll_data in collections_cfg.items():
+                if not coll_data.get('enabled', True):
+                    continue
                 source_channels = coll_data.get('source_channels', [])
                 if channel_username in source_channels or f'@{channel_username}' in source_channels:
                     matching_collections.append(coll_name)
@@ -504,29 +508,12 @@ async def generate_and_send_summary(job_data):
         total_interim_msgs = sum(r['message_count'] for r in interim_rows)
 
         # ── Tier 1b: leftover raw messages (< 25, not yet interim-summarized) ─
-        raw_messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
-        # Filter to window
-        leftover = []
-        expired_raw_ids = []
-        for msg in raw_messages:
-            ts = msg.get('timestamp')
-            if ts:
-                if isinstance(ts, str):
-                    try:
-                        ts = datetime.datetime.fromisoformat(ts)
-                    except ValueError:
-                        ts = None
-                if ts:
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=BEIRUT_TZ)
-                    if ts < window_start:
-                        expired_raw_ids.append(msg['id'])
-                        continue
-            leftover.append(msg)
-
-        if expired_raw_ids:
-            db.mark_as_summarized(expired_raw_ids, 'interim', bot_name, topic_name, status='missed')
-            logger.info(f"[MISSED] {len(expired_raw_ids)} raw msgs outside window | Bot={bot_name} | Topic={topic_name}")
+        # Pass window_start so the DB query only returns messages within this schedule's
+        # window. Out-of-window messages are NOT marked as missed here — a wider-window
+        # schedule on the same topic will still find and process them. Truly expired
+        # messages (older than all schedule windows) are handled by cleanup_message_backlog()
+        # at startup.
+        leftover = db.get_messages_for_interim(bot_name, topic_name, limit=25, after_dt=window_start)
 
         total_msg_count = total_interim_msgs + len(leftover)
         logger.info(f"[SUMMARY] interim_batches={len(interim_rows)} | leftover_raw={len(leftover)} | total_msgs~={total_msg_count} | Bot={bot_name} | Topic={topic_name}")
@@ -580,7 +567,7 @@ async def generate_and_send_summary(job_data):
             collections_cfg = db.get_all_collections()
             target_channels = []
             for coll_name in bot_collections:
-                if coll_name in collections_cfg:
+                if coll_name in collections_cfg and collections_cfg[coll_name].get('enabled', True):
                     targets = collections_cfg[coll_name].get('target_channels', [])
                     target_channels.extend(targets)
             target_channels = list(set(target_channels))
@@ -617,7 +604,7 @@ async def generate_and_send_summary(job_data):
                 logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
                 db.save_summary(
                     summary_text=summary_text,
-                    message_count=total_msg_count,
+                    message_count=len(leftover_ids),
                     summary_type=schedule_type,
                     target_entity=str(target_chat),
                     bot_name=bot_name,
@@ -629,10 +616,16 @@ async def generate_and_send_summary(job_data):
 
         # ── Mark interim summaries as sent ───────────────────────────────────
         db.mark_interim_summaries_sent(interim_ids)
+        db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
+                            schedule_type=schedule_type, status='success',
+                            message_count=total_msg_count)
         logger.debug(f"[DONE] Bot={bot_name} | Topic={topic_name} | interim_batches={len(interim_ids)} | leftover={len(leftover_ids)}")
 
     except Exception as e:
         logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+        db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
+                            schedule_type=schedule_type, status='failed',
+                            error_text=str(e))
 
 # ==================== Speeches Interval ====================
 
@@ -677,7 +670,7 @@ async def _send_speech_buckets(job_id: str, job_data: dict, buckets: list,
             collections_cfg = db.get_all_collections()
             target_channels = []
             for coll_name in bot_cfg.get('collections', []):
-                if coll_name in collections_cfg:
+                if coll_name in collections_cfg and collections_cfg[coll_name].get('enabled', True):
                     target_channels.extend(collections_cfg[coll_name].get('target_channels', []))
             target_channels = list(set(target_channels))
 
@@ -777,6 +770,9 @@ async def generate_speech_buckets(job_data: dict):
 
     except Exception as e:
         logger.error(f"[SPEECH] Error in generate_speech_buckets: {e}", exc_info=True)
+        db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
+                            schedule_type=schedule_type, status='failed',
+                            error_text=str(e))
 
 
 async def trigger_summary(job_data):
@@ -792,23 +788,84 @@ async def trigger_summary(job_data):
 
 async def cleanup_message_backlog():
     """
-    Mark all messages older than 2 hours as 'missed' for the interim schedule type.
-    Prevents stale accumulated messages from being processed after restarts.
+    Mark unsummarized messages as 'missed' if they fall outside the schedule window
+    for their (bot, topic). Cutoff is computed per-topic using _compute_window_start():
+    - daily schedule  → only messages since last daily fire are kept
+    - hourly schedule → only messages since last hourly fire are kept
+    - interval 3h     → only messages from last 3h window are kept
+    A message is only marked stale when it is outside ALL configured schedule windows
+    for its topic (uses the earliest/furthest-back window start across all schedules).
     """
-    cutoff = datetime.datetime.now(BEIRUT_TZ) - datetime.timedelta(hours=2)
     try:
-        old_msgs = db.get_old_unsummarized_messages(cutoff)
+        bots_cfg = db.get_all_bots_config()
+
+        # Build per-(bot_name, topic_name) cutoff.
+        # Use the earliest window_start (furthest back in time) across all schedules
+        # for that topic — a message is stale only if it's outside every window.
+        topic_cutoffs: dict = {}  # (bot_name, topic_name) -> datetime
+        for bot_name, bot_data in bots_cfg.items():
+            for cat_data in bot_data.get('categories', {}).values():
+                for topic_name, topic_data in cat_data.get('topics', {}).items():
+                    if not topic_data.get('enabled', True):
+                        continue
+                    for schedule in topic_data.get('schedules', []):
+                        if not schedule.get('enabled', True):
+                            continue
+                        stype = schedule.get('type')
+                        if not stype:
+                            continue
+                        job_data = {
+                            'schedule_type':    stype,
+                            'sch_minute':       schedule.get('minute'),
+                            'sch_hour':         schedule.get('hour'),
+                            'sch_hours':        schedule.get('hours'),
+                            'sch_minutes':      schedule.get('minutes'),
+                            'sch_start_hour':   schedule.get('start_hour', 0),
+                            'sch_start_minute': schedule.get('start_minute', 0),
+                            'sch_end_hour':     schedule.get('end_hour'),
+                            'sch_end_minute':   schedule.get('end_minute'),
+                        }
+                        window_start = _compute_window_start(job_data)
+                        key = (bot_name, topic_name)
+                        # Keep the earliest (furthest back) window start across schedules
+                        if key not in topic_cutoffs or window_start < topic_cutoffs[key]:
+                            topic_cutoffs[key] = window_start
+
+        if not topic_cutoffs:
+            return
+
+        # Pre-filter DB with the globally earliest cutoff to avoid a full table scan
+        earliest_cutoff = min(topic_cutoffs.values())
+        old_msgs = db.get_old_unsummarized_messages(earliest_cutoff)
         if not old_msgs:
             return
+
+        missed = 0
         for msg in old_msgs:
-            bot_name = msg.get('bot_name')
+            bot_name   = msg.get('bot_name')
             topics_str = msg.get('topics') or ''
-            topics = [t.strip() for t in topics_str.split(',') if t.strip()]
-            if not bot_name or not topics:
+            topics     = [t.strip() for t in topics_str.split(',') if t.strip()]
+            msg_ts     = msg.get('timestamp')
+            if not bot_name or not topics or msg_ts is None:
                 continue
+            if isinstance(msg_ts, str):
+                try:
+                    msg_ts = datetime.datetime.fromisoformat(msg_ts)
+                except ValueError:
+                    continue
+            if msg_ts.tzinfo is None:
+                msg_ts = msg_ts.replace(tzinfo=BEIRUT_TZ)
+
             for topic_name in topics:
-                db.mark_as_summarized([msg['id']], 'interim', bot_name, topic_name, status='missed')
-        logger.info(f"[CLEANUP] Marked {len(old_msgs)} stale messages as missed")
+                cutoff = topic_cutoffs.get((bot_name, topic_name))
+                if cutoff is None:
+                    continue  # no schedule configured for this pair — leave untouched
+                if msg_ts < cutoff:
+                    db.mark_as_summarized([msg['id']], 'interim', bot_name, topic_name, status='missed')
+                    missed += 1
+
+        if missed:
+            logger.info(f"[CLEANUP] Marked {missed} stale messages as missed (per-schedule cutoffs)")
     except Exception as e:
         logger.warning(f"[CLEANUP] backlog cleanup failed: {e}")
 

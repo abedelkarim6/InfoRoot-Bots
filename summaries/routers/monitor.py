@@ -180,12 +180,33 @@ def get_missed_messages(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.get("/monitor/schedule-history")
+def get_schedule_history(
+    request: Request,
+    bot: str = Query(default=None),
+    topic: str = Query(default=None),
+    status: str = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    db = get_db()
+    try:
+        allowed_bots = _get_allowed_bots(request)
+        runs = db.get_schedule_history(
+            limit=limit, bot_name=bot, topic_name=topic,
+            status=status, allowed_bot_names=allowed_bots
+        )
+        return {'status': 'ok', 'runs': runs}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
     request: Request,
     days: int = Query(default=14, ge=1, le=365),
     filter_source: str = Query(default=None),
     filter_topic: str = Query(default=None),
+    filter_channels: str = Query(default=None),  # comma-separated channel usernames
 ):
     db = get_db()
     try:
@@ -197,11 +218,13 @@ def get_dashboard_stats(
                 allowed_bots = list(cfg.keys()) or ["__no_access__"]
             else:
                 allowed_bots = ["__no_access__"]
+        channels_list = [c.strip() for c in filter_channels.split(',') if c.strip()] if filter_channels else None
         data = db.get_dashboard_stats(
             days,
             filter_source=filter_source,
             filter_topic=filter_topic,
             filter_bot_names=allowed_bots,
+            filter_channels=channels_list,
         )
         return {'status': 'ok', **data}
     except Exception as e:

@@ -220,6 +220,14 @@
                         <option value="30">Last 30 days</option>
                     </select>
                 </div>
+                <div class="dash-filter-group">
+                    <span class="dash-filter-label">📺 Channels</span>
+                    <div class="mon-multi-select" id="dash-channel-ms-wrap">
+                        <button class="select mon-filter-sel mon-ms-btn" type="button"
+                                onclick="toggleDashChannelPicker()">All Channels <span class="mon-ms-arrow">▾</span></button>
+                        <div class="mon-ms-dropdown" id="dash-channel-ms-dd"></div>
+                    </div>
+                </div>
                 <button class="dash-filter-clear" id="dash-filter-clear-btn" onclick="clearDashboardFilters()" style="display:none">✕ Clear filters</button>
             </div>
 
@@ -450,6 +458,7 @@
                     <button class="mon-tab"         data-tab="messages"    onclick="switchMonTab('messages')">📥 Messages</button>
                     <button class="mon-tab"         data-tab="unclassified" onclick="switchMonTab('unclassified')">❓ Unclassified <span id="mon-uncl-badge" class="mon-uncl-badge" style="display:none;"></span></button>
                     <button class="mon-tab"         data-tab="missed"      onclick="switchMonTab('missed')">⏭ Missed <span id="mon-missed-badge" class="mon-uncl-badge" style="display:none;"></span></button>
+                    <button class="mon-tab"         data-tab="history"     onclick="switchMonTab('history')">📜 History</button>
                 </div>
 
                 <!-- Schedules tab -->
@@ -524,6 +533,20 @@
                     </div>
                     <div id="mon-missed-stats"></div>
                     <div id="mon-missed-content"><p class="mon-empty">Loading…</p></div>
+                </div>
+
+                <!-- History tab -->
+                <div id="mon-tab-history" class="mon-tab-panel" style="display:none;">
+                    <div class="mon-filter-bar">
+                        <select class="select mon-filter-sel" id="hist-filter-bot"    onchange="loadScheduleHistory()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="hist-filter-topic"  onchange="loadScheduleHistory()"><option value="">All Topics</option></select>
+                        <select class="select mon-filter-sel" id="hist-filter-status" onchange="loadScheduleHistory()">
+                            <option value="">All Statuses</option>
+                            <option value="success">✓ Success</option>
+                            <option value="failed">✗ Failed</option>
+                        </select>
+                    </div>
+                    <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>
                 </div>
             </div>
         </div>
@@ -1110,7 +1133,7 @@
     </div>
 
     <!-- ======== Logs Page ======== -->
-    <div id="logs-page" class="page" style="display:none">
+    <div id="logs-page" class="page">
         <div class="page-header">
             <h1 class="page-title">📋 System Logs</h1>
             <p class="page-subtitle">Live view of the last 1000 server log records. Admin only.</p>

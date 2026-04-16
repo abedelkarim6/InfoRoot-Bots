@@ -16,6 +16,8 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("app")
+logging.getLogger("apscheduler.schedulers").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors").setLevel(logging.WARNING)
 
 # Attach in-memory log buffer (used by the admin Logs page)
 # Must be called after basicConfig so the root logger is already configured.

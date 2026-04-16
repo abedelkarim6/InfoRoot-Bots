@@ -4257,11 +4257,12 @@ function switchMonTab(tab) {
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
-    ['schedules', 'summaries', 'messages', 'unclassified', 'missed'].forEach(t => {
+    ['schedules', 'summaries', 'messages', 'unclassified', 'missed', 'history'].forEach(t => {
         const el = document.getElementById('mon-tab-' + t);
         if (el) el.style.display = t === tab ? '' : 'none';
     });
     if (tab === 'messages' && !_allMessages.length) loadMonitorMessages();
+    if (tab === 'history') loadScheduleHistory();
     if (tab === 'unclassified') {
         // Restore clear/show-all button state from persisted timestamp
         const clearedAt = localStorage.getItem('mon-uncl-cleared-at');
@@ -6001,6 +6002,104 @@ function loadPrivacyPage() {
             card.innerHTML = '<p class="text-muted">Could not load Privacy Policy.</p>';
         });
 }
+
+// ==================== Schedule History Tab ====================
+(function _injectHistStyles() {
+    const s = document.createElement('style');
+    s.textContent = `
+        .hist-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+        .hist-table th { background:var(--bg-tertiary); color:var(--text-secondary);
+            font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+            padding:8px 12px; text-align:left; position:sticky; top:0; z-index:1;
+            border-bottom:1px solid var(--border-color); }
+        .hist-table td { padding:6px 12px; border-bottom:1px solid var(--border-color); vertical-align:middle; }
+        .hist-table tr:last-child td { border-bottom:none; }
+        .hist-table tr:hover td { background:var(--bg-tertiary); }
+        .hist-row-failed td { background:rgba(239,68,68,.04); }
+        .hist-time { white-space:nowrap; color:var(--text-muted); font-size:11.5px; }
+        .hist-badge-ok   { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px;
+            border-radius:20px; background:rgba(16,185,129,.15); color:#6ee7b7; }
+        .hist-badge-fail { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px;
+            border-radius:20px; background:rgba(239,68,68,.15); color:#fca5a5; }
+    `;
+    document.head.appendChild(s);
+})();
+
+async function loadScheduleHistory() {
+    const wrap = document.getElementById('mon-history-content');
+    if (!wrap) return;
+    wrap.innerHTML = '<p class="mon-empty">Loading…</p>';
+
+    const bot    = document.getElementById('hist-filter-bot')?.value    || '';
+    const topic  = document.getElementById('hist-filter-topic')?.value  || '';
+    const status = document.getElementById('hist-filter-status')?.value || '';
+
+    let url = '/api/monitor/schedule-history?limit=200';
+    if (bot)    url += '&bot='    + encodeURIComponent(bot);
+    if (topic)  url += '&topic='  + encodeURIComponent(topic);
+    if (status) url += '&status=' + encodeURIComponent(status);
+
+    const data = await api(url);
+    if (data.status !== 'ok') {
+        wrap.innerHTML = `<p class="mon-empty">Error: ${escapeHtml(data.message || '')}</p>`;
+        return;
+    }
+    const runs = data.runs || [];
+    _populateHistoryFilters(runs);
+    _renderScheduleHistory(runs);
+}
+
+function _populateHistoryFilters(runs) {
+    const bots   = [...new Set(runs.map(r => r.bot_name).filter(Boolean))].sort();
+    const topics = [...new Set(runs.map(r => r.topic_name).filter(Boolean))].sort();
+    _populateMonSelect('hist-filter-bot',   bots,   'All Bots');
+    _populateMonSelect('hist-filter-topic', topics, 'All Topics');
+}
+
+function _renderScheduleHistory(runs) {
+    const wrap = document.getElementById('mon-history-content');
+    if (!runs.length) {
+        wrap.innerHTML = '<p class="mon-empty" style="padding:24px">No schedule runs recorded yet.</p>';
+        return;
+    }
+    const rows = runs.map(r => {
+        const isOk     = r.status === 'success';
+        const rowCls   = isOk ? '' : 'hist-row-failed';
+        const statusEl = isOk
+            ? '<span class="hist-badge-ok">✓ Success</span>'
+            : '<span class="hist-badge-fail">✗ Failed</span>';
+        const typeCls  = { hourly: 'hourly', daily: 'daily', minute: 'minute', interval: 'interval' }[r.schedule_type] || '';
+        const errorBtn = (!isOk && r.error_text)
+            ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;"
+                  onclick="showHistError(this)"
+                  data-err="${escapeHtmlSys(r.error_text)}">View Error</button>`
+            : '—';
+        const timeStr = r.fired_at ? r.fired_at.replace('T', ' ').slice(0, 19) : '—';
+        return `<tr class="${rowCls}">
+            <td class="hist-time">${escapeHtml(timeStr)}</td>
+            <td>${escapeHtml(r.bot_name   || '—')}</td>
+            <td>${escapeHtml(r.topic_name || '—')}</td>
+            <td><span class="mon-type-badge ${typeCls}">${escapeHtml(r.schedule_type || '—')}</span></td>
+            <td>${statusEl}</td>
+            <td style="text-align:center">${r.message_count || 0}</td>
+            <td>${errorBtn}</td>
+        </tr>`;
+    }).join('');
+    wrap.innerHTML = `<div style="overflow-x:auto;max-height:70vh;overflow-y:auto;">
+        <table class="hist-table">
+            <thead><tr>
+                <th>Time</th><th>Bot</th><th>Topic</th><th>Type</th>
+                <th>Status</th><th>Msgs</th><th>Error</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    </div>`;
+}
+
+window.showHistError = function (btn) {
+    const err = btn.getAttribute('data-err') || '(no error text)';
+    showAlert(err);
+};
 
 // ==================== Logs Page ====================
 let _allLogs       = [];

@@ -168,12 +168,18 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_messages_for_interim(self, bot_name: str, topic_name: str, limit: int = 25) -> list:
-        """Get the oldest `limit` messages for (bot, topic) not yet interim-summarized."""
+    def get_messages_for_interim(self, bot_name: str, topic_name: str,
+                                limit: int = 25, after_dt=None) -> list:
+        """Get the oldest `limit` messages for (bot, topic) not yet interim-summarized.
+        If after_dt is provided, only messages with timestamp >= after_dt are returned
+        (used by scheduled summaries to stay within their own window without marking
+        out-of-window messages as missed, so wider-window schedules can still use them).
+        """
         try:
             cursor = self._get_cursor()
+            window_clause = "AND m.timestamp >= %s" if after_dt is not None else ""
             cursor.execute(
-                """SELECT m.* FROM messages m
+                f"""SELECT m.* FROM messages m
                    WHERE m.bot_name = %s
                      AND (
                          m.topics = %s
@@ -188,6 +194,7 @@ class SummariesDB(Database):
                            AND ms.topic_name = %s
                            AND ms.schedule_type = 'interim'
                      )
+                     {window_clause}
                    ORDER BY m.timestamp ASC
                    LIMIT %s""",
                 (
@@ -197,6 +204,7 @@ class SummariesDB(Database):
                     '%,' + topic_name + ',%',
                     '%,' + topic_name,
                     bot_name, topic_name,
+                    *([after_dt] if after_dt is not None else []),
                     limit,
                 )
             )
@@ -257,7 +265,7 @@ class SummariesDB(Database):
         try:
             cursor = self._get_cursor()
             cursor.execute(
-                """SELECT m.id, m.bot_name, m.topics FROM messages m
+                """SELECT m.id, m.bot_name, m.topics, m.timestamp FROM messages m
                    WHERE m.timestamp < %s
                      AND m.bot_name IS NOT NULL
                      AND NOT EXISTS (
@@ -332,6 +340,58 @@ class SummariesDB(Database):
                 d['preview'] = txt[:300]
                 if d['timestamp']:
                     d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def log_schedule_run(self, bot_name: str, topic_name: str, schedule_type: str,
+                         status: str, message_count: int = 0, error_text: str = None):
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """INSERT INTO schedule_runs
+                   (bot_name, topic_name, schedule_type, status, message_count, error_text)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (bot_name, topic_name, schedule_type, status, message_count, error_text)
+            )
+        finally:
+            self._commit()
+
+    def get_schedule_history(self, limit: int = 200, bot_name: str = None,
+                             topic_name: str = None, status: str = None,
+                             allowed_bot_names: list = None):
+        try:
+            cursor = self._get_cursor()
+            conditions = []
+            params = []
+            if allowed_bot_names is not None:
+                conditions.append("bot_name = ANY(%s)")
+                params.append(allowed_bot_names)
+            if bot_name:
+                conditions.append("bot_name = %s")
+                params.append(bot_name)
+            if topic_name:
+                conditions.append("topic_name = %s")
+                params.append(topic_name)
+            if status:
+                conditions.append("status = %s")
+                params.append(status)
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            params.append(limit)
+            cursor.execute(
+                f"""SELECT id, bot_name, topic_name, schedule_type, status,
+                           message_count, error_text, fired_at
+                    FROM schedule_runs {where}
+                    ORDER BY fired_at DESC LIMIT %s""",
+                params or None
+            )
+            rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                d = dict(row)
+                if d.get('fired_at'):
+                    d['fired_at'] = d['fired_at'].isoformat()
                 result.append(d)
             return result
         finally:
@@ -604,7 +664,8 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None, filter_bot_names: list = None) -> dict:
+    def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None,
+                            filter_bot_names: list = None, filter_channels: list = None) -> dict:
         try:
             """Return comprehensive analytics for the dashboard page."""
             days = max(1, min(365, int(days)))
@@ -612,35 +673,50 @@ class SummariesDB(Database):
 
             iv = "(%s * INTERVAL '1 day')"
 
-            src_clause   = " AND channel_username = %s" if filter_source else ""
-            topic_clause = " AND TRIM(t.topic) = %s"    if filter_topic  else ""
-            bot_clause   = " AND bot_name = ANY(%s)"    if filter_bot_names is not None else ""
+            # channels_clause: multi-channel include filter (from filter_channels tag picker)
+            channels_clause = " AND channel_username = ANY(%s)" if filter_channels else ""
+            src_clause      = " AND channel_username = %s"      if filter_source   else ""
+            topic_clause    = " AND TRIM(t.topic) = %s"         if filter_topic    else ""
+            bot_clause      = " AND bot_name = ANY(%s)"         if filter_bot_names is not None else ""
 
+            # p(): queries with channels + src + bot (no topic clause)
             def p(*base):
                 extra = []
+                if filter_channels:  extra.append(filter_channels)
                 if filter_source:    extra.append(filter_source)
-                if filter_topic:     extra.append(filter_topic)
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
+            # p_sum(): queries with bot only (summaries table has no channel col)
             def p_sum(*base):
                 extra = []
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
+            # p_topic(): queries with channels + src + topic + bot
             def p_topic(*base):
                 extra = []
+                if filter_channels:  extra.append(filter_channels)
                 if filter_source:    extra.append(filter_source)
                 if filter_topic:     extra.append(filter_topic)
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
+            # p_ch(): queries with channels + bot only (total_messages, no src/topic)
+            def p_ch(*base):
+                extra = []
+                if filter_channels:  extra.append(filter_channels)
+                if filter_bot_names is not None: extra.append(filter_bot_names)
+                return tuple(base) + tuple(extra)
+
+            # all_sources: no time filter — channels from deleted collections always appear
+            all_src_params = (filter_bot_names,) if filter_bot_names is not None else ()
             cursor.execute(f"""
                 SELECT DISTINCT channel_username AS source FROM messages
                 WHERE channel_username IS NOT NULL AND channel_username != ''
-                  AND timestamp >= NOW() - {iv}{bot_clause}
-                ORDER BY source LIMIT 200
-            """, (days,) + ((filter_bot_names,) if filter_bot_names is not None else ()))
+                {bot_clause}
+                ORDER BY source LIMIT 500
+            """, all_src_params or None)
             all_sources = [r['source'] for r in cursor.fetchall()]
 
             cursor.execute(f"""
@@ -654,20 +730,21 @@ class SummariesDB(Database):
             """, (days,) + ((filter_bot_names,) if filter_bot_names is not None else ()))
             all_topics = [r['topic'] for r in cursor.fetchall()]
 
-            cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE 1=1{bot_clause}", p_sum())
+            cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE 1=1{channels_clause}{bot_clause}",
+                           p_ch() or None)
             total_messages = cursor.fetchone()['cnt']
 
-            cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}{bot_clause}",
+            cursor.execute(f"SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= NOW() - {iv}{channels_clause}{src_clause}{bot_clause}",
                            p(days))
             period_messages = cursor.fetchone()['cnt']
 
-            cursor.execute(f"SELECT COUNT(*) AS cnt FROM summaries WHERE 1=1{bot_clause}", p_sum())
+            cursor.execute(f"SELECT COUNT(*) AS cnt FROM summaries WHERE 1=1{bot_clause}", p_sum() or None)
             total_summaries = cursor.fetchone()['cnt']
 
             cursor.execute(f"""
                 SELECT COUNT(DISTINCT channel_username) AS cnt FROM messages
                 WHERE channel_username IS NOT NULL AND channel_username != ''
-                  AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
+                  AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{bot_clause}
             """, p(days))
             active_sources = cursor.fetchone()['cnt']
 
@@ -677,13 +754,13 @@ class SummariesDB(Database):
                     FROM messages,
                          LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                     WHERE topics IS NOT NULL AND topics != ''
-                      AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
+                      AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{topic_clause}{bot_clause}
                     GROUP BY day ORDER BY day
                 """, p_topic(days))
             else:
                 cursor.execute(f"""
                     SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
-                    FROM messages WHERE timestamp >= NOW() - {iv}{src_clause}{bot_clause}
+                    FROM messages WHERE timestamp >= NOW() - {iv}{channels_clause}{src_clause}{bot_clause}
                     GROUP BY day ORDER BY day
                 """, p(days))
             messages_per_day = [{'day': str(r['day']), 'count': r['cnt']} for r in cursor.fetchall()]
@@ -693,21 +770,22 @@ class SummariesDB(Database):
                 FROM messages,
                      LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                 WHERE topics IS NOT NULL AND topics != ''
-                  AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
+                  AND TRIM(t.topic) != '' AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{topic_clause}{bot_clause}
                 GROUP BY topic ORDER BY cnt DESC LIMIT 20
             """, p_topic(days))
             messages_per_topic = [{'topic': r['topic'], 'count': r['cnt']} for r in cursor.fetchall()]
 
             top6 = [r['topic'] for r in messages_per_topic[:6]]
             if top6:
-                extra_trend = ((filter_source,) if filter_source else ()) + \
+                extra_trend = ((filter_channels,) if filter_channels else ()) + \
+                              ((filter_source,)   if filter_source   else ()) + \
                               ((filter_bot_names,) if filter_bot_names is not None else ())
                 cursor.execute(f"""
                     SELECT DATE(timestamp) AS day, TRIM(t.topic) AS topic, COUNT(*) AS cnt
                     FROM messages,
                          LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                     WHERE topics IS NOT NULL AND topics != ''
-                      AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
+                      AND TRIM(t.topic) = ANY(%s) AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{bot_clause}
                     GROUP BY day, topic ORDER BY day, topic
                 """, (top6, days) + extra_trend)
                 topic_trend = [{'day': str(r['day']), 'topic': r['topic'], 'count': r['cnt']}
@@ -722,7 +800,7 @@ class SummariesDB(Database):
                          LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
                     WHERE channel_username IS NOT NULL AND channel_username != ''
                       AND topics IS NOT NULL AND topics != ''
-                      AND timestamp >= NOW() - {iv}{src_clause}{topic_clause}{bot_clause}
+                      AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{topic_clause}{bot_clause}
                     GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
                 """, p_topic(days))
             else:
@@ -730,7 +808,7 @@ class SummariesDB(Database):
                     SELECT channel_username AS source, COUNT(*) AS cnt
                     FROM messages
                     WHERE channel_username IS NOT NULL AND channel_username != ''
-                      AND timestamp >= NOW() - {iv}{src_clause}{bot_clause}
+                      AND timestamp >= NOW() - {iv}{channels_clause}{src_clause}{bot_clause}
                     GROUP BY channel_username ORDER BY cnt DESC LIMIT 20
                 """, p(days))
             messages_per_source = [{'source': r['source'], 'count': r['cnt']} for r in cursor.fetchall()]
@@ -777,6 +855,7 @@ class SummariesDB(Database):
                 'all_topics':             all_topics,
                 'filter_source':          filter_source,
                 'filter_topic':           filter_topic,
+                'filter_channels':        filter_channels or [],
             }
         finally:
             self._commit()

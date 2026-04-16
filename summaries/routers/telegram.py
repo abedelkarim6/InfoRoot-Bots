@@ -23,6 +23,76 @@ def _get_dialogs():
     return result, None
 
 
+async def _live_fetch_admin_channels():
+    """Live-fetch all channels the admin userbot is subscribed to, refresh the DB cache, and return them.
+    Returns (result_dict, error_dict).
+    """
+    from utils.database import get_db
+    from utils.helpers import load_config
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl.types import Channel, Chat
+    import datetime
+
+    db = get_db()
+    if db is None:
+        return None, {"status": "error", "message": "Database not initialised"}
+
+    admin = db.get_admin_user()
+    session_str = admin.get("telegram_session") if admin else None
+    if not session_str:
+        cfg = load_config()
+        session_str = cfg.get("telegram", {}).get("string_session", "")
+    if not session_str:
+        return None, {"status": "error", "message": "No session string found in DB or config.yaml"}
+
+    cfg = load_config()
+    tg_cfg = cfg.get("telegram", {})
+    client = TelegramClient(StringSession(session_str), int(tg_cfg["api_id"]), tg_cfg["api_hash"])
+
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+    except asyncio.TimeoutError:
+        return None, {"status": "error", "message": "Connection timed out"}
+
+    try:
+        authorized = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+    except asyncio.TimeoutError:
+        await client.disconnect()
+        return None, {"status": "error", "message": "Authorization check timed out"}
+
+    if not authorized:
+        await client.disconnect()
+        return None, {"status": "error", "message": "Session not authorized — re-run get_ss.py"}
+
+    channels = []
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        if isinstance(entity, (Channel, Chat)):
+            is_broadcast = getattr(entity, 'broadcast', False)
+            is_megagroup = getattr(entity, 'megagroup', False)
+            can_post = getattr(entity, 'creator', False) or getattr(entity, 'admin_rights', None) is not None
+            channels.append({
+                'id': entity.id,
+                'title': entity.title,
+                'username': getattr(entity, 'username', None),
+                'is_broadcast': is_broadcast,
+                'is_megagroup': is_megagroup,
+                'can_post': can_post,
+            })
+
+    await client.disconnect()
+
+    # Refresh DB cache so bot.py and other callers stay in sync
+    try:
+        db.save_userbot_dialogs(channels)
+    except Exception as e:
+        logger.warning(f"[DIALOGS] Failed to update DB cache: {e}")
+
+    updated_at = datetime.datetime.utcnow().isoformat()
+    return {"channels": channels, "updated_at": updated_at}, None
+
+
 def _lookup_channel(channels: list, channel_id: str):
     """Find a channel in the cached list by @username or numeric ID."""
     stripped = channel_id.lstrip('@').strip()
@@ -44,11 +114,11 @@ def _lookup_channel(channels: list, channel_id: str):
 
 
 @router.get("/telegram/admin_channels")
-def get_admin_channels(request: Request):
-    """Return all channels the userbot is a member of (from DB cache).
+async def get_admin_channels(request: Request):
+    """Return all channels the userbot is a member of (live-fetched from Telegram).
     Available to any authenticated user — needed for the channel picker when
     creating or editing collections."""
-    result, err = _get_dialogs()
+    result, err = await _live_fetch_admin_channels()
     if err:
         return err
     return {"status": "ok", **result}
@@ -102,7 +172,7 @@ async def get_userbot_dialogs(request: Request):
     from utils.database import get_db
 
     if is_admin_request(request):
-        result, err = _get_dialogs()
+        result, err = await _live_fetch_admin_channels()
         if err:
             return err
         return {"status": "ok", **result}

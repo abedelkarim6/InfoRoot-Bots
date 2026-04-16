@@ -33,6 +33,9 @@ const TOOLTIP = {
 const GRID  = { color: 'rgba(45,55,72,0.6)', drawBorder: false };
 const TICKS = { color: '#64748b', font: { size: 11 } };
 
+/* ── Channel checkbox-filter state ─────────────────── */
+let _dashFilterChannels = new Set();
+
 /* ── Chart instance cache ─────────────────────────── */
 const _ch = {};
 function destroyChart(id) {
@@ -62,6 +65,7 @@ window.loadDashboardData = async function () {
   const days         = document.getElementById('dash-range')?.value || 14;
   const filterSource = document.getElementById('dash-filter-source')?.value || '';
   const filterTopic  = document.getElementById('dash-filter-topic')?.value  || '';
+  const filterChannels = [..._dashFilterChannels];
 
   // Show loading state in stat cards
   ['ds-total-msgs', 'ds-period-msgs', 'ds-summaries', 'ds-sources'].forEach(id => {
@@ -70,8 +74,9 @@ window.loadDashboardData = async function () {
   });
 
   let url = `/api/dashboard/stats?days=${days}`;
-  if (filterSource) url += `&filter_source=${encodeURIComponent(filterSource)}`;
-  if (filterTopic)  url += `&filter_topic=${encodeURIComponent(filterTopic)}`;
+  if (filterSource)          url += `&filter_source=${encodeURIComponent(filterSource)}`;
+  if (filterTopic)           url += `&filter_topic=${encodeURIComponent(filterTopic)}`;
+  if (filterChannels.length) url += `&filter_channels=${encodeURIComponent(filterChannels.join(','))}`;
 
   const data = await api(url);
   if (!data || data.status === 'error') {
@@ -91,7 +96,7 @@ window.loadDashboardData = async function () {
 
   /* ── Show/hide the clear-filters button ─────────── */
   const clearBtn = document.getElementById('dash-filter-clear-btn');
-  if (clearBtn) clearBtn.style.display = (filterSource || filterTopic) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (filterSource || filterTopic || _dashFilterChannels.size) ? '' : 'none';
 
   /* ── Stat cards ─────────────────────────────────── */
   document.getElementById('ds-total-msgs').textContent  = fmt(data.total_messages);
@@ -113,28 +118,25 @@ window.loadDashboardData = async function () {
   renderDashChannels();
 };
 
-/* ── Populate source & topic filter dropdowns ──── */
+/* ── Populate source, topic, and channel dropdowns ──── */
 function populateDashboardFilters(data, currentSource, currentTopic) {
   const srcEl   = document.getElementById('dash-filter-source');
   const topicEl = document.getElementById('dash-filter-topic');
-  if (!srcEl || !topicEl) return;
 
-  // --- Sources: merge DB list + config-defined source channels ---
+  // Sources: DB list + any configured channels not yet seen in DB
   const dbSources = data.all_sources || [];
   const cfgSources = [];
   if (window.globalConfig) {
     for (const coll of Object.values(window.globalConfig.collections || {})) {
       for (const ch of (coll.source_channels || [])) {
         const clean = ch.replace(/^@/, '');
-        if (!dbSources.includes(ch) && !dbSources.includes(clean)) {
-          cfgSources.push(ch);
-        }
+        if (!dbSources.includes(ch) && !dbSources.includes(clean)) cfgSources.push(ch);
       }
     }
   }
   const allSources = [...dbSources, ...cfgSources];
 
-  // --- Topics: merge DB list + config-defined topics ---
+  // Topics: DB list + config-defined topics
   const dbTopics = data.all_topics || [];
   const cfgTopics = [];
   if (window.globalConfig) {
@@ -148,20 +150,80 @@ function populateDashboardFilters(data, currentSource, currentTopic) {
   }
   const allTopics = [...dbTopics, ...cfgTopics];
 
-  const rebuild = (el, items, current, label) => {
+  const rebuildSingle = (el, items, current, label) => {
+    if (!el) return;
     el.innerHTML = `<option value="">${label}</option>`;
     items.forEach(v => {
       const opt = document.createElement('option');
-      opt.value = v;
-      opt.textContent = v;
+      opt.value = v; opt.textContent = v;
       if (v === current) opt.selected = true;
       el.appendChild(opt);
     });
   };
 
-  rebuild(srcEl,   allSources, currentSource, 'All Sources');
-  rebuild(topicEl, allTopics,  currentTopic,  'All Topics');
+  rebuildSingle(srcEl,   allSources, currentSource, 'All Sources');
+  rebuildSingle(topicEl, allTopics,  currentTopic,  'All Topics');
+
+  // Channel checkbox dropdown — rebuild keeping current selections
+  _buildDashChannelDropdown(allSources);
 }
+
+function _buildDashChannelDropdown(channels) {
+  const dd = document.getElementById('dash-channel-ms-dd');
+  if (!dd) return;
+  dd.innerHTML =
+    `<label class="mon-ms-item all-item">
+       <input type="checkbox" onchange="dashChannelToggleAll(this)" ${_dashFilterChannels.size === 0 ? 'checked' : ''}> All Channels
+     </label>` +
+    channels.map(ch =>
+      `<label class="mon-ms-item">
+         <input type="checkbox" value="${escapeHtmlSys(ch)}" onchange="dashChannelToggle(this)" ${_dashFilterChannels.has(ch) ? 'checked' : ''}>
+         ${escapeHtml(ch)}
+       </label>`
+    ).join('');
+  _updateDashChannelBtnLabel();
+}
+
+function _updateDashChannelBtnLabel() {
+  const btn = document.querySelector('#dash-channel-ms-wrap .mon-ms-btn');
+  if (!btn) return;
+  const arrow = '<span class="mon-ms-arrow">▾</span>';
+  if (_dashFilterChannels.size === 0) {
+    btn.innerHTML = `All Channels ${arrow}`;
+  } else if (_dashFilterChannels.size <= 2) {
+    btn.innerHTML = `${[..._dashFilterChannels].join(', ')} ${arrow}`;
+  } else {
+    btn.innerHTML = `${_dashFilterChannels.size} channels ${arrow}`;
+  }
+}
+
+window.toggleDashChannelPicker = function () {
+  const wrap = document.getElementById('dash-channel-ms-wrap');
+  if (wrap) wrap.classList.toggle('open');
+};
+
+window.dashChannelToggleAll = function (cb) {
+  _dashFilterChannels.clear();
+  // Uncheck all individual checkboxes
+  const dd = document.getElementById('dash-channel-ms-dd');
+  if (dd) dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
+  cb.checked = true; // keep "All" checked
+  _updateDashChannelBtnLabel();
+  loadDashboardData();
+};
+
+window.dashChannelToggle = function (cb) {
+  if (cb.checked) _dashFilterChannels.add(cb.value);
+  else _dashFilterChannels.delete(cb.value);
+  // Keep "All" checkbox in sync
+  const dd = document.getElementById('dash-channel-ms-dd');
+  if (dd) {
+    const allCb = dd.querySelector('.all-item input');
+    if (allCb) allCb.checked = _dashFilterChannels.size === 0;
+  }
+  _updateDashChannelBtnLabel();
+  loadDashboardData();
+};
 
 /* ── Clear all dashboard filters ─────────────────── */
 window.clearDashboardFilters = function () {
@@ -169,6 +231,15 @@ window.clearDashboardFilters = function () {
   const t = document.getElementById('dash-filter-topic');
   if (s) s.value = '';
   if (t) t.value = '';
+  _dashFilterChannels.clear();
+  // Reset checkboxes
+  const dd = document.getElementById('dash-channel-ms-dd');
+  if (dd) {
+    dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
+    const allCb = dd.querySelector('.all-item input');
+    if (allCb) allCb.checked = true;
+  }
+  _updateDashChannelBtnLabel();
   loadDashboardData();
 };
 
