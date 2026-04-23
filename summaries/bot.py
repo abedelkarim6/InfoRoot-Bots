@@ -292,16 +292,16 @@ async def read_channel_messages(event):
 
             topics, categories, keywords = categorizer(replaced_text, bot_name, db)
 
-            # if not topics:
-            #     logger.info(f"[CATEG] No topics matched | Bot: {bot_name} | @{channel_id} → {matching_collections}")
-            # else:
-            #     kw_display = keywords[:5] if keywords else []
-            #     kw_extra = f" (+{len(keywords)-5} more)" if keywords and len(keywords) > 5 else ""
-            #     logger.info(
-            #         f"[CATEG] Bot: {bot_name} | @{channel_id} → {matching_collections} | "
-            #         f"Topics: {topics} | Categories: {categories} | "
-            #         f"Keywords [{len(keywords or [])}]: {kw_display}{kw_extra}"
-            #     )
+            if not topics:
+                logger.info(f"[CATEG] No topics matched | Bot={bot_name} | @{channel_id}")
+            else:
+                kw_display = (keywords or [])[:5]
+                kw_extra = f" (+{len(keywords)-5} more)" if keywords and len(keywords) > 5 else ""
+                logger.info(
+                    f"[CATEG] Bot={bot_name} | @{channel_id} | "
+                    f"Topics={topics} | Categories={categories} | "
+                    f"Keywords[{len(keywords or [])}]={kw_display}{kw_extra}"
+                )
 
             message_id = db.add_message(
                 channel_id=channel_id_numeric,
@@ -318,7 +318,7 @@ async def read_channel_messages(event):
                 collection_name=collection_name_str,
                 msg_timestamp=event.message.date,
             )
-            # logger.info(f"[SAVED] msg#{message_id} | Bot: {bot_name} | @{channel_id} → {matching_collections}")
+            logger.info(f"[SAVED] msg#{message_id} | Bot={bot_name} | @{channel_id} | topics={topics}")
 
             # Trigger rolling 25-message interim summarization (fire-and-forget)
             if topics:
@@ -495,66 +495,56 @@ async def generate_and_send_summary(job_data):
     try:
         bots_cfg = db.get_all_bots_config()
         bot_cfg = bots_cfg.get(bot_name, {})
-        min_messages = bot_cfg.get('minimum_messages', 1)
+        min_messages = int(bot_cfg.get('minimum_messages') or 0)
 
         # ── Compute time window ──────────────────────────────────────────────
         window_start = _compute_window_start(job_data)
         logger.debug(f"[FIRE] Bot={bot_name} | Topic={topic_name} | Type={schedule_type} | window_start={window_start}")
 
-        # ── Tier 1: collect unsent interim summaries within window ───────────
-        interim_rows = db.get_unsent_interim_summaries(bot_name, topic_name, window_start)
-        interim_texts = [r['summary_text'] for r in interim_rows]
-        interim_ids   = [r['id'] for r in interim_rows]
-        total_interim_msgs = sum(r['message_count'] for r in interim_rows)
+        # ── Fetch all raw messages in window not yet used by THIS schedule type ──
+        # Each schedule type tracks its own consumed messages independently, so a topic
+        # with both hourly and daily schedules correctly includes all messages in each.
+        all_msgs = db.get_messages_for_schedule_window(
+            bot_name, topic_name, schedule_type, after_dt=window_start
+        )
+        total_msg_count = len(all_msgs)
+        logger.info(f"[SUMMARY] raw_msgs={total_msg_count} | Bot={bot_name} | Topic={topic_name} | Type={schedule_type}")
 
-        # ── Tier 1b: leftover raw messages (< 25, not yet interim-summarized) ─
-        # Pass window_start so the DB query only returns messages within this schedule's
-        # window. Out-of-window messages are NOT marked as missed here — a wider-window
-        # schedule on the same topic will still find and process them. Truly expired
-        # messages (older than all schedule windows) are handled by cleanup_message_backlog()
-        # at startup.
-        leftover = db.get_messages_for_interim(bot_name, topic_name, limit=25, after_dt=window_start)
-
-        total_msg_count = total_interim_msgs + len(leftover)
-        logger.info(f"[SUMMARY] interim_batches={len(interim_rows)} | leftover_raw={len(leftover)} | total_msgs~={total_msg_count} | Bot={bot_name} | Topic={topic_name}")
-
-        if not interim_texts and not leftover:
-            logger.info(f"[SKIP] Nothing to summarize | Bot={bot_name} | Topic={topic_name}")
+        if total_msg_count == 0:
+            logger.info(f"[SKIP] No messages to summarize | Bot={bot_name} | Topic={topic_name}")
             return
 
         if total_msg_count < min_messages:
             logger.info(f"[SKIP] Not enough messages ({total_msg_count}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
             return
 
-        # ── Build final summary ──────────────────────────────────────────────
+        # ── Build final summary — batch in groups of 25 if needed ────────────
         loop = asyncio.get_event_loop()
+        all_ids   = [m['id']   for m in all_msgs]
+        all_texts = [m['text'] for m in all_msgs]
 
-        # If there are leftover raw messages, summarize them first
-        leftover_summary = None
-        leftover_ids = [m['id'] for m in leftover]
-        if leftover:
-            leftover_texts = [m['text'] for m in leftover]
-            leftover_prompt = get_summary_prompt(leftover_texts, bot_name, prompt_key, topic_name=topic_name)
-            leftover_summary = await loop.run_in_executor(None, llm_client.generate_summary, leftover_prompt)
-            db.mark_as_summarized(leftover_ids, 'interim', bot_name, topic_name)
-
-        # Merge all parts (interim texts + leftover summary) into one final summary
-        all_parts = interim_texts + ([leftover_summary] if leftover_summary else [])
-
-        if len(all_parts) == 1:
-            # Only one piece — use it directly via the schedule prompt for proper formatting
-            final_prompt = get_summary_prompt(
-                [all_parts[0]], bot_name, prompt_key, topic_name=topic_name
-            )
-            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, final_prompt)
+        BATCH = 25
+        if len(all_texts) <= BATCH:
+            prompt = get_summary_prompt(all_texts, bot_name, prompt_key, topic_name=topic_name)
+            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
         else:
-            # Multiple interim summaries — merge them
-            merge_prompt = (
-                "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
-                "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                + "\n---\n".join(all_parts)
-            )
-            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
+            # Summarize each 25-message chunk, then merge
+            partial_summaries = []
+            for i in range(0, len(all_texts), BATCH):
+                chunk = all_texts[i:i + BATCH]
+                p = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
+                s = await loop.run_in_executor(None, llm_client.generate_summary, p)
+                partial_summaries.append(s)
+
+            if len(partial_summaries) == 1:
+                summary_text = partial_summaries[0]
+            else:
+                merge_prompt = (
+                    "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
+                    "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+                    + "\n---\n".join(partial_summaries)
+                )
+                summary_text = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
 
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)}")
 
@@ -604,22 +594,22 @@ async def generate_and_send_summary(job_data):
                 logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
                 db.save_summary(
                     summary_text=summary_text,
-                    message_count=len(leftover_ids),
+                    message_count=total_msg_count,
                     summary_type=schedule_type,
                     target_entity=str(target_chat),
                     bot_name=bot_name,
                     topic_name=topic_name,
-                    message_ids=leftover_ids,
+                    message_ids=all_ids,
                 )
             except Exception as e:
                 logger.error(f"[ERROR] send_message to {target_chat}: {e}")
 
-        # ── Mark interim summaries as sent ───────────────────────────────────
-        db.mark_interim_summaries_sent(interim_ids)
+        # ── Mark all messages as consumed for this schedule type ─────────────
+        db.mark_as_summarized(all_ids, schedule_type, bot_name, topic_name)
         db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
                             schedule_type=schedule_type, status='success',
                             message_count=total_msg_count)
-        logger.debug(f"[DONE] Bot={bot_name} | Topic={topic_name} | interim_batches={len(interim_ids)} | leftover={len(leftover_ids)}")
+        logger.debug(f"[DONE] Bot={bot_name} | Topic={topic_name} | msgs={total_msg_count}")
 
     except Exception as e:
         logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
@@ -738,7 +728,8 @@ async def generate_speech_buckets(job_data: dict):
 
         bots_cfg = db.get_all_bots_config()
         bot_cfg  = bots_cfg.get(bot_name, {})
-        if len(in_window) < bot_cfg.get('minimum_messages', 1):
+        min_messages = int(bot_cfg.get('minimum_messages') or 0)
+        if len(in_window) < min_messages:
             return
 
         texts   = [m['text'] for m in in_window]

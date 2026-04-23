@@ -486,9 +486,8 @@
                             <option value="hourly">Hourly</option>
                             <option value="daily">Daily</option>
                             <option value="minute">Minute</option>
+                            <option value="interval">Interval</option>
                         </select>
-                        <input type="text" class="input mon-filter-search" id="sum-search" placeholder="🔍 Search preview…" oninput="applyMonSummaryFilters()">
-                        <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('summaries')" title="Export visible rows to CSV">⬇ Export</button>
                     </div>
                     <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>
                 </div>
@@ -500,6 +499,9 @@
                         <select class="select mon-filter-sel" id="msg-filter-channel" onchange="applyMonMessageFilters()"><option value="">All Channels</option></select>
                         <select class="select mon-filter-sel" id="msg-filter-topic"   onchange="applyMonMessageFilters()"><option value="">All Topics</option></select>
                         <input type="text" class="input mon-filter-search" id="msg-search" placeholder="🔍 Search preview…" oninput="applyMonMessageFilters()">
+                        <input type="date" class="input" id="msg-filter-date-from" style="max-width:145px" title="From date" onchange="applyMonMessageFilters()">
+                        <input type="date" class="input" id="msg-filter-date-to"   style="max-width:145px" title="To date"   onchange="applyMonMessageFilters()">
+                        <button class="btn btn-sm" id="msg-flat-btn" onclick="toggleMsgFlatView()" title="Show all messages flat (latest first), no grouping">≡ Flat</button>
                         <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('messages')" title="Export visible rows to CSV">⬇ Export</button>
                     </div>
                     <div id="mon-messages-content"><p class="mon-empty">Loading…</p></div>
@@ -508,10 +510,14 @@
                 <!-- Unclassified tab -->
                 <div id="mon-tab-unclassified" class="mon-tab-panel" style="display:none;">
                     <div class="mon-filter-bar">
-                        <select class="select mon-filter-sel" id="uncl-filter-bot"  onchange="loadUnclassifiedMessages()"><option value="">All Bots</option></select>
-                        <select class="select mon-filter-sel" id="uncl-filter-coll" onchange="loadUnclassifiedMessages()"><option value="">All Collections</option></select>
+                        <select class="select mon-filter-sel" id="uncl-filter-bot"     onchange="loadUnclassifiedMessages()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="uncl-filter-coll"    onchange="loadUnclassifiedMessages()"><option value="">All Collections</option></select>
+                        <select class="select mon-filter-sel" id="uncl-filter-channel" onchange="_renderUnclassified(_unclMessages)"><option value="">All Sources</option></select>
                         <input type="text" class="input mon-filter-search" id="uncl-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadUnclassifiedMessages()">
                         <button class="btn btn-secondary btn-sm" onclick="loadUnclassifiedMessages()">Search</button>
+                        <input type="date" class="input" id="uncl-filter-date-from" style="max-width:145px" title="From date" onchange="_renderUnclassified(_unclMessages)">
+                        <input type="date" class="input" id="uncl-filter-date-to"   style="max-width:145px" title="To date"   onchange="_renderUnclassified(_unclMessages)">
+                        <button class="btn btn-sm" id="uncl-flat-btn" onclick="toggleUnclFlatView()" title="Show all messages flat (latest first), no grouping">≡ Flat</button>
                         <button class="btn btn-sm" id="uncl-group-btn" onclick="toggleUnclGroupView()">🔤 Group by words</button>
                         <button class="btn btn-sm btn-secondary" onclick="openExportModal('unclassified')" title="Export visible rows to CSV">⬇ Export</button>
                         <button class="btn btn-sm btn-secondary" id="uncl-clear-btn" onclick="clearUnclassifiedView()" style="margin-left:auto;" title="Hide current messages from view (still in DB)">✕ Clear view</button>
@@ -524,10 +530,14 @@
                 <!-- Missed tab -->
                 <div id="mon-tab-missed" class="mon-tab-panel" style="display:none;">
                     <div class="mon-filter-bar">
-                        <select class="select mon-filter-sel" id="missed-filter-bot"   onchange="loadMissedMessages()"><option value="">All Bots</option></select>
-                        <select class="select mon-filter-sel" id="missed-filter-topic" onchange="loadMissedMessages()"><option value="">All Topics</option></select>
+                        <select class="select mon-filter-sel" id="missed-filter-bot"     onchange="loadMissedMessages()"><option value="">All Bots</option></select>
+                        <select class="select mon-filter-sel" id="missed-filter-topic"   onchange="loadMissedMessages()"><option value="">All Topics</option></select>
+                        <select class="select mon-filter-sel" id="missed-filter-channel" onchange="_renderMissed(_missedMessages)"><option value="">All Sources</option></select>
                         <input type="text" class="input mon-filter-search" id="missed-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadMissedMessages()">
                         <button class="btn btn-secondary btn-sm" onclick="loadMissedMessages()">Search</button>
+                        <input type="date" class="input" id="missed-filter-date-from" style="max-width:145px" title="From date" onchange="_renderMissed(_missedMessages)">
+                        <input type="date" class="input" id="missed-filter-date-to"   style="max-width:145px" title="To date"   onchange="_renderMissed(_missedMessages)">
+                        <button class="btn btn-sm" id="missed-flat-btn" onclick="toggleMissedFlatView()" title="Show all messages flat (latest first), no grouping">≡ Flat</button>
                         <button class="btn btn-sm btn-secondary" id="missed-clear-btn" onclick="clearMissedView()" style="margin-left:auto;" title="Hide current messages from view (still in DB)">✕ Clear view</button>
                         <button class="btn btn-sm btn-secondary" id="missed-showall-btn" onclick="showAllMissedView()" style="display:none;" title="Show previously cleared messages">↩ Show all</button>
                     </div>

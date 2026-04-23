@@ -4201,9 +4201,8 @@ async function loadMonitorData() {
     if (!isFirstLoad && pageEl) pageEl.style.minHeight = pageEl.offsetHeight + 'px';
 
     renderMonitorBots(data.bots || {});
-    renderMonSummaries(data.recent_summaries || []);
-    // Only re-render summaries filter on auto-refresh (lightweight); messages/unclassified are on-demand
-    if (_monActiveTab === 'summaries') applyMonSummaryFilters();
+    renderMonSummaries(data.recent_summaries || []);  // async — fires stats fetch in background
+    // applyMonSummaryFilters is called inside renderMonSummaries after stats load
     startMonitorCountdowns();
 
     // Load unclassified badge count in background (respects cleared-at)
@@ -4276,8 +4275,8 @@ function switchMonTab(tab) {
         const clearedAt = localStorage.getItem('mon-missed-cleared-at');
         const clearBtn   = document.getElementById('missed-clear-btn');
         const showAllBtn = document.getElementById('missed-showall-btn');
-        if (clearBtn)   clearBtn.style.display   = clearedAt ? 'none' : '';
-        if (showAllBtn) showAllBtn.style.display  = clearedAt ? ''     : 'none';
+        if (clearBtn)   clearBtn.style.display   = '';
+        if (showAllBtn) showAllBtn.style.display  = clearedAt ? '' : 'none';
         if (!_missedMessages.length) loadMissedMessages();
     }
 }
@@ -4615,55 +4614,150 @@ function formatDuration(ms) {
     return `${sec}s`;
 }
 
-// ---------- Recent Summaries ----------
-function renderMonSummaries(summaries) {
+// ---------- Summaries Tab (Schedule Overview) ----------
+let _scheduleStats = [];  // today's sent/failed from /api/monitor/schedule-stats
+
+function _scheduleStartTime(sch) {
+    const type = sch.type;
+    if (type === 'daily') {
+        const h = String(sch.hour   ?? 0).padStart(2, '0');
+        const m = String(sch.minute ?? 0).padStart(2, '0');
+        return `${h}:${m}`;
+    }
+    if (type === 'hourly') return `:${String(sch.minute ?? 0).padStart(2, '0')} (each hour)`;
+    if (type === 'interval') {
+        const h = String(sch.start_hour   ?? 0).padStart(2, '0');
+        const m = String(sch.start_minute ?? 0).padStart(2, '0');
+        return `${h}:${m}`;
+    }
+    if (type === 'minute') return '00:00';
+    return '—';
+}
+
+function _scheduleRepeatsText(sch) {
+    const type = sch.type;
+    if (type === 'daily')    return 'once daily';
+    if (type === 'hourly')   return `every hour at :${String(sch.minute ?? 0).padStart(2, '0')}`;
+    if (type === 'minute')   return `every ${sch.minute ?? '?'} min`;
+    if (type === 'interval') {
+        const h = sch.hours ?? 1;
+        return `every ${h} hour${h !== 1 ? 's' : ''}`;
+    }
+    return '—';
+}
+
+function _scheduleFiresPerDay(sch) {
+    const type = sch.type;
+    if (type === 'daily')    return 1;
+    if (type === 'hourly')   return 24;
+    if (type === 'minute')   return Math.floor(1440 / (sch.minute || 60));
+    if (type === 'interval') {
+        const startH = sch.start_hour   ?? 0;
+        const endH   = sch.end_hour     ?? 24;
+        const hours  = sch.hours        ?? 1;
+        return Math.max(1, Math.floor((endH - startH) / hours));
+    }
+    return 0;
+}
+
+async function renderMonSummaries(summaries) {
+    // summaries arg kept for compatibility but no longer used directly in the table
     _allSummaries = summaries;
-    // Populate dynamic dropdowns
-    const bots   = [...new Set(summaries.map(s => s.bot_name).filter(Boolean))].sort();
-    const topics = [...new Set(summaries.map(s => s.topic_name).filter(Boolean))].sort();
-    _populateMonSelect('sum-filter-bot',   bots,   'All Bots');
-    _populateMonSelect('sum-filter-topic', topics, 'All Topics');
+
+    // Populate bot/topic filter dropdowns from bots_data
+    const botsData = _monitorData?.bots || {};
+    const allBots   = Object.keys(botsData).sort();
+    const allTopics = [...new Set(
+        Object.values(botsData).flatMap(b =>
+            Object.values(b.categories || {}).flatMap(c => Object.keys(c.topics || {}))
+        )
+    )].sort();
+    _populateMonSelect('sum-filter-bot',   allBots,   'All Bots');
+    _populateMonSelect('sum-filter-topic', allTopics, 'All Topics');
+
+    // Fetch today's stats
+    const statsData = await api('/api/monitor/schedule-stats');
+    _scheduleStats = (statsData.status === 'ok') ? (statsData.stats || []) : [];
+
     applyMonSummaryFilters();
 }
 
 function applyMonSummaryFilters() {
-    const bot    = document.getElementById('sum-filter-bot')?.value   || '';
-    const topic  = document.getElementById('sum-filter-topic')?.value || '';
-    const type   = document.getElementById('sum-filter-type')?.value  || '';
-    const search = (document.getElementById('sum-search')?.value || '').trim().toLowerCase();
-
-    let filtered = _allSummaries;
-    if (bot)    filtered = filtered.filter(s => s.bot_name    === bot);
-    if (topic)  filtered = filtered.filter(s => s.topic_name  === topic);
-    if (type)   filtered = filtered.filter(s => s.summary_type === type);
-    if (search) filtered = filtered.filter(s => (s.preview || '').toLowerCase().includes(search));
+    const filterBot   = document.getElementById('sum-filter-bot')?.value   || '';
+    const filterTopic = document.getElementById('sum-filter-topic')?.value || '';
+    const filterType  = document.getElementById('sum-filter-type')?.value  || '';
 
     const el = document.getElementById('mon-summaries-content');
-    if (!filtered.length) {
-        el.innerHTML = `<p class="mon-empty">${_allSummaries.length ? 'No summaries match the filters.' : 'No summaries sent yet.'}</p>`;
+    if (!el) return;
+
+    const botsData = _monitorData?.bots || {};
+
+    // Build a stats lookup: key = "bot|topic|type"
+    const statsLookup = {};
+    for (const s of _scheduleStats) {
+        const key = `${s.bot_name}|${s.topic_name}|${s.schedule_type}`;
+        statsLookup[key] = { sent: s.sent || 0, failed: s.failed || 0 };
+    }
+
+    // Flatten all schedules from bots config
+    const rows = [];
+    for (const [botName, botData] of Object.entries(botsData)) {
+        if (filterBot && botName !== filterBot) continue;
+        if (!botData.enabled) continue;
+        for (const [, catData] of Object.entries(botData.categories || {})) {
+            if (!catData.enabled) continue;
+            for (const [topicName, topicData] of Object.entries(catData.topics || {})) {
+                if (filterTopic && topicName !== filterTopic) continue;
+                if (!topicData.enabled) continue;
+                for (const sch of (topicData.schedules || [])) {
+                    if (!sch.enabled) continue;
+                    if (filterType && sch.type !== filterType) continue;
+
+                    const key    = `${botName}|${topicName}|${sch.type}`;
+                    const stat   = statsLookup[key] || { sent: 0, failed: 0 };
+                    const total  = _scheduleFiresPerDay(sch);
+                    const remain = Math.max(0, total - stat.sent - stat.failed);
+
+                    rows.push({ botName, topicName, sch, stat, total, remain });
+                }
+            }
+        }
+    }
+
+    if (!rows.length) {
+        el.innerHTML = '<p class="mon-empty">No enabled schedules found.</p>';
         return;
     }
-    const rows = filtered.map(s => {
-        const ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '—';
-        const typeCls = s.summary_type || 'hourly';
-        const count = s.message_count ?? '—';
-        const msgsCell = s.message_ids
-            ? `<span class="mon-msgs-link" onclick="showSummaryMessages(${s.id})">${count}</span>`
-            : count;
+
+    const tableRows = rows.map(({ botName, topicName, sch, stat, total, remain }) => {
+        const typeCls   = sch.type || 'hourly';
+        const startTime = _scheduleStartTime(sch);
+        const repeats   = _scheduleRepeatsText(sch);
+        const sentCell   = stat.sent   > 0 ? `<span style="color:var(--success,#22c55e);font-weight:600;">${stat.sent}</span>`   : `<span style="color:var(--text-muted);">0</span>`;
+        const failedCell = stat.failed > 0 ? `<span style="color:var(--danger);font-weight:600;">${stat.failed}</span>`          : `<span style="color:var(--text-muted);">0</span>`;
+        const remainCell = remain       > 0 ? `<span style="color:var(--text-secondary);">${remain}</span>`                      : `<span style="color:var(--text-muted);">0</span>`;
         return `<tr>
-            <td style="white-space:nowrap;font-size:11px">${ts}</td>
-            <td>${escapeHtml(s.bot_name || '—')}</td>
-            <td>${escapeHtml(s.topic_name || '—')}</td>
-            <td><span class="mon-type-badge ${typeCls}">${escapeHtml(s.summary_type || '—')}</span></td>
-            <td style="text-align:center;">${msgsCell}</td>
-            <td>${escapeHtml(s.target_entity || '—')}</td>
-            <td class="mon-ellipsis" title="${escapeHtml(s.preview || '')}">${escapeHtml(s.preview || '')}</td>
+            <td>${escapeHtml(botName)}</td>
+            <td>${escapeHtml(topicName)}</td>
+            <td><span class="mon-type-badge ${typeCls}">${escapeHtml(sch.type)}</span></td>
+            <td style="white-space:nowrap;font-size:12px;">${escapeHtml(startTime)}</td>
+            <td style="font-size:12px;">${escapeHtml(repeats)}</td>
+            <td style="text-align:center;">${sentCell}</td>
+            <td style="text-align:center;">${failedCell}</td>
+            <td style="text-align:center;">${remainCell} <span style="color:var(--text-muted);font-size:11px;">/ ${total}</span></td>
         </tr>`;
     }).join('');
+
     el.innerHTML = `<div style="overflow-x:auto;">
         <table class="mon-table">
-            <thead><tr><th>Time</th><th>Bot</th><th>Topic</th><th>Type</th><th>Msgs</th><th>Target</th><th>Preview</th></tr></thead>
-            <tbody>${rows}</tbody>
+            <thead><tr>
+                <th>Bot</th><th>Topic</th><th>Type</th>
+                <th>Start Time</th><th>Repeats</th>
+                <th style="text-align:center;">Sent Today</th>
+                <th style="text-align:center;">Failed Today</th>
+                <th style="text-align:center;">Remaining</th>
+            </tr></thead>
+            <tbody>${tableRows}</tbody>
         </table></div>`;
 }
 
@@ -4776,7 +4870,7 @@ function _clearSumMsgFilters() {
 function _closeSummaryMessages() {
     _sumMsgData = [];
     _sumMsgId   = null;
-    // Rebuild the summaries tab HTML
+    // Rebuild the summaries tab HTML (matches index.html structure)
     const panel = document.getElementById('mon-tab-summaries');
     panel.innerHTML = `
         <div class="mon-filter-bar">
@@ -4787,9 +4881,8 @@ function _closeSummaryMessages() {
                 <option value="hourly">Hourly</option>
                 <option value="daily">Daily</option>
                 <option value="minute">Minute</option>
+                <option value="interval">Interval</option>
             </select>
-            <input type="text" class="input mon-filter-search" id="sum-search" placeholder="🔍 Search preview…" oninput="applyMonSummaryFilters()">
-            <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('summaries')" title="Export visible rows to CSV">⬇ Export</button>
         </div>
         <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>`;
     renderMonSummaries(_allSummaries || []);
@@ -4833,17 +4926,33 @@ function renderMonMessages() {
     applyMonMessageFilters();
 }
 
+let _msgFlatView = false;
+
+function toggleMsgFlatView() {
+    _msgFlatView = !_msgFlatView;
+    const btn = document.getElementById('msg-flat-btn');
+    if (btn) {
+        btn.classList.toggle('btn-primary', _msgFlatView);
+        btn.classList.toggle('btn-secondary', !_msgFlatView);
+    }
+    applyMonMessageFilters();
+}
+
 function applyMonMessageFilters() {
-    const coll    = document.getElementById('msg-filter-coll')?.value    || '';
-    const channel = document.getElementById('msg-filter-channel')?.value || '';
-    const topic   = document.getElementById('msg-filter-topic')?.value   || '';
-    const search  = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
+    const coll     = document.getElementById('msg-filter-coll')?.value      || '';
+    const channel  = document.getElementById('msg-filter-channel')?.value   || '';
+    const topic    = document.getElementById('msg-filter-topic')?.value     || '';
+    const search   = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
+    const dateFrom = document.getElementById('msg-filter-date-from')?.value || '';
+    const dateTo   = document.getElementById('msg-filter-date-to')?.value   || '';
 
     let filtered = _allMessages;
-    if (coll)    filtered = filtered.filter(m => m.collection === coll);
-    if (channel) filtered = filtered.filter(m => `@${m.channel_username}` === channel);
-    if (topic)   filtered = filtered.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
-    if (search)  filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+    if (coll)     filtered = filtered.filter(m => m.collection === coll);
+    if (channel)  filtered = filtered.filter(m => `@${m.channel_username}` === channel);
+    if (topic)    filtered = filtered.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
+    if (search)   filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+    if (dateFrom) filtered = filtered.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
+    if (dateTo)   filtered = filtered.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
 
     const el = document.getElementById('mon-messages-content');
     if (!filtered.length) {
@@ -4851,43 +4960,76 @@ function applyMonMessageFilters() {
         return;
     }
 
-    // Group: collection → channel → [messages]
-    const grouped = {};
-    for (const msg of filtered) {
-        const c  = msg.collection || '—';
-        const ch = msg.channel_username ? `@${msg.channel_username}` : `id:${msg.channel_id}`;
-        if (!grouped[c])     grouped[c]     = {};
-        if (!grouped[c][ch]) grouped[c][ch] = [];
-        grouped[c][ch].push(msg);
-    }
+    let html = '';
 
-    let html = Object.entries(grouped).map(([collName, channels]) => {
-        const chHtml = Object.entries(channels).map(([chName, msgs]) => {
-            const rowsHtml = msgs.map(m => {
-                const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-                const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
-                    .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-                const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
-                    .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-                const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
-                    .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-                return `<tr>
-                    <td style="white-space:nowrap;font-size:11px;">${ts}</td>
-                    <td>${topicTags}</td>
-                    <td>${catTags}</td>
-                    <td>${kwTags}</td>
-                    <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
-                </tr>`;
-            }).join('');
-            return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
-                <div style="overflow-x:auto;">
-                <table class="mon-table">
-                    <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
-                    <tbody>${rowsHtml}</tbody>
-                </table></div>`;
+    if (_msgFlatView) {
+        // Flat view: all messages sorted latest first, no grouping
+        const sorted = [...filtered].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        const rowsHtml = sorted.map(m => {
+            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ch = m.channel_username ? `@${m.channel_username}` : `id:${m.channel_id}`;
+            const cname = m.collection || '—';
+            const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
+                .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+            const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
+                .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+            const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
+                .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+            return `<tr>
+                <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                <td>${escapeHtml(ch)}</td>
+                <td>${escapeHtml(cname)}</td>
+                <td>${topicTags}</td>
+                <td>${catTags}</td>
+                <td>${kwTags}</td>
+                <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+            </tr>`;
         }).join('');
-        return `<div class="mon-coll-hdr">📦 ${escapeHtml(collName)}</div>${chHtml}`;
-    }).join('');
+        html = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;padding:0 4px;">${sorted.length} message${sorted.length===1?'':'s'}</div>
+            <div style="overflow-x:auto;">
+            <table class="mon-table">
+                <thead><tr><th>Time</th><th>Source</th><th>Collection</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
+                <tbody>${rowsHtml}</tbody>
+            </table></div>`;
+    } else {
+        // Grouped view: collection → channel → messages
+        const grouped = {};
+        for (const msg of filtered) {
+            const c  = msg.collection || '—';
+            const ch = msg.channel_username ? `@${msg.channel_username}` : `id:${msg.channel_id}`;
+            if (!grouped[c])     grouped[c]     = {};
+            if (!grouped[c][ch]) grouped[c][ch] = [];
+            grouped[c][ch].push(msg);
+        }
+
+        html = Object.entries(grouped).map(([collName, channels]) => {
+            const chHtml = Object.entries(channels).map(([chName, msgs]) => {
+                const rowsHtml = msgs.map(m => {
+                    const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+                    const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
+                        .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                    const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
+                        .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                    const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
+                        .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                    return `<tr>
+                        <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                        <td>${topicTags}</td>
+                        <td>${catTags}</td>
+                        <td>${kwTags}</td>
+                        <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+                    </tr>`;
+                }).join('');
+                return `<div class="mon-ch-hdr">📢 ${escapeHtml(chName)} <span class="text-muted">(${msgs.length})</span></div>
+                    <div style="overflow-x:auto;">
+                    <table class="mon-table">
+                        <thead><tr><th>Time</th><th>Topics</th><th>Categories</th><th>Keywords</th><th>Preview</th></tr></thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table></div>`;
+            }).join('');
+            return `<div class="mon-coll-hdr">📦 ${escapeHtml(collName)}</div>${chHtml}`;
+        }).join('');
+    }
 
     if (_msgHasMore) {
         html += `<div style="text-align:center;padding:16px;">
@@ -4914,15 +5056,26 @@ function _populateMonSelect(id, values, allLabel) {
 let _unclInitialized = false;
 let _unclMessages    = [];
 let _unclGrouped     = false;
+let _unclFlatView    = false;
 let _unclClearedAt   = localStorage.getItem('mon-uncl-cleared-at') || null;
 
 function toggleUnclGroupView() {
     _unclGrouped = !_unclGrouped;
+    if (_unclGrouped) _unclFlatView = false; // mutually exclusive
     const btn = document.getElementById('uncl-group-btn');
-    if (btn) {
-        btn.classList.toggle('btn-primary', _unclGrouped);
-        btn.classList.toggle('btn-secondary', !_unclGrouped);
-    }
+    const flatBtn = document.getElementById('uncl-flat-btn');
+    if (btn) { btn.classList.toggle('btn-primary', _unclGrouped); btn.classList.toggle('btn-secondary', !_unclGrouped); }
+    if (flatBtn) { flatBtn.classList.remove('btn-primary'); flatBtn.classList.add('btn-secondary'); }
+    _renderUnclassified(_unclMessages);
+}
+
+function toggleUnclFlatView() {
+    _unclFlatView = !_unclFlatView;
+    if (_unclFlatView) _unclGrouped = false; // mutually exclusive
+    const btn = document.getElementById('uncl-flat-btn');
+    const grpBtn = document.getElementById('uncl-group-btn');
+    if (btn) { btn.classList.toggle('btn-primary', _unclFlatView); btn.classList.toggle('btn-secondary', !_unclFlatView); }
+    if (grpBtn) { grpBtn.classList.remove('btn-primary'); grpBtn.classList.add('btn-secondary'); }
     _renderUnclassified(_unclMessages);
 }
 
@@ -4969,10 +5122,29 @@ function _renderUnclassified(messages) {
     const content = document.getElementById('mon-uncl-content');
     if (!content) return;
 
+    // Apply cleared-at filter
     const clearedAtMs = _unclClearedAt ? new Date(_unclClearedAt).getTime() : null;
-    const visible = clearedAtMs
+    let visible = clearedAtMs
         ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > clearedAtMs)
         : messages;
+
+    // Apply channel filter
+    const chFilter = document.getElementById('uncl-filter-channel')?.value || '';
+    if (chFilter) visible = visible.filter(m => (m.channel_username || '') === chFilter);
+
+    // Apply date filters
+    const dateFrom = document.getElementById('uncl-filter-date-from')?.value || '';
+    const dateTo   = document.getElementById('uncl-filter-date-to')?.value   || '';
+    if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
+    if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
+
+    // Populate channel dropdown from loaded data (once)
+    const chSel = document.getElementById('uncl-filter-channel');
+    if (chSel && chSel.options.length <= 1) {
+        const channels = [...new Set(messages.map(m => m.channel_username).filter(Boolean))].sort();
+        channels.forEach(ch => { const o = document.createElement('option'); o.value = ch; o.textContent = `@${ch}`; chSel.appendChild(o); });
+        if (chFilter) chSel.value = chFilter;
+    }
 
     if (!visible.length) {
         content.innerHTML = _unclClearedAt
@@ -4981,14 +5153,14 @@ function _renderUnclassified(messages) {
         return;
     }
 
-    // use the filtered list for rendering
-    messages = visible;
-
-    if (_unclGrouped) {
-        _renderUnclGroupedByWords(messages, content);
+    if (_unclFlatView) {
+        _renderUnclFlat(visible, content);
+    } else if (_unclGrouped) {
+        _renderUnclGroupedByWords(visible, content);
     } else {
-        _renderUnclByChannel(messages, content);
+        _renderUnclByChannel(visible, content);
     }
+
     // Append load-more button
     if (_unclHasMore) {
         content.insertAdjacentHTML('beforeend', `<div style="text-align:center;padding:16px;">
@@ -4998,6 +5170,29 @@ function _renderUnclassified(messages) {
     } else if (_unclMessages.length > _UNCL_PAGE_SIZE) {
         content.insertAdjacentHTML('beforeend', `<p class="text-muted" style="text-align:center;padding:8px;font-size:12px;">All ${_unclMessages.length} messages loaded</p>`);
     }
+}
+
+function _renderUnclFlat(messages, content) {
+    const sorted = [...messages].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    const rowsHtml = sorted.map(m => {
+        const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const ch = m.channel_username ? `@${m.channel_username}` : `id:${m.channel_id}`;
+        const cname = m.collection_name || '—';
+        const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '—';
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+            <td>${escapeHtml(ch)}</td>
+            <td>${escapeHtml(cname)}</td>
+            <td>${botTag}</td>
+            <td class="mon-ellipsis" title="${escapeHtmlSys(m.preview || '')}">${escapeHtml(m.preview || '')}</td>
+        </tr>`;
+    }).join('');
+    content.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;padding:0 4px;">${sorted.length} message${sorted.length===1?'':'s'}</div>
+        <div style="overflow-x:auto;">
+        <table class="mon-table">
+            <thead><tr><th>Time</th><th>Source</th><th>Collection</th><th>Bot</th><th>Preview</th></tr></thead>
+            <tbody>${rowsHtml}</tbody>
+        </table></div>`;
 }
 
 function _renderUnclByChannel(messages, content) {
@@ -5136,7 +5331,10 @@ async function loadUnclassifiedMessages(append = false) {
         _unclOffset = 0;
         _unclHasMore = true;
         _unclMessages = [];
-        if (!_unclMessages.length) content.innerHTML = '<p class="mon-empty">Loading…</p>';
+        _unclInitialized = false; // reset so dropdowns rebuild
+        const chSel = document.getElementById('uncl-filter-channel');
+        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
+        content.innerHTML = '<p class="mon-empty">Loading…</p>';
     }
     const scrollY = window.scrollY;
 
@@ -5178,6 +5376,9 @@ async function loadUnclassifiedMessages(append = false) {
         _populateMonSelect('uncl-filter-coll', colls, 'All Collections');
         if (bot)  document.getElementById('uncl-filter-bot').value  = bot;
         if (coll) document.getElementById('uncl-filter-coll').value = coll;
+        // Reset channel dropdown so _renderUnclassified can re-populate from messages
+        const chSel = document.getElementById('uncl-filter-channel');
+        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
         _unclInitialized = true;
     }
 
@@ -5222,7 +5423,15 @@ let _missedMessages  = [];
 let _missedOffset    = 0;
 let _missedHasMore   = true;
 let _missedClearedAt = localStorage.getItem('mon-missed-cleared-at') || null;
+let _missedFlatView  = false;
 const _MISSED_PAGE_SIZE = 50;
+
+function toggleMissedFlatView() {
+    _missedFlatView = !_missedFlatView;
+    const btn = document.getElementById('missed-flat-btn');
+    if (btn) { btn.classList.toggle('btn-primary', _missedFlatView); btn.classList.toggle('btn-secondary', !_missedFlatView); }
+    _renderMissed(_missedMessages);
+}
 
 async function loadMissedMessages(append = false) {
     const content = document.getElementById('mon-missed-content');
@@ -5230,6 +5439,8 @@ async function loadMissedMessages(append = false) {
         _missedOffset   = 0;
         _missedHasMore  = true;
         _missedMessages = [];
+        const chSel = document.getElementById('missed-filter-channel');
+        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
         if (content) content.innerHTML = '<p class="mon-empty">Loading…</p>';
     }
     const scrollY = window.scrollY;
@@ -5298,10 +5509,29 @@ function _renderMissed(messages) {
     const content = document.getElementById('mon-missed-content');
     if (!content) return;
 
+    // Apply cleared-at filter
     const missedClearedAtMs = _missedClearedAt ? new Date(_missedClearedAt).getTime() : null;
-    const visible = missedClearedAtMs
+    let visible = missedClearedAtMs
         ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > missedClearedAtMs)
         : messages;
+
+    // Apply channel filter
+    const chFilter = document.getElementById('missed-filter-channel')?.value || '';
+    if (chFilter) visible = visible.filter(m => (m.channel_username || '') === chFilter);
+
+    // Apply date filters
+    const dateFrom = document.getElementById('missed-filter-date-from')?.value || '';
+    const dateTo   = document.getElementById('missed-filter-date-to')?.value   || '';
+    if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
+    if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
+
+    // Populate channel dropdown from loaded data
+    const chSel = document.getElementById('missed-filter-channel');
+    if (chSel && chSel.options.length <= 1) {
+        const channels = [...new Set(messages.map(m => m.channel_username).filter(Boolean))].sort();
+        channels.forEach(ch => { const o = document.createElement('option'); o.value = ch; o.textContent = `@${ch}`; chSel.appendChild(o); });
+        if (chFilter) chSel.value = chFilter;
+    }
 
     if (!visible.length) {
         content.innerHTML = _missedClearedAt
@@ -5310,30 +5540,54 @@ function _renderMissed(messages) {
         return;
     }
 
-    // Group by bot / topic
-    const groups = {};
-    for (const m of visible) {
-        const key = `${m.bot_name || '?'} › ${m.topic_name || '?'}`;
-        if (!groups[key]) groups[key] = [];
-        groups[key].push(m);
-    }
-
     let html = '';
-    for (const [key, msgs] of Object.entries(groups)) {
-        const rows = msgs.map(m => `
-            <tr>
-                <td style="white-space:nowrap;font-size:11px;">${m.timestamp ? m.timestamp.replace('T',' ').slice(0,16) : '—'}</td>
-                <td><span class="mon-tag">${escapeHtml(m.channel_username || String(m.channel_id || '?'))}</span></td>
+
+    if (_missedFlatView) {
+        // Flat view: all messages sorted latest first
+        const sorted = [...visible].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        const rows = sorted.map(m => {
+            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ch = m.channel_username ? `@${m.channel_username}` : String(m.channel_id || '?');
+            return `<tr>
+                <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+                <td><span class="mon-tag">${escapeHtml(ch)}</span></td>
+                <td>${escapeHtml(m.bot_name || '—')}</td>
+                <td>${escapeHtml(m.topic_name || '—')}</td>
                 <td><span class="mon-tag cat">${escapeHtml(m.schedule_type || '—')}</span></td>
                 <td class="mon-ellipsis">${escapeHtml(m.preview || '—')}</td>
-            </tr>`).join('');
-        html += `<div class="mon-ch-hdr">⏭ ${escapeHtml(key)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(${msgs.length})</span></div>
+            </tr>`;
+        }).join('');
+        html = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;padding:0 4px;">${sorted.length} message${sorted.length===1?'':'s'}</div>
             <div style="overflow-x:auto;">
             <table class="mon-table">
-                <thead><tr><th>Time</th><th>Source</th><th>Schedule</th><th>Preview</th></tr></thead>
+                <thead><tr><th>Time</th><th>Source</th><th>Bot</th><th>Topic</th><th>Schedule</th><th>Preview</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>`;
+    } else {
+        // Grouped view: bot › topic
+        const groups = {};
+        for (const m of visible) {
+            const key = `${m.bot_name || '?'} › ${m.topic_name || '?'}`;
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(m);
+        }
+        for (const [key, msgs] of Object.entries(groups)) {
+            const rows = msgs.map(m => `
+                <tr>
+                    <td style="white-space:nowrap;font-size:11px;">${m.timestamp ? m.timestamp.replace('T',' ').slice(0,16) : '—'}</td>
+                    <td><span class="mon-tag">${escapeHtml(m.channel_username || String(m.channel_id || '?'))}</span></td>
+                    <td><span class="mon-tag cat">${escapeHtml(m.schedule_type || '—')}</span></td>
+                    <td class="mon-ellipsis">${escapeHtml(m.preview || '—')}</td>
+                </tr>`).join('');
+            html += `<div class="mon-ch-hdr">⏭ ${escapeHtml(key)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(${msgs.length})</span></div>
+                <div style="overflow-x:auto;">
+                <table class="mon-table">
+                    <thead><tr><th>Time</th><th>Source</th><th>Schedule</th><th>Preview</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table></div>`;
+        }
     }
+
     content.innerHTML = html;
 
     if (_missedHasMore) {
@@ -5347,11 +5601,13 @@ function _renderMissed(messages) {
 function clearMissedView() {
     _missedClearedAt = new Date().toISOString();
     localStorage.setItem('mon-missed-cleared-at', _missedClearedAt);
-    document.getElementById('missed-clear-btn').style.display   = 'none';
     document.getElementById('missed-showall-btn').style.display = '';
     // Reset badge immediately — background poll will fetch only new messages
     const badge = document.getElementById('mon-missed-badge');
     if (badge) { badge.textContent = '0'; badge.style.display = 'none'; }
+    // Reset stats bar
+    const statsEl = document.getElementById('mon-missed-stats');
+    if (statsEl) statsEl.innerHTML = '';
     _renderMissed(_missedMessages);
 }
 
@@ -6075,13 +6331,16 @@ function _renderScheduleHistory(runs) {
                   data-err="${escapeHtmlSys(r.error_text)}">View Error</button>`
             : '—';
         const timeStr = r.fired_at ? r.fired_at.replace('T', ' ').slice(0, 19) : '—';
+        const msgsCell = r.summary_id
+            ? `<span class="mon-msgs-link" onclick="showHistoryMessages(${r.summary_id})">${r.message_count || 0}</span>`
+            : (r.message_count || 0);
         return `<tr class="${rowCls}">
             <td class="hist-time">${escapeHtml(timeStr)}</td>
             <td>${escapeHtml(r.bot_name   || '—')}</td>
             <td>${escapeHtml(r.topic_name || '—')}</td>
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(r.schedule_type || '—')}</span></td>
             <td>${statusEl}</td>
-            <td style="text-align:center">${r.message_count || 0}</td>
+            <td style="text-align:center">${msgsCell}</td>
             <td>${errorBtn}</td>
         </tr>`;
     }).join('');
@@ -6098,8 +6357,146 @@ function _renderScheduleHistory(runs) {
 
 window.showHistError = function (btn) {
     const err = btn.getAttribute('data-err') || '(no error text)';
-    showAlert(err);
+
+    // Parse a friendly label from the error string
+    let label = 'Schedule Error';
+    let detail = err;
+    let isKnown = false;
+
+    if (/429|resource.?exhausted/i.test(err)) {
+        label = '429 Resource Exhausted — AI quota limit reached';
+        isKnown = true;
+    } else if (/499|cancelled/i.test(err)) {
+        label = '499 Cancelled — the AI request was cancelled';
+        isKnown = true;
+    } else if (/500|internal/i.test(err)) {
+        label = '500 Internal Server Error';
+        isKnown = true;
+    } else if (/503|unavailable/i.test(err)) {
+        label = '503 Service Unavailable — AI backend is down';
+        isKnown = true;
+    }
+
+    const safeErr = escapeHtml(detail);
+    const safeLabel = escapeHtml(label);
+
+    const html = `
+        <div style="font-weight:600;color:var(--danger);margin-bottom:10px;">${safeLabel}</div>
+        ${isKnown ? `<p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">
+            ${/429|exhausted/i.test(err)
+                ? 'The AI API rate limit was hit. The next scheduled run should succeed automatically once the quota resets.'
+                : /499|cancel/i.test(err)
+                ? 'The request was cancelled before the AI could respond — usually a timeout or network interruption. The next run will retry.'
+                : 'An error occurred with the AI backend.'}
+        </p>` : ''}
+        <details style="margin-top:8px;">
+            <summary style="cursor:pointer;font-size:12px;color:var(--text-muted);user-select:none;">Show technical details</summary>
+            <pre style="margin-top:8px;font-size:11px;background:var(--bg-secondary,#f5f5f5);padding:10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow-y:auto;">${safeErr}</pre>
+        </details>`;
+
+    showAlert(html, { title: 'Schedule Run Error', icon: '⚠️' });
 };
+
+// ---------- History Source Messages — inline view ----------
+let _histMsgData = [];
+
+async function showHistoryMessages(summaryId) {
+    _histMsgData = [];
+    const panel = document.getElementById('mon-tab-history');
+    panel.innerHTML = `
+        <div class="sum-msg-page">
+            <div class="sum-msg-page-header">
+                <button class="btn btn-secondary btn-sm" onclick="_closeHistoryMessages()">‹ Back to History</button>
+                <h3 style="margin:0;font-size:15px">Source Messages</h3>
+            </div>
+            <div class="mon-filter-bar" style="flex-wrap:wrap;gap:8px">
+                <input type="text" class="input mon-filter-search" id="hmsg-search"
+                       placeholder="🔍 Search message text…" oninput="_renderHistMsgTable()">
+                <select class="select mon-filter-sel" id="hmsg-filter-source" onchange="_renderHistMsgTable()">
+                    <option value="">All Sources</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="_clearHistMsgFilters()">✕ Clear</button>
+            </div>
+            <div id="hmsg-table-wrap"><p class="mon-empty">Loading…</p></div>
+        </div>`;
+
+    const data = await api(`/api/monitor/summary-messages?id=${summaryId}`);
+    const wrap = document.getElementById('hmsg-table-wrap');
+    if (!wrap) return;
+
+    if (data.status !== 'ok' || !data.messages?.length) {
+        wrap.innerHTML = `<p class="mon-empty">No linked messages found.</p>`;
+        return;
+    }
+    _histMsgData = data.messages;
+
+    const sources = [...new Set(_histMsgData.map(m => m.channel_username).filter(Boolean))].sort();
+    const sel = document.getElementById('hmsg-filter-source');
+    if (sel) sources.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = '@' + s; sel.appendChild(o); });
+
+    _renderHistMsgTable();
+}
+
+function _renderHistMsgTable() {
+    const wrap = document.getElementById('hmsg-table-wrap');
+    if (!wrap) return;
+
+    const search = (document.getElementById('hmsg-search')?.value || '').toLowerCase();
+    const source = document.getElementById('hmsg-filter-source')?.value || '';
+
+    let filtered = _histMsgData;
+    if (search) filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+    if (source) filtered = filtered.filter(m => m.channel_username === source);
+
+    if (!filtered.length) {
+        wrap.innerHTML = `<p class="mon-empty">No messages match filters.</p>`;
+        return;
+    }
+
+    const rows = filtered.map(m => {
+        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const src = m.channel_username ? `@${m.channel_username}` : '—';
+        const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
+        const bot = m.bot_name         ? escapeHtml(m.bot_name)         : '—';
+        const top = m.topics           ? escapeHtml(m.topics)           : '—';
+        const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
+        const txt = escapeHtml(m.preview || '');
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+            <td>${src}</td>
+            <td>${col}</td>
+            <td>${bot}</td>
+            <td>${top}</td>
+            <td>${kw}</td>
+            <td class="smp-msg-cell" title="${txt}">${txt}</td>
+        </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${filtered.length} message${filtered.length === 1 ? '' : 's'}</div>
+        <div style="overflow-x:auto">
+            <table class="mon-table smp-table">
+                <thead><tr>
+                    <th>Date / Time</th><th>Source</th><th>Collection</th>
+                    <th>Bot</th><th>Topics</th><th>Keywords</th><th>Message</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+function _clearHistMsgFilters() {
+    const s = document.getElementById('hmsg-search');
+    const src = document.getElementById('hmsg-filter-source');
+    if (s) s.value = '';
+    if (src) src.value = '';
+    _renderHistMsgTable();
+}
+
+function _closeHistoryMessages() {
+    _histMsgData = [];
+    loadScheduleHistory();
+}
 
 // ==================== Logs Page ====================
 let _allLogs       = [];

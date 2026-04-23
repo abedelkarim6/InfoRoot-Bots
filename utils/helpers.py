@@ -336,6 +336,10 @@ def categorizer(text, bot_name, db=None):
                 topic_matched = True
                 if topic_name not in found_topics:
                     found_topics.append(topic_name)
+                    import logging as _log
+                    _log.getLogger(__name__).info(
+                        f"[CATCH_ALL] Matched | Bot={bot_name} | Topic={topic_name} | text={text[:80]!r}"
+                    )
 
             if topic_matched and category_name not in found_categories:
                 found_categories.append(category_name)

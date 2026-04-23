@@ -212,6 +212,47 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    def get_messages_for_schedule_window(self, bot_name: str, topic_name: str,
+                                         schedule_type: str, after_dt=None) -> list:
+        """Get ALL messages for (bot, topic) within window not yet consumed by this specific
+        schedule_type. Unlike get_messages_for_interim, this filters by the concrete schedule
+        type (hourly/daily/etc.) so that multiple schedules on the same topic each see their
+        own independent message pool."""
+        try:
+            cursor = self._get_cursor()
+            window_clause = "AND m.timestamp >= %s" if after_dt is not None else ""
+            cursor.execute(
+                f"""SELECT m.* FROM messages m
+                   WHERE m.bot_name = %s
+                     AND (
+                         m.topics = %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                         OR m.topics LIKE %s
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM message_summarizations ms
+                         WHERE ms.message_id = m.id
+                           AND ms.bot_name   = %s
+                           AND ms.topic_name = %s
+                           AND ms.schedule_type = %s
+                     )
+                     {window_clause}
+                   ORDER BY m.timestamp ASC""",
+                (
+                    bot_name,
+                    topic_name,
+                    topic_name + ',%',
+                    '%,' + topic_name + ',%',
+                    '%,' + topic_name,
+                    bot_name, topic_name, schedule_type,
+                    *([after_dt] if after_dt is not None else []),
+                )
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            self._commit()
+
     def save_interim_summary(self, bot_name: str, topic_name: str,
                              summary_text: str, message_count: int) -> int:
         """Insert a new interim summary and return its id."""
@@ -358,6 +399,29 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    def get_today_schedule_stats(self, allowed_bot_names: list = None) -> list:
+        """Returns today's sent/failed counts per (bot_name, topic_name, schedule_type)."""
+        try:
+            cursor = self._get_cursor()
+            conditions = ["fired_at >= CURRENT_DATE"]
+            params = []
+            if allowed_bot_names is not None:
+                conditions.append("bot_name = ANY(%s)")
+                params.append(allowed_bot_names)
+            where = " AND ".join(conditions)
+            cursor.execute(
+                f"""SELECT bot_name, topic_name, schedule_type,
+                           COUNT(*) FILTER (WHERE status = 'success') AS sent,
+                           COUNT(*) FILTER (WHERE status = 'failed')  AS failed
+                    FROM schedule_runs
+                    WHERE {where}
+                    GROUP BY bot_name, topic_name, schedule_type""",
+                params or None
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        finally:
+            self._commit()
+
     def get_schedule_history(self, limit: int = 200, bot_name: str = None,
                              topic_name: str = None, status: str = None,
                              allowed_bot_names: list = None):
@@ -380,10 +444,17 @@ class SummariesDB(Database):
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             params.append(limit)
             cursor.execute(
-                f"""SELECT id, bot_name, topic_name, schedule_type, status,
-                           message_count, error_text, fired_at
-                    FROM schedule_runs {where}
-                    ORDER BY fired_at DESC LIMIT %s""",
+                f"""SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
+                           r.message_count, r.error_text, r.fired_at,
+                           (SELECT s.id FROM summaries s
+                            WHERE s.bot_name = r.bot_name
+                              AND s.topic_name = r.topic_name
+                              AND s.message_ids IS NOT NULL
+                              AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
+                            ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
+                            LIMIT 1) AS summary_id
+                    FROM schedule_runs r {where}
+                    ORDER BY r.fired_at DESC LIMIT %s""",
                 params or None
             )
             rows = cursor.fetchall()

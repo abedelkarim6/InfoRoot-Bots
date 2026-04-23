@@ -180,6 +180,17 @@ def get_missed_messages(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.get("/monitor/schedule-stats")
+def get_schedule_stats(request: Request):
+    db = get_db()
+    try:
+        allowed_bots = _get_allowed_bots(request)
+        stats = db.get_today_schedule_stats(allowed_bot_names=allowed_bots)
+        return {'status': 'ok', 'stats': stats}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/monitor/schedule-history")
 def get_schedule_history(
     request: Request,
