@@ -487,13 +487,13 @@ class ScheduleControlToolkit(Toolkit):
           - 'hourly'   — runs every hour at :MM (set minute=30 for :30)
           - 'daily'    — runs once per day (set hour and minute)
           - 'minute'   — runs every N minutes (set minute=N)
-          - 'interval' — runs every N hours (set hours, start_hour, start_minute)
+          - 'interval_hourly' — runs every N hours (set hours, start_hour, start_minute)
 
         Args:
             bot_name: Bot name (partial match).
             category_name: Category name (partial match).
             topic_name: Topic name (partial match).
-            schedule_type: One of 'hourly', 'daily', 'minute', 'interval'.
+            schedule_type: One of 'hourly', 'daily', 'minute', 'interval_hourly'.
             name: Display name for the schedule (optional).
             enabled: Whether the schedule is active (default True).
             prompt_key: Prompt key to use for summary generation (optional).

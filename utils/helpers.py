@@ -2,6 +2,7 @@ import asyncio
 import collections
 import datetime
 import io
+import math
 import os
 import re
 import sys
@@ -198,7 +199,8 @@ _topic_patterns: dict = {}
 def _build_topic_pattern(keywords: list):
     """
     Compile a single combined regex for all keywords in a topic.
-    Also builds a lowercase→original-keyword map for result reconstruction.
+    No \\b word boundaries — Arabic attached particles (بالحرب, للحرب, etc.) must
+    match even without surrounding spaces. re.escape + IGNORECASE for safety.
     Returns (compiled_re | None, {lower: original}).
     """
     kw_lower_map: dict = {}
@@ -210,25 +212,8 @@ def _build_topic_pattern(keywords: list):
         valid_escaped.append(re.escape(kw))
     if not valid_escaped:
         return None, kw_lower_map
-    try:
-        pattern = re.compile(r'\b(' + '|'.join(valid_escaped) + r')\b', re.IGNORECASE)
-        return pattern, kw_lower_map
-    except re.error:
-        # Some keywords couldn't be combined — filter out individually broken ones
-        good_escaped: list = []
-        good_map: dict = {}
-        for kw in keywords:
-            if not kw:
-                continue
-            try:
-                re.compile(rf'\b{re.escape(kw)}\b')
-                good_escaped.append(re.escape(kw))
-                good_map[kw.lower()] = kw
-            except re.error:
-                pass
-        if not good_escaped:
-            return None, good_map
-        return re.compile(r'\b(' + '|'.join(good_escaped) + r')\b', re.IGNORECASE), good_map
+    pattern = re.compile('(' + '|'.join(valid_escaped) + ')', re.IGNORECASE)
+    return pattern, kw_lower_map
 
 
 def _refresh_bots_cache(db=None):
@@ -348,3 +333,98 @@ def categorizer(text, bot_name, db=None):
         return None, None, None
 
     return found_topics, found_categories, found_keywords
+
+
+# ==================== Schedule Window ====================
+
+def compute_window_start(job_data: dict, tz=None) -> datetime.datetime:
+    """Return the previous scheduled fire time for a schedule, given its job_data dict.
+
+    job_data fields mirror what bot.py passes to APScheduler:
+      schedule_type, sch_start_hour, sch_start_minute, sch_hours, sch_minutes,
+      sch_hour, sch_minute, sch_end_hour, sch_end_minute.
+
+    tz: a ZoneInfo-compatible timezone. Defaults to Asia/Beirut.
+    """
+    if tz is None:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo('Asia/Beirut')
+        except Exception:
+            tz = datetime.timezone.utc
+
+    schedule_type = job_data.get('schedule_type', '')
+    now = datetime.datetime.now(tz)
+
+    try:
+        if schedule_type == 'interval_hourly':
+            start_h = int(job_data.get('sch_start_hour') or 0)
+            start_m = int(job_data.get('sch_start_minute') or 0)
+            hours   = int(job_data.get('sch_hours') or 1)
+            end_h   = job_data.get('sch_end_hour')
+            end_m   = job_data.get('sch_end_minute')
+            # Interval schedules without an explicit end time stop at 23:59 (same default
+            # as generate_and_send_summary). Required so the n==0 day-restart case works
+            # correctly: the first fire at start_hour looks back to yesterday's 23:59
+            # instead of returning window_start == now (which yields zero messages).
+            if end_h is None:
+                end_h, end_m = 23, 59
+
+            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            if anchor > now:
+                anchor -= datetime.timedelta(days=1)
+
+            elapsed_seconds = (now - anchor).total_seconds()
+            n = math.floor(elapsed_seconds / (hours * 3600))
+
+            if n == 0:
+                yesterday_anchor = anchor - datetime.timedelta(days=1)
+                return yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
+            return anchor + datetime.timedelta(hours=(n - 1) * hours)
+
+        elif schedule_type == 'interval_minutes':
+            start_h = int(job_data.get('sch_start_hour') or 0)
+            start_m = int(job_data.get('sch_start_minute') or 0)
+            minutes = int(job_data.get('sch_minutes') or 1)
+            end_h   = job_data.get('sch_end_hour')
+            end_m   = job_data.get('sch_end_minute')
+            if end_h is None:
+                end_h, end_m = 23, 59
+
+            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            if anchor > now:
+                anchor -= datetime.timedelta(days=1)
+
+            elapsed_seconds = (now - anchor).total_seconds()
+            n = math.floor(elapsed_seconds / (minutes * 60))
+
+            if n == 0:
+                yesterday_anchor = anchor - datetime.timedelta(days=1)
+                return yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
+            return anchor + datetime.timedelta(minutes=(n - 1) * minutes)
+
+        elif schedule_type == 'hourly':
+            target_m = int(job_data.get('sch_minute') or 0)
+            candidate = now.replace(minute=target_m, second=0, microsecond=0)
+            if candidate > now:
+                candidate -= datetime.timedelta(hours=1)
+            return candidate - datetime.timedelta(hours=1)
+
+        elif schedule_type == 'daily':
+            target_h = int(job_data.get('sch_hour') or 0)
+            target_m = int(job_data.get('sch_minute') or 0)
+            candidate = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
+            if candidate > now:
+                candidate -= datetime.timedelta(days=1)
+            return candidate - datetime.timedelta(days=1)
+
+        elif schedule_type == 'minute':
+            n = int(job_data.get('sch_minute') or 1)
+            floored_m = (now.minute // n) * n
+            current_fire = now.replace(minute=floored_m, second=0, microsecond=0)
+            return current_fire - datetime.timedelta(minutes=n)
+
+    except Exception:
+        pass
+
+    return now - datetime.timedelta(hours=24)

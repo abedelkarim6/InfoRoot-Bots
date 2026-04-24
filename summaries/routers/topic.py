@@ -276,7 +276,7 @@ def add_topic_schedule(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     schedule_type = schedule.get('type')
-    if schedule_type not in ['minute', 'hourly', 'daily', 'interval', 'interval_minutes', 'speeches_interval']:
+    if schedule_type not in ['minute', 'hourly', 'daily', 'interval_hourly', 'interval_minutes', 'speeches_interval']:
         return {"status": "error", "message": "Invalid schedule type"}
 
     db = get_db()

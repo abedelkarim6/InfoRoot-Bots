@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from fastapi import Body
 from starlette.requests import Request
 from utils.database import get_db
+from utils.helpers import compute_window_start
 from routers.auth import is_admin_request, get_request_user_id
 
 router = APIRouter()
@@ -18,12 +19,42 @@ def _get_allowed_bots(request: Request):
     return list(cfg.keys()) or ["__no_access__"]
 
 
+def _build_schedule_windows(bots_cfg: dict) -> dict:
+    """Build a dict of (bot_name, topic_name, schedule_type) -> window_start datetime
+    using compute_window_start for each configured schedule. When multiple schedules of
+    the same type exist on one topic, the earliest (furthest-back) window is kept so
+    that pending messages covered by either schedule are counted."""
+    windows = {}
+    for bot_name, bot_data in bots_cfg.items():
+        for cat_data in bot_data.get('categories', {}).values():
+            for topic_name, topic_data in cat_data.get('topics', {}).items():
+                for sch in topic_data.get('schedules', []):
+                    stype = sch.get('type')
+                    if not stype:
+                        continue
+                    job_data = {
+                        'schedule_type':    stype,
+                        'sch_minute':       sch.get('minute'),
+                        'sch_hour':         sch.get('hour'),
+                        'sch_hours':        sch.get('hours'),
+                        'sch_minutes':      sch.get('minutes'),
+                        'sch_start_hour':   sch.get('start_hour', 0),
+                        'sch_start_minute': sch.get('start_minute', 0),
+                        'sch_end_hour':     sch.get('end_hour'),
+                        'sch_end_minute':   sch.get('end_minute'),
+                    }
+                    win = compute_window_start(job_data)
+                    key = (bot_name, topic_name, stype)
+                    if key not in windows or win < windows[key]:
+                        windows[key] = win
+    return windows
+
+
 @router.get("/monitor/data")
 def get_monitor_data(request: Request):
     db = get_db()
     try:
         allowed_bots = _get_allowed_bots(request)
-        pending_counts = db.get_pending_counts(allowed_bot_names=allowed_bots)
         recent_summaries = db.get_recent_summaries(limit=100, allowed_bot_names=allowed_bots)
 
         if allowed_bots is None:
@@ -31,6 +62,9 @@ def get_monitor_data(request: Request):
         else:
             user_id = get_request_user_id(request)
             bots_cfg = db.get_filtered_bots_config(user_id) if user_id else {}
+
+        windows = _build_schedule_windows(bots_cfg)
+        pending_counts = db.get_pending_counts(allowed_bot_names=allowed_bots, windows=windows)
 
         bots_data = {}
         for bot_name, bot in bots_cfg.items():
@@ -42,7 +76,7 @@ def get_monitor_data(request: Request):
                 for topic_name, topic in cat.get('topics', {}).items():
                     topics_data[topic_name] = {
                         'enabled': topic.get('enabled', True),
-                        'pending': bot_pending.get(topic_name, {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0}),
+                        'pending': bot_pending.get(topic_name, {'hourly': 0, 'daily': 0, 'minute': 0, 'interval_hourly': 0, 'interval_minutes': 0}),
                         'schedules': topic.get('schedules', [])
                     }
                 categories_data[cat_name] = {
@@ -187,6 +221,53 @@ def get_schedule_stats(request: Request):
         allowed_bots = _get_allowed_bots(request)
         stats = db.get_today_schedule_stats(allowed_bot_names=allowed_bots)
         return {'status': 'ok', 'stats': stats}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.get("/monitor/pending-messages")
+def get_pending_messages(
+    request: Request,
+    bot: str = Query(...),
+    topic: str = Query(...),
+    schedule_type: str = Query(...),
+    sch_minute: str = Query(default=None),
+    sch_hour: str = Query(default=None),
+    sch_hours: str = Query(default=None),
+    sch_minutes: str = Query(default=None),
+    sch_start_hour: str = Query(default=None),
+    sch_start_minute: str = Query(default=None),
+    sch_end_hour: str = Query(default=None),
+    sch_end_minute: str = Query(default=None),
+):
+    db = get_db()
+    try:
+        allowed_bots = _get_allowed_bots(request)
+        if allowed_bots is not None and bot not in allowed_bots:
+            return {'status': 'error', 'message': 'Access denied'}
+        job_data = {
+            'schedule_type':    schedule_type,
+            'sch_minute':       sch_minute,
+            'sch_hour':         sch_hour,
+            'sch_hours':        sch_hours,
+            'sch_minutes':      sch_minutes,
+            'sch_start_hour':   sch_start_hour or 0,
+            'sch_start_minute': sch_start_minute or 0,
+            'sch_end_hour':     sch_end_hour,
+            'sch_end_minute':   sch_end_minute,
+        }
+        after_dt = compute_window_start(job_data)
+        messages = db.get_messages_for_schedule_window(bot, topic, schedule_type, after_dt=after_dt)
+        result = []
+        for m in messages:
+            result.append({
+                'id': m['id'],
+                'timestamp': m['timestamp'].isoformat() if m.get('timestamp') else None,
+                'channel_username': m.get('channel_username'),
+                'collection_name': m.get('collection_name'),
+                'preview': (m.get('text') or '')[:300],
+            })
+        return {'status': 'ok', 'messages': result}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
 

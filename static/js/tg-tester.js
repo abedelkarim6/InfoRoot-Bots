@@ -404,7 +404,7 @@ function tgSumTopicChanged() {
     }
 
     // If no schedule info available, offer the common types
-    const types = schedTypes.size ? [...schedTypes] : ['hourly', 'daily', 'minute', 'interval'];
+    const types = schedTypes.size ? [...schedTypes] : ['hourly', 'daily', 'minute', 'interval_hourly'];
     schedSel.innerHTML = '<option value="">— select —</option>' +
         types.map(t => `<option value="${escapeHtmlSys(t)}">${escapeHtmlSys(t)}</option>`).join('');
 }

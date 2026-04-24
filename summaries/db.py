@@ -224,6 +224,7 @@ class SummariesDB(Database):
             cursor.execute(
                 f"""SELECT m.* FROM messages m
                    WHERE m.bot_name = %s
+                     AND (m.collection_name IS NOT NULL AND m.collection_name != '')
                      AND (
                          m.topics = %s
                          OR m.topics LIKE %s
@@ -686,26 +687,40 @@ class SummariesDB(Database):
 
     # ==================== Analytics ====================
 
-    def get_pending_counts(self, allowed_bot_names: list = None):
+    def get_pending_counts(self, allowed_bot_names: list = None, windows: dict = None):
+        """Returns pending message counts per bot per topic for each schedule type.
+
+        windows: optional dict of (bot_name, topic_name, schedule_type) -> datetime.datetime.
+        When provided, a message only counts as pending for a given schedule type if its
+        timestamp >= the corresponding window start. Fallback: 48-hour window.
+        """
         try:
-            """Returns pending message counts per bot per topic for each schedule type."""
             cursor = self._get_cursor()
             if allowed_bot_names is not None:
                 cursor.execute("""
-                    SELECT m.id, m.bot_name, m.topics
+                    SELECT m.id, m.bot_name, m.topics, m.timestamp
                     FROM messages m
                     WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
+                      AND (m.collection_name IS NOT NULL AND m.collection_name != '')
+                      AND m.timestamp >= NOW() - INTERVAL '48 hours'
                       AND m.bot_name = ANY(%s)
                 """, (allowed_bot_names,))
             else:
                 cursor.execute("""
-                    SELECT m.id, m.bot_name, m.topics
+                    SELECT m.id, m.bot_name, m.topics, m.timestamp
                     FROM messages m
                     WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
+                      AND (m.collection_name IS NOT NULL AND m.collection_name != '')
+                      AND m.timestamp >= NOW() - INTERVAL '48 hours'
                 """)
             rows = cursor.fetchall()
 
-            cursor.execute("SELECT message_id, bot_name, topic_name, schedule_type, status FROM message_summarizations")
+            cursor.execute("""
+                SELECT ms.message_id, ms.bot_name, ms.topic_name, ms.schedule_type, ms.status
+                FROM message_summarizations ms
+                JOIN messages m ON m.id = ms.message_id
+                WHERE m.timestamp >= NOW() - INTERVAL '48 hours'
+            """)
             done = set()
             missed = set()
             for r in cursor.fetchall():
@@ -718,18 +733,34 @@ class SummariesDB(Database):
                 bn = row['bot_name'] or 'unknown'
                 topics_str = row['topics'] or ''
                 topics = [t.strip() for t in topics_str.split(',') if t.strip()]
+                msg_ts = row['timestamp']
 
                 if bn not in counts:
                     counts[bn] = {}
 
                 for topic in topics:
                     if topic not in counts[bn]:
-                        counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval': 0, 'interval_minutes': 0, 'speeches_interval': 0}
+                        counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval_hourly': 0, 'interval_minutes': 0, 'speeches_interval': 0}
                     if (row['id'], bn, topic) in missed:
                         continue
-                    for stype in ('hourly', 'daily', 'minute', 'interval', 'interval_minutes', 'speeches_interval'):
-                        if (row['id'], bn, topic, stype) not in done:
-                            counts[bn][topic][stype] += 1
+                    for stype in ('hourly', 'daily', 'minute', 'interval_hourly', 'interval_minutes', 'speeches_interval'):
+                        if (row['id'], bn, topic, stype) in done:
+                            continue
+                        if windows and msg_ts is not None:
+                            win = windows.get((bn, topic, stype))
+                            if win is not None:
+                                # Compare timezone-aware to timezone-aware
+                                msg_ts_cmp = msg_ts
+                                if hasattr(msg_ts, 'tzinfo') and msg_ts.tzinfo is None:
+                                    import datetime as _dt
+                                    try:
+                                        from zoneinfo import ZoneInfo
+                                        msg_ts_cmp = msg_ts.replace(tzinfo=ZoneInfo('Asia/Beirut'))
+                                    except Exception:
+                                        msg_ts_cmp = msg_ts.replace(tzinfo=_dt.timezone.utc)
+                                if msg_ts_cmp < win:
+                                    continue
+                        counts[bn][topic][stype] += 1
 
             return counts
         finally:

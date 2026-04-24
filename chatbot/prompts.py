@@ -190,7 +190,7 @@ YOUTUBE_CONTROL_AGENT_INSTRUCTIONS = [
 SCHEDULE_AGENT_INSTRUCTIONS = [
     "You manage schedules: timing configurations that control when summaries are generated and sent.",
     "Always call get_topic_schedules (with no args for all) first to see existing schedules.",
-    "Schedule types: 'hourly' (set minute), 'daily' (set hour+minute), 'minute' (every N mins, set minute=N), 'interval' (every N hours, set hours+start_hour+start_minute).",
+    "Schedule types: 'hourly' (set minute), 'daily' (set hour+minute), 'minute' (every N mins, set minute=N), 'interval_hourly' (every N hours, set hours+start_hour+start_minute).",
     "Use add_topic_schedule to create new schedules. Use update_topic_schedule to change existing ones by ID.",
     "Use toggle_topic_schedule to quickly enable/disable without touching other fields.",
     "Use delete_topic_schedule only after confirming with the user.",

@@ -2220,7 +2220,7 @@ function formatSchedule(schedule) {
             ? ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}` : '';
         return `Every ${schedule.minutes || 30}min — starts ${sh}:${sm}${endPart}`;
     }
-    if (type === 'interval') {
+    if (type === 'interval_hourly') {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
         const endPart = (schedule.end_hour != null && schedule.end_minute != null)
@@ -2367,7 +2367,7 @@ function openDefaultScheduleModal(botName) {
                         <option value="minute">Minute</option>
                         <option value="hourly">Hourly</option>
                         <option value="interval_minutes">Interval (Minutes)</option>
-                        <option value="interval">Interval (Hours)</option>
+                        <option value="interval_hourly">Interval (Hours)</option>
                         <option value="daily">Daily</option>
                         <option value="speeches_interval">Speeches Interval</option>
                     </select>
@@ -2443,7 +2443,7 @@ function updateDsInputs() {
             </div>
             <small class="text-muted">First run at this time, then every X minutes</small>
         </div>`;
-    } else if (type === 'interval') {
+    } else if (type === 'interval_hourly') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Every X Hours</label>
             <input type="number" class="input" id="ds-hours" min="1" max="24" value="3">
             <div class="form-group"><label class="form-label">Starting at (HH : MM)</label>
@@ -2489,7 +2489,7 @@ async function saveDefaultSchedule(botName) {
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
     }
-    if (type === 'interval') {
+    if (type === 'interval_hourly') {
         ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
@@ -2557,7 +2557,7 @@ function editDefaultSchedule(botName, idx) {
                         <option value="minute">Minute</option>
                         <option value="hourly">Hourly</option>
                         <option value="interval_minutes">Interval (Minutes)</option>
-                        <option value="interval">Interval (Hours)</option>
+                        <option value="interval_hourly">Interval (Hours)</option>
                         <option value="daily">Daily</option>
                         <option value="speeches_interval">Speeches Interval</option>
                     </select>
@@ -2627,7 +2627,7 @@ function editDefaultSchedule(botName, idx) {
         if (sh) sh.value = ds.start_hour ?? 0;
         const sm = document.getElementById('ds-start-minute');
         if (sm) sm.value = ds.start_minute ?? 0;
-    } else if (ds.type === 'interval') {
+    } else if (ds.type === 'interval_hourly') {
         const el = document.getElementById('ds-hours');
         if (el) el.value = ds.hours ?? 3;
         const sh = document.getElementById('ds-start-hour');
@@ -2692,7 +2692,7 @@ async function saveEditedDefaultSchedule(botName, idx) {
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
     }
-    if (type === 'interval') {
+    if (type === 'interval_hourly') {
         ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
@@ -3387,7 +3387,7 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                         <option value="minute">Every Minute</option>
                         <option value="hourly" selected>Hourly</option>
                         <option value="interval_minutes">Every X Minutes</option>
-                        <option value="interval">Every X Hours</option>
+                        <option value="interval_hourly">Every X Hours</option>
                         <option value="daily">Daily</option>
                         <option value="speeches_interval">Speeches Interval</option>
                     </select>
@@ -3482,7 +3482,7 @@ function updateTopicScheduleInputs() {
             </div>
             <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>
         `;
-    } else if (type === 'interval') {
+    } else if (type === 'interval_hourly') {
         container.innerHTML = `
             <label class="form-label">Every X Hours</label>
             <input type="number" class="input" id="topic-schedule-hours" min="1" max="24" value="2">
@@ -3541,7 +3541,7 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         const ehM = document.getElementById('topic-schedule-end-hour').value;
         const emM = document.getElementById('topic-schedule-end-minute').value;
         if (ehM !== '' && emM !== '') { schedule.end_hour = Number(ehM); schedule.end_minute = Number(emM); }
-    } else if (type === 'interval') {
+    } else if (type === 'interval_hourly') {
         schedule.hours        = Number(document.getElementById('topic-schedule-hours').value);
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
@@ -3708,7 +3708,7 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
     modal.dataset.categoryName = categoryName;
     modal.dataset.topicName = topicName;
 
-    const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval', 'daily', 'speeches_interval'];
+    const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval_hourly', 'daily', 'speeches_interval'];
     const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval: 'Every X Hours', daily: 'Daily', speeches_interval: 'Speeches Interval' };
 
     modal.innerHTML = `
@@ -3817,7 +3817,7 @@ function buildEditScheduleInputs(schedule) {
                     <input type="number" class="input" id="edit-sch-end-minute" min="0" max="59" value="${emM}" placeholder="MM" style="width:80px;">
                 </div>
                 <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>`;
-    } else if (type === 'interval') {
+    } else if (type === 'interval_hourly') {
         const ehI = schedule.end_hour   != null ? schedule.end_hour   : '';
         const emI = schedule.end_minute != null ? schedule.end_minute : '';
         return `<label class="form-label">Every X Hours</label>
@@ -3881,7 +3881,7 @@ async function saveEditedSchedule(scheduleId) {
         const emM = document.getElementById('edit-sch-end-minute').value;
         schedule.end_hour   = (ehM !== '' && emM !== '') ? Number(ehM) : null;
         schedule.end_minute = (ehM !== '' && emM !== '') ? Number(emM) : null;
-    } else if (type === 'interval') {
+    } else if (type === 'interval_hourly') {
         schedule.hours        = Number(document.getElementById('edit-sch-hours').value);
         schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
         schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
@@ -4267,8 +4267,8 @@ function switchMonTab(tab) {
         const clearedAt = localStorage.getItem('mon-uncl-cleared-at');
         const clearBtn   = document.getElementById('uncl-clear-btn');
         const showAllBtn = document.getElementById('uncl-showall-btn');
-        if (clearBtn)   clearBtn.style.display   = clearedAt ? 'none' : '';
-        if (showAllBtn) showAllBtn.style.display  = clearedAt ? ''     : 'none';
+        if (clearBtn)   clearBtn.style.display   = '';
+        if (showAllBtn) showAllBtn.style.display  = clearedAt ? '' : 'none';
         if (!_unclMessages.length) loadUnclassifiedMessages();
     }
     if (tab === 'missed') {
@@ -4395,6 +4395,9 @@ function applySchFilters() {
         return;
     }
 
+    // Avoid DOM flash on background refresh: update pending counts in-place if structure unchanged
+    if (!sortByTime && _tryInPlaceSchUpdate(container, items)) return;
+
     if (sortByTime) {
         // Sort by next run time (earliest first), disabled at bottom
         items = [...items].sort((a, b) => {
@@ -4447,16 +4450,41 @@ function applySchFilters() {
     }
 }
 
+function _schRowKey(r) {
+    return `${r.botName}|${r.catName}|${r.topicName}|${JSON.stringify(r.sch)}`;
+}
+
+// Update only pending spans when schedule structure hasn't changed — avoids DOM flash
+function _tryInPlaceSchUpdate(container, items) {
+    const rows = container.querySelectorAll('.mon-sch-row[data-row-key]');
+    if (rows.length !== items.length) return false;
+    for (let i = 0; i < items.length; i++) {
+        if (rows[i].dataset.rowKey !== _schRowKey(items[i])) return false;
+    }
+    items.forEach((r, i) => {
+        const pendingEl = rows[i].querySelector('.mon-pending');
+        if (pendingEl) {
+            pendingEl.className = `mon-pending ${r.pending > 0 ? 'has' : 'none'}`;
+            pendingEl.textContent = r.pending > 0 ? `${r.pending} pending` : 'none';
+        }
+    });
+    return true;
+}
+
 function renderSchRow(r) {
     const pendingCls = r.pending > 0 ? 'has' : 'none';
     const pendingTxt = r.pending > 0 ? `${r.pending} pending` : 'none';
+    const pendingClick = r.pending > 0
+        ? `onclick="showPendingMessages(${escapeHtmlSys(JSON.stringify(r.botName))},${escapeHtmlSys(JSON.stringify(r.topicName))},${escapeHtmlSys(JSON.stringify(r.sch.type))},${escapeHtmlSys(JSON.stringify(r.sch))})" style="cursor:pointer"`
+        : '';
     const disabledCls = r.sch.enabled === false ? ' mon-sch-disabled' : '';
     const icon = scheduleIcon(r.sch);
     const spec = scheduleSpec(r.sch);
     const schJson = escapeHtml(JSON.stringify(r.sch));
+    const rowKey = escapeHtml(_schRowKey(r));
     const topicLabel = document.getElementById('sch-sort-time')?.checked
         ? `<span class="mon-sch-topic">${escapeHtml(r.topicName)}</span>` : '';
-    return `<div class="mon-sch-row${disabledCls}" data-schedule="${schJson}">
+    return `<div class="mon-sch-row${disabledCls}" data-schedule="${schJson}" data-row-key="${rowKey}">
         <div class="mon-sch-left">
             <span class="mon-sch-icon">${icon}</span>
             ${topicLabel}
@@ -4465,7 +4493,7 @@ function renderSchRow(r) {
             <span class="mon-sch-spec">${spec}</span>
         </div>
         <div class="mon-sch-right">
-            <span class="mon-pending ${pendingCls}">${pendingTxt}</span>
+            <span class="mon-pending ${pendingCls}" ${pendingClick}>${pendingTxt}</span>
             <span class="mon-next-label">next in</span>
             <span class="mon-countdown">${r.sch.enabled === false ? '—' : '…'}</span>
             <span class="mon-next-time"></span>
@@ -4477,7 +4505,7 @@ function scheduleIcon(sch) {
     if (sch.type === 'hourly')              return '🕐';
     if (sch.type === 'daily')               return '📅';
     if (sch.type === 'minute')              return '⚡';
-    if (sch.type === 'interval')            return '🔁';
+    if (sch.type === 'interval_hourly')            return '🔁';
     if (sch.type === 'interval_minutes')    return '🔁';
     if (sch.type === 'speeches_interval')   return '🎙️';
     return '🔔';
@@ -4494,7 +4522,7 @@ function scheduleSpec(sch) {
             ? ` → ${String(sch.end_hour).padStart(2,'0')}:${String(sch.end_minute).padStart(2,'0')}` : '';
         return `every ${sch.minutes || 30}m — starts ${sh}:${sm}${endPart}`;
     }
-    if (sch.type === 'interval') {
+    if (sch.type === 'interval_hourly') {
         const sh = String(sch.start_hour   ?? 0).padStart(2, '0');
         const sm = String(sch.start_minute ?? 0).padStart(2, '0');
         const endPart = (sch.end_hour != null && sch.end_minute != null)
@@ -4569,7 +4597,7 @@ function computeNextRun(sch) {
         next.setHours(Math.floor(nextTotalMin / 60), nextTotalMin % 60, 0, 0);
         return next;
     }
-    if (sch.type === 'interval') {
+    if (sch.type === 'interval_hourly') {
         // Anchor: today at start_hour:start_minute; find next fire after now
         const startH = sch.start_hour ?? 0;
         const startM   = sch.start_minute ?? 0;
@@ -4625,7 +4653,7 @@ function _scheduleStartTime(sch) {
         return `${h}:${m}`;
     }
     if (type === 'hourly') return `:${String(sch.minute ?? 0).padStart(2, '0')} (each hour)`;
-    if (type === 'interval') {
+    if (type === 'interval_hourly' || type === 'interval_minutes') {
         const h = String(sch.start_hour   ?? 0).padStart(2, '0');
         const m = String(sch.start_minute ?? 0).padStart(2, '0');
         return `${h}:${m}`;
@@ -4639,9 +4667,13 @@ function _scheduleRepeatsText(sch) {
     if (type === 'daily')    return 'once daily';
     if (type === 'hourly')   return `every hour at :${String(sch.minute ?? 0).padStart(2, '0')}`;
     if (type === 'minute')   return `every ${sch.minute ?? '?'} min`;
-    if (type === 'interval') {
+    if (type === 'interval_hourly') {
         const h = sch.hours ?? 1;
         return `every ${h} hour${h !== 1 ? 's' : ''}`;
+    }
+    if (type === 'interval_minutes') {
+        const m = sch.minutes ?? 1;
+        return `every ${m} min${m !== 1 ? 's' : ''}`;
     }
     return '—';
 }
@@ -4651,11 +4683,20 @@ function _scheduleFiresPerDay(sch) {
     if (type === 'daily')    return 1;
     if (type === 'hourly')   return 24;
     if (type === 'minute')   return Math.floor(1440 / (sch.minute || 60));
-    if (type === 'interval') {
+    if (type === 'interval_hourly') {
         const startH = sch.start_hour   ?? 0;
-        const endH   = sch.end_hour     ?? 24;
+        const endH   = sch.end_hour     ?? 23;
         const hours  = sch.hours        ?? 1;
-        return Math.max(1, Math.floor((endH - startH) / hours));
+        return Math.max(1, Math.floor(((endH - startH) * 60) / (hours * 60)));
+    }
+    if (type === 'interval_minutes') {
+        const startH = sch.start_hour   ?? 0;
+        const startM = sch.start_minute ?? 0;
+        const endH   = sch.end_hour     ?? 23;
+        const endM   = sch.end_minute   ?? 59;
+        const mins   = sch.minutes      ?? 1;
+        const windowMins = (endH * 60 + endM) - (startH * 60 + startM);
+        return Math.max(1, Math.floor(windowMins / mins));
     }
     return 0;
 }
@@ -4881,11 +4922,89 @@ function _closeSummaryMessages() {
                 <option value="hourly">Hourly</option>
                 <option value="daily">Daily</option>
                 <option value="minute">Minute</option>
-                <option value="interval">Interval</option>
+                <option value="interval_hourly">Interval</option>
             </select>
         </div>
         <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>`;
     renderMonSummaries(_allSummaries || []);
+}
+
+// ---------- Pending messages viewer (schedules tab) ----------
+let _pendingMsgData = [];
+
+async function showPendingMessages(botName, topicName, schedType, sch) {
+    _pendingMsgData = [];
+    const panel = document.getElementById('mon-tab-schedules');
+    panel.innerHTML = `
+        <div class="sum-msg-page">
+            <div class="sum-msg-page-header">
+                <button class="btn btn-secondary btn-sm" onclick="_closePendingMessages()">‹ Back to Schedules</button>
+                <h3 style="margin:0;font-size:15px">Pending Messages — ${escapeHtml(botName)} › ${escapeHtml(topicName)} › ${escapeHtml(schedType)}</h3>
+            </div>
+            <div id="pmp-table-wrap"><p class="mon-empty">Loading…</p></div>
+        </div>`;
+
+    const s = sch || {};
+    const schParams = [
+        s.minute   != null ? `sch_minute=${encodeURIComponent(s.minute)}`         : '',
+        s.hour     != null ? `sch_hour=${encodeURIComponent(s.hour)}`             : '',
+        s.hours    != null ? `sch_hours=${encodeURIComponent(s.hours)}`           : '',
+        s.minutes  != null ? `sch_minutes=${encodeURIComponent(s.minutes)}`       : '',
+        s.start_hour   != null ? `sch_start_hour=${encodeURIComponent(s.start_hour)}`     : '',
+        s.start_minute != null ? `sch_start_minute=${encodeURIComponent(s.start_minute)}` : '',
+        s.end_hour   != null ? `sch_end_hour=${encodeURIComponent(s.end_hour)}`   : '',
+        s.end_minute != null ? `sch_end_minute=${encodeURIComponent(s.end_minute)}` : '',
+    ].filter(Boolean).join('&');
+    const url = `/api/monitor/pending-messages?bot=${encodeURIComponent(botName)}&topic=${encodeURIComponent(topicName)}&schedule_type=${encodeURIComponent(schedType)}${schParams ? '&' + schParams : ''}`;
+    const data = await api(url);
+    const wrap = document.getElementById('pmp-table-wrap');
+    if (!wrap) return;
+
+    if (data.status !== 'ok' || !data.messages?.length) {
+        wrap.innerHTML = `<p class="mon-empty">No pending messages found.</p>`;
+        return;
+    }
+    _pendingMsgData = data.messages;
+
+    const rows = _pendingMsgData.map(m => {
+        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const src = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '—';
+        const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
+        const txt = escapeHtml(m.preview || '');
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+            <td>${src}</td>
+            <td>${col}</td>
+            <td class="smp-msg-cell" title="${txt}">${txt}</td>
+        </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${_pendingMsgData.length} pending message${_pendingMsgData.length===1?'':'s'}</div>
+        <div style="overflow-x:auto">
+            <table class="mon-table smp-table">
+                <thead><tr><th>Date / Time</th><th>Source</th><th>Collection</th><th>Message</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+function _closePendingMessages() {
+    _pendingMsgData = [];
+    const panel = document.getElementById('mon-tab-schedules');
+    panel.innerHTML = `
+        <div class="mon-filter-bar">
+            <div class="mon-multi-select" id="sch-filter-topic-wrap">
+                <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
+                <div class="mon-ms-dropdown" id="sch-filter-topic-dd"></div>
+            </div>
+            <select class="select mon-filter-sel" id="sch-filter-prompt" onchange="applySchFilters()">
+                <option value="">All Prompts</option>
+            </select>
+            <label class="mon-sort-label"><input type="checkbox" id="sch-sort-time" onchange="applySchFilters()"> Sort by next run</label>
+        </div>
+        <div id="monitor-bots-container"><p class="mon-empty">Loading…</p></div>`;
+    if (_monitorData) renderMonitorBots(_monitorData.bots || {});
 }
 
 // ---------- Received Messages ----------
@@ -5402,7 +5521,6 @@ async function loadUnclassifiedMessages(append = false) {
 function clearUnclassifiedView() {
     _unclClearedAt = new Date().toISOString();
     localStorage.setItem('mon-uncl-cleared-at', _unclClearedAt);
-    document.getElementById('uncl-clear-btn').style.display = 'none';
     document.getElementById('uncl-showall-btn').style.display = '';
     // Reset badge immediately — background poll will fetch only new messages
     const badge = document.getElementById('mon-uncl-badge');
@@ -5413,7 +5531,6 @@ function clearUnclassifiedView() {
 function showAllUnclassifiedView() {
     _unclClearedAt = null;
     localStorage.removeItem('mon-uncl-cleared-at');
-    document.getElementById('uncl-clear-btn').style.display = '';
     document.getElementById('uncl-showall-btn').style.display = 'none';
     _renderUnclassified(_unclMessages);
 }
@@ -6324,7 +6441,7 @@ function _renderScheduleHistory(runs) {
         const statusEl = isOk
             ? '<span class="hist-badge-ok">✓ Success</span>'
             : '<span class="hist-badge-fail">✗ Failed</span>';
-        const typeCls  = { hourly: 'hourly', daily: 'daily', minute: 'minute', interval: 'interval' }[r.schedule_type] || '';
+        const typeCls  = { hourly: 'hourly', daily: 'daily', minute: 'minute', interval_hourly: 'interval_hourly' }[r.schedule_type] || '';
         const errorBtn = (!isOk && r.error_text)
             ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;"
                   onclick="showHistError(this)"
@@ -6495,6 +6612,21 @@ function _clearHistMsgFilters() {
 
 function _closeHistoryMessages() {
     _histMsgData = [];
+    // Restore the history tab shell before loading (showHistoryMessages replaced the whole panel)
+    const panel = document.getElementById('mon-tab-history');
+    if (panel) {
+        panel.innerHTML = `
+            <div class="mon-filter-bar">
+                <select class="select mon-filter-sel" id="hist-filter-bot"    onchange="loadScheduleHistory()"><option value="">All Bots</option></select>
+                <select class="select mon-filter-sel" id="hist-filter-topic"  onchange="loadScheduleHistory()"><option value="">All Topics</option></select>
+                <select class="select mon-filter-sel" id="hist-filter-status" onchange="loadScheduleHistory()">
+                    <option value="">All Statuses</option>
+                    <option value="success">✓ Success</option>
+                    <option value="failed">✗ Failed</option>
+                </select>
+            </div>
+            <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>`;
+    }
     loadScheduleHistory();
 }
 

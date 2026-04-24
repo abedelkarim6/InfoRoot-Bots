@@ -189,9 +189,16 @@ async def save_dialogs_to_db():
 async def read_channel_messages(event):
     """
     Handle incoming channel posts: save to database.
-    Only processes broadcast channels (not groups/supergroups).
+    Only processes messages from channels registered in collections.
     """
     try:
+        # Fast pre-filter: skip anything not in the resolved source channel map.
+        # event.chat_id is available immediately (no API call).
+        # _source_channel_map is keyed by negative numeric IDs for channels.
+        chat_id = event.chat_id
+        if chat_id not in _source_channel_map:
+            return
+
         # Skip private/DM messages — they are never source channels
         if getattr(event, 'is_private', False):
             return
@@ -207,25 +214,8 @@ async def read_channel_messages(event):
         # logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
 
         # Step 1: Find which collections include this channel as a source.
-        # Use the pre-resolved numeric-ID map (handles private channels, invite links, etc.).
-        # Fall back to username matching for any channels not yet in the map.
         matching_collections = list(_source_channel_map.get(channel_id_numeric, []))
-
-        if not matching_collections and channel_username:
-            collections_cfg = db.get_all_collections()
-            for coll_name, coll_data in collections_cfg.items():
-                if not coll_data.get('enabled', True):
-                    continue
-                source_channels = coll_data.get('source_channels', [])
-                if channel_username in source_channels or f'@{channel_username}' in source_channels:
-                    matching_collections.append(coll_name)
-
         if not matching_collections:
-            # logger.warning(
-            #     f"[SKIP] id={channel_id_numeric} (@{channel_id}) not in any collection — "
-            #     f"map has {len(_source_channel_map)} entries {list(_source_channel_map.keys())}, "
-            #     f"configured collections: {list(collections_cfg.keys())}"
-            # )
             return
 
         # Step 2: Find which bots reference those collections
@@ -264,16 +254,12 @@ async def read_channel_messages(event):
             for kw in bot_cfg_rules.get('remove', []):
                 if not kw:
                     continue
-                try:
-                    if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
-                        # logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
-                        skipped = True
-                        break
-                except re.error:
-                    if kw in text:
-                        # logger.info(f"[RULE] Remove rule '{kw}' matched — skipping Bot: {bot_name} | @{channel_id}")
-                        skipped = True
-                        break
+                # Substring search — no \b boundaries — so Arabic attached particles
+                # (e.g. بالحرب, للحرب) are caught even without surrounding spaces.
+                if kw.lower() in text.lower():
+                    logger.info(f"[RULE] Remove '{kw}' matched — discarding | Bot={bot_name} | @{channel_id}")
+                    skipped = True
+                    break
             if skipped:
                 continue
 
@@ -284,10 +270,11 @@ async def read_channel_messages(event):
                 repl = rule.get('replace_with', '')
                 if not match_word:
                     continue
-                try:
-                    replaced_text = re.sub(rf"\b{re.escape(match_word)}\b", repl, replaced_text, flags=re.IGNORECASE)
-                except re.error:
-                    replaced_text = replaced_text.replace(match_word, repl)
+                # re.escape + IGNORECASE, no \b — handles Arabic attached forms correctly.
+                new_text = re.sub(re.escape(match_word), repl, replaced_text, flags=re.IGNORECASE)
+                if new_text != replaced_text:
+                    logger.info(f"[RULE] Replace '{match_word}' → '{repl}' applied | Bot={bot_name} | @{channel_id}")
+                replaced_text = new_text
             # ─────────────────────────────────────────────────────────────
 
             topics, categories, keywords = categorizer(replaced_text, bot_name, db)
@@ -330,102 +317,7 @@ async def read_channel_messages(event):
 
 
 # ==================== Schedule Window Helper ====================
-def _compute_window_start(job_data) -> datetime.datetime:
-    """
-    Return the exact previous scheduled fire time so that only messages
-    received after that moment are included in the current summary.
-
-    Uses schedule anchor fields stored in job_data at scheduling time:
-      sch_start_hour, sch_start_minute  – anchor origin for interval schedules
-      sch_hours / sch_minutes           – interval length
-      sch_hour / sch_minute             – target hour/minute for daily/hourly
-    """
-    import math
-
-    schedule_type = job_data.get('schedule_type', '')
-    now = datetime.datetime.now(BEIRUT_TZ)
-
-    try:
-        if schedule_type == 'interval':
-            # Interval in hours anchored to (start_hour, start_minute)
-            start_h = int(job_data.get('sch_start_hour') or 0)
-            start_m = int(job_data.get('sch_start_minute') or 0)
-            hours   = int(job_data.get('sch_hours') or 1)
-            end_h   = job_data.get('sch_end_hour')
-            end_m   = job_data.get('sch_end_minute')
-
-            # Build anchor as today's start time; if it's in the future, go back one day
-            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-            if anchor > now:
-                anchor -= datetime.timedelta(days=1)
-
-            # How many complete intervals have elapsed since the anchor?
-            elapsed_seconds = (now - anchor).total_seconds()
-            n = math.floor(elapsed_seconds / (hours * 3600))
-
-            # Day-restart case: we're in the first interval (n==0) at the start of a new
-            # daily window. If an end time is configured, the previous "window" closed at
-            # yesterday's end time — use that as window_start so messages accumulated
-            # overnight are included in this first send.
-            if n == 0 and end_h is not None and end_m is not None:
-                yesterday_anchor = anchor - datetime.timedelta(days=1)
-                window_start = yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
-            else:
-                window_start = anchor + datetime.timedelta(hours=max(n - 1, 0) * hours)
-            return window_start
-
-        elif schedule_type == 'interval_minutes':
-            start_h = int(job_data.get('sch_start_hour') or 0)
-            start_m = int(job_data.get('sch_start_minute') or 0)
-            minutes = int(job_data.get('sch_minutes') or 1)
-            end_h   = job_data.get('sch_end_hour')
-            end_m   = job_data.get('sch_end_minute')
-
-            anchor = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-            if anchor > now:
-                anchor -= datetime.timedelta(days=1)
-
-            elapsed_seconds = (now - anchor).total_seconds()
-            n = math.floor(elapsed_seconds / (minutes * 60))
-
-            # Day-restart case (same logic as interval hours above)
-            if n == 0 and end_h is not None and end_m is not None:
-                yesterday_anchor = anchor - datetime.timedelta(days=1)
-                window_start = yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
-            else:
-                window_start = anchor + datetime.timedelta(minutes=max(n - 1, 0) * minutes)
-            return window_start
-
-        elif schedule_type == 'hourly':
-            # Every hour at :MM — window_start = previous fire = this hour's :MM minus 1 hour
-            target_m = int(job_data.get('sch_minute') or 0)
-            candidate = now.replace(minute=target_m, second=0, microsecond=0)
-            if candidate > now:
-                candidate -= datetime.timedelta(hours=1)
-            # candidate is the current fire time; go back one period to get the previous fire
-            return candidate - datetime.timedelta(hours=1)
-
-        elif schedule_type == 'daily':
-            target_h = int(job_data.get('sch_hour') or 0)
-            target_m = int(job_data.get('sch_minute') or 0)
-            candidate = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
-            if candidate > now:
-                candidate -= datetime.timedelta(days=1)
-            # candidate is the current fire time; go back one period to get the previous fire
-            return candidate - datetime.timedelta(days=1)
-
-        elif schedule_type == 'minute':
-            # Every N minutes — window_start = previous fire time = current floored minute - N
-            n = int(job_data.get('sch_minute') or 1)
-            floored_m = (now.minute // n) * n
-            current_fire = now.replace(minute=floored_m, second=0, microsecond=0)
-            return current_fire - datetime.timedelta(minutes=n)
-
-    except Exception as e:
-        logger.warning(f"[WINDOW] Could not compute window_start for {job_data}: {e}")
-
-    # Fallback: last 24 hours
-    return now - datetime.timedelta(hours=24)
+from utils.helpers import compute_window_start as _compute_window_start
 
 
 CHUNK_SIZE = 25  # messages per chunk before hierarchical summarization
@@ -485,6 +377,9 @@ async def generate_and_send_summary(job_data):
     # ── End-time gate: skip this fire if we're past the daily end window ───
     _end_h = job_data.get('sch_end_hour')
     _end_m = job_data.get('sch_end_minute')
+    # Interval schedules without an explicit end time default to end-of-day (23:59)
+    if _end_h is None and schedule_type in ('interval_hourly', 'interval_minutes'):
+        _end_h, _end_m = 23, 59
     if _end_h is not None and _end_m is not None:
         _now_local = datetime.datetime.now(BEIRUT_TZ)
         _end_today = _now_local.replace(hour=int(_end_h), minute=int(_end_m), second=0, microsecond=0)
@@ -1011,7 +906,7 @@ async def schedule_summaries():
                             if start_dt > now:
                                 start_dt -= datetime.timedelta(days=1)
                             trigger = IntervalTrigger(minutes=interval_mins, start_date=start_dt)
-                        elif schedule_type == "interval":
+                        elif schedule_type == "interval_hourly":
                             interval_hours = schedule.get('hours', 1)
                             start_hour   = schedule.get('start_hour', 0)
                             start_minute = schedule.get('start_minute', 0)

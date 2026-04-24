@@ -671,6 +671,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS schedule_runs_fired_at_idx
                 ON schedule_runs(fired_at DESC)
             """)
+
+            # Migrate: rename schedule type 'interval' → 'interval_hourly' (one-time, idempotent)
+            cursor.execute("UPDATE schedules SET type = 'interval_hourly' WHERE type = 'interval'")
+            cursor.execute("UPDATE message_summarizations SET schedule_type = 'interval_hourly' WHERE schedule_type = 'interval'")
+            cursor.execute("UPDATE schedule_runs SET schedule_type = 'interval_hourly' WHERE schedule_type = 'interval'")
+
         finally:
             self._commit()
 
