@@ -585,7 +585,7 @@ async def tester_generate_summary(request: Request, data: dict = Body(...)):
         from summaries.prompts import get_summary_prompt
         texts  = [m["text"] for m in topic_messages]
         prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-        summary = llm.generate_summary(prompt)
+        summary, _ = llm.generate_summary(prompt)
         return {
             "status": "ok",
             "summary": summary,
@@ -659,7 +659,7 @@ async def tester_manual_summary(request: Request, data: dict = Body(...)):
     try:
         from summaries.prompts import get_summary_prompt
         prompt  = get_summary_prompt(texts, bot_name or "manual", prompt_key, topic_name=topic_name or None)
-        summary = llm.generate_summary(prompt)
+        summary, _ = llm.generate_summary(prompt)
         return {
             "status": "ok",
             "summary": summary,

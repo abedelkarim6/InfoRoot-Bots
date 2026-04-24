@@ -4,11 +4,11 @@ Tracks: QPM (queries/minute), total TPM (input+output tokens/minute),
         QPD (queries/day), video hours/day (native video only).
 QPD and video seconds persist across restarts via system_settings table.
 
-Vertex AI limits (gemini-2.5-flash, pay-as-you-go):
-  QPM  : 2 000   requests/minute
-  TPM  : 4 000 000 tokens/minute
-  QPD  : no hard daily cap (pay-as-you-go) — tracked for visibility
-  Video: no fixed quota on Vertex AI — tracked for cost awareness
+Vertex AI limits (gemini-2.5-flash, Standard PayGo Tier 1 — $10-$250 cumulative spend):
+  RPM  : 30 000  requests/minute  (system-wide cap, no per-tier RPM limit)
+  TPM  : 2 000 000 tokens/minute  (Tier 1 baseline throughput)
+  RPD  : no hard daily cap — tracked for visibility
+  Tier 2 ($250-$2k): 4 000 000 TPM  |  Tier 3 (>$2k): 10 000 000 TPM
 """
 import time
 import threading
@@ -17,8 +17,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-RPM_LIMIT        = 2_000
-TPM_LIMIT        = 4_000_000
+RPM_LIMIT        = 30_000
+TPM_LIMIT        = 2_000_000
 RPD_LIMIT        = 100_000      # soft visibility limit, not enforced by Vertex AI
 VIDEO_SECS_LIMIT = 24 * 3600   # 24 h/day — Vertex AI has no fixed video quota
 

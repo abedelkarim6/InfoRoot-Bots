@@ -5,6 +5,7 @@ Runs as a user account (MTProto via Telethon) instead of a bot.
 import os
 import re
 import sys
+import time
 import asyncio
 
 # Force UTF-8 on Windows so log messages with Unicode (→, emojis, Arabic, etc.) don't crash.
@@ -323,12 +324,13 @@ from utils.helpers import compute_window_start as _compute_window_start
 
 
 CHUNK_SIZE = 25  # messages per chunk before hierarchical summarization
+INTER_CHUNK_DELAY = 3  # seconds between chunk API calls to avoid burst 429s
 
-def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: str) -> str:
+def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: str) -> tuple[str, int]:
     """
     If len(texts) <= CHUNK_SIZE: single LLM call (existing behaviour).
-    Otherwise: split into CHUNK_SIZE chunks → summarize each → merge all
-    intermediate summaries into one final summary.
+    Otherwise: split into CHUNK_SIZE chunks → summarize each (with delay) → merge.
+    Returns (summary_text, total_tokens).
     """
     if len(texts) <= CHUNK_SIZE:
         prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
@@ -339,14 +341,18 @@ def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: 
     logger.info(f"[CHUNK] {len(texts)} messages → {len(chunks)} chunks | Bot: {bot_name} | Topic: {topic_name}")
 
     intermediates = []
+    total_tokens = 0
     for idx, chunk in enumerate(chunks, 1):
+        if idx > 1:
+            time.sleep(INTER_CHUNK_DELAY)
         prompt = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
-        part = llm_client.generate_summary(prompt)
+        part, tk = llm_client.generate_summary(prompt)
+        total_tokens += tk
         logger.info(f"[CHUNK] Chunk {idx}/{len(chunks)} summarized ({len(chunk)} msgs)")
         intermediates.append(part)
 
     if len(intermediates) == 1:
-        return intermediates[0]
+        return intermediates[0], total_tokens
 
     # Merge pass: combine intermediate summaries in the same bot style
     merge_prompt = (
@@ -355,7 +361,8 @@ def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: 
         + "\n---\n".join(intermediates)
     )
     logger.info(f"[CHUNK] Merging {len(intermediates)} intermediate summaries | Bot: {bot_name} | Topic: {topic_name}")
-    return llm_client.generate_summary(merge_prompt)
+    merged_text, merge_tk = llm_client.generate_summary(merge_prompt)
+    return merged_text, total_tokens + merge_tk
 
 
 # ==================== Summary Handler ====================
@@ -379,9 +386,6 @@ async def generate_and_send_summary(job_data):
     # ── End-time gate: skip this fire if we're past the daily end window ───
     _end_h = job_data.get('sch_end_hour')
     _end_m = job_data.get('sch_end_minute')
-    # Interval schedules without an explicit end time default to end-of-day (23:59)
-    if _end_h is None and schedule_type in ('interval_hourly', 'interval_minutes'):
-        _end_h, _end_m = 23, 59
     if _end_h is not None and _end_m is not None:
         _now_local = datetime.datetime.now(BEIRUT_TZ)
         _end_today = _now_local.replace(hour=int(_end_h), minute=int(_end_m), second=0, microsecond=0)
@@ -421,16 +425,19 @@ async def generate_and_send_summary(job_data):
         all_texts = [m['text'] for m in all_msgs]
 
         BATCH = 25
+        total_tokens = 0
         if len(all_texts) <= BATCH:
             prompt = get_summary_prompt(all_texts, bot_name, prompt_key, topic_name=topic_name)
-            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+            summary_text, tk = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+            total_tokens += tk
         else:
             # Summarize each 25-message chunk, then merge
             partial_summaries = []
             for i in range(0, len(all_texts), BATCH):
                 chunk = all_texts[i:i + BATCH]
                 p = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
-                s = await loop.run_in_executor(None, llm_client.generate_summary, p)
+                s, tk = await loop.run_in_executor(None, llm_client.generate_summary, p)
+                total_tokens += tk
                 partial_summaries.append(s)
 
             if len(partial_summaries) == 1:
@@ -441,9 +448,10 @@ async def generate_and_send_summary(job_data):
                     "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
                     + "\n---\n".join(partial_summaries)
                 )
-                summary_text = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
+                summary_text, merge_tk = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
+                total_tokens += merge_tk
 
-        logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)}")
+        logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)} | tokens={total_tokens}")
 
         # ── Resolve target channels ──────────────────────────────────────────
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
@@ -497,6 +505,7 @@ async def generate_and_send_summary(job_data):
                     bot_name=bot_name,
                     topic_name=topic_name,
                     message_ids=all_ids,
+                    tokens_used=total_tokens,
                 )
             except Exception as e:
                 logger.error(f"[ERROR] send_message to {target_chat}: {e}")
@@ -583,6 +592,7 @@ async def _send_speech_buckets(job_id: str, job_data: dict, buckets: list,
                         bot_name=bot_name,
                         topic_name=topic_name,
                         message_ids=msg_ids,
+                        tokens_used=0,
                     )
                 except Exception as e:
                     logger.error(f"[SPEECH] Failed to send bucket to {target_chat}: {e}")
@@ -634,7 +644,7 @@ async def generate_speech_buckets(job_data: dict):
 
         prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
         loop         = asyncio.get_event_loop()
-        llm_response = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+        llm_response, _ = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
         buckets      = _parse_speech_buckets(llm_response)
 
         # Cancel any existing pending send task and restart the countdown
@@ -776,35 +786,50 @@ def _get_prompt_key_for_topic(bot_name: str, topic_name: str) -> str:
     return 'default'
 
 
+# One lock per (bot, topic) — prevents concurrent interim runs for the same topic
+_interim_locks: dict = {}
+
+def _get_interim_lock(bot_name: str, topic_name: str) -> asyncio.Lock:
+    key = (bot_name, topic_name)
+    if key not in _interim_locks:
+        _interim_locks[key] = asyncio.Lock()
+    return _interim_locks[key]
+
+
 async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     """
     Called after every message save.
     If ≥ 25 unsummarized messages exist for (bot, topic), summarize exactly 25
     and store the result as an interim summary. Loops until count drops below 25.
+    A per-topic lock prevents concurrent tasks from firing duplicate API calls.
     """
-    try:
-        while True:
-            count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
-            if count < 25:
-                break
+    lock = _get_interim_lock(bot_name, topic_name)
+    if lock.locked():
+        return  # another task is already processing this topic — skip
+    async with lock:
+        try:
+            while True:
+                count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
+                if count < 25:
+                    break
 
-            messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
-            if len(messages) < 25:
-                break
+                messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
+                if len(messages) < 25:
+                    break
 
-            prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
-            texts = [m['text'] for m in messages]
-            msg_ids = [m['id'] for m in messages]
+                prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
+                texts = [m['text'] for m in messages]
+                msg_ids = [m['id'] for m in messages]
 
-            prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-            loop = asyncio.get_event_loop()
-            summary_text = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+                prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+                loop = asyncio.get_event_loop()
+                summary_text, _ = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
 
-            db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
-            db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name)
-            logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
-    except Exception as e:
-        logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+                db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
+                db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name)
+                logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
+        except Exception as e:
+            logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
 
 
 async def schedule_summaries():

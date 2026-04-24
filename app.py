@@ -18,6 +18,19 @@ logging.basicConfig(
 logger = logging.getLogger("app")
 logging.getLogger("apscheduler.schedulers").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors").setLevel(logging.WARNING)
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.ERROR)
+
+# Rolling 24-hour log file — rotates at midnight, keeps 1 backup day
+import logging.handlers as _lh
+os.makedirs("logs", exist_ok=True)
+_fh = _lh.TimedRotatingFileHandler(
+    "logs/app.log", when="midnight", backupCount=1, encoding="utf-8"
+)
+_fh.setFormatter(logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+logging.getLogger().addHandler(_fh)
 
 # Attach in-memory log buffer (used by the admin Logs page)
 # Must be called after basicConfig so the root logger is already configured.

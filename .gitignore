@@ -5,6 +5,7 @@ docs/
 __pycache__/
 *.pyc
 bot.log
+logs/
 get_ss.py
 .env
 config.yaml

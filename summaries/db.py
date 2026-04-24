@@ -132,6 +132,24 @@ class SummariesDB(Database):
         """Mark messages as missed (outside schedule window) so they are never re-processed."""
         self.mark_as_summarized(message_ids, schedule_type, bot_name, topic_name, status='missed')
 
+    def clear_all_pending(self):
+        """Mark every unsummarized message as missed across all bots/topics/schedule types."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                INSERT INTO message_summarizations (message_id, bot_name, topic_name, schedule_type, status)
+                SELECT m.id, m.bot_name, t.topic_name, s.stype, 'missed'
+                FROM messages m
+                CROSS JOIN LATERAL unnest(string_to_array(m.topics, ',')) AS t(topic_name)
+                CROSS JOIN (VALUES ('hourly'),('daily'),('minute'),('interval_hourly'),('interval_minutes'),('speeches_interval')) AS s(stype)
+                WHERE m.topics IS NOT NULL AND m.topics != ''
+                  AND m.bot_name IS NOT NULL
+                ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO NOTHING
+            """)
+            return cursor.rowcount
+        finally:
+            self._commit()
+
     # ── Interim (rolling 25-message batch) summarization ─────────────────────
 
     def get_unsummarized_count_for_interim(self, bot_name: str, topic_name: str) -> int:
@@ -325,17 +343,17 @@ class SummariesDB(Database):
     def save_summary(self, summary_text: str, message_count: int,
                      summary_type: str, target_entity: str,
                      bot_name: str = None, topic_name: str = None,
-                     message_ids: list = None) -> int:
+                     message_ids: list = None, tokens_used: int = 0) -> int:
         try:
             """Save a generated summary and return its id."""
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0)
             )
             row = cursor.fetchone()
             return row['id']
@@ -380,6 +398,55 @@ class SummariesDB(Database):
                 d = dict(row)
                 txt = d.pop('summary_text', '') or ''
                 d['preview'] = txt[:300]
+                if d['timestamp']:
+                    d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def get_hourly_ai_stats(self, hours: int = 24) -> list:
+        """Returns per-hour summary counts and token totals for the last N hours."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT
+                    DATE_TRUNC('hour', timestamp AT TIME ZONE 'UTC') AS hour_utc,
+                    COUNT(*)                                          AS summary_count,
+                    SUM(COALESCE(tokens_used, 0))                    AS total_tokens,
+                    SUM(COALESCE(message_count, 0))                  AS total_messages,
+                    array_agg(DISTINCT bot_name) FILTER (WHERE bot_name IS NOT NULL) AS bots,
+                    array_agg(DISTINCT topic_name) FILTER (WHERE topic_name IS NOT NULL) AS topics
+                FROM summaries
+                WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+                GROUP BY 1
+                ORDER BY 1 DESC
+            """, (str(hours),))
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['hour_utc'] = d['hour_utc'].isoformat() if d['hour_utc'] else None
+                d['bots']   = [b for b in (d['bots']   or []) if b]
+                d['topics'] = [t for t in (d['topics'] or []) if t]
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def get_recent_summaries_for_ai_page(self, limit: int = 100) -> list:
+        """Returns recent summaries with token counts for the AI Usage page."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT id, bot_name, topic_name, summary_type, target_entity,
+                       message_count, COALESCE(tokens_used, 0) AS tokens_used, timestamp
+                FROM summaries
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (limit,))
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
                 if d['timestamp']:
                     d['timestamp'] = d['timestamp'].isoformat()
                 result.append(d)
@@ -453,7 +520,15 @@ class SummariesDB(Database):
                               AND s.message_ids IS NOT NULL
                               AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
                             ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
-                            LIMIT 1) AS summary_id
+                            LIMIT 1) AS summary_id,
+                           (SELECT sc.prompt_key
+                            FROM schedules sc
+                            JOIN topics t ON sc.topic_id = t.id
+                            JOIN categories cat ON t.category_id = cat.id
+                            JOIN bots b ON cat.bot_id = b.id
+                            WHERE b.name = r.bot_name AND t.name = r.topic_name
+                              AND sc.prompt_key IS NOT NULL
+                            LIMIT 1) AS prompt_key
                     FROM schedule_runs r {where}
                     ORDER BY r.fired_at DESC LIMIT %s""",
                 params or None

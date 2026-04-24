@@ -272,6 +272,28 @@ def get_pending_messages(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.get("/monitor/prompt-preview")
+def get_prompt_preview(
+    request: Request,
+    bot_name: str = Query(...),
+    prompt_key: str = Query(...),
+):
+    from summaries.prompts import get_system_prompt, get_fixed_prefix
+    db = get_db()
+    try:
+        prompts = db.get_bot_prompts(bot_name)
+        user_prompt = prompts.get(prompt_key, {}).get('text', '') if prompts else ''
+        return {
+            'status': 'ok',
+            'prompt_name': prompt_key,
+            'user_prompt': user_prompt,
+            'system_prompt': get_system_prompt(),
+            'fixed_prefix': get_fixed_prefix(),
+        }
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/monitor/schedule-history")
 def get_schedule_history(
     request: Request,

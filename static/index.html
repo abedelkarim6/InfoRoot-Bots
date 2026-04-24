@@ -76,6 +76,10 @@
                     <span class="icon">📡</span>
                     <span>Schedules Monitor</span>
                 </a>
+                <a href="#" class="nav-item" data-page="ai-usage">
+                    <span class="icon">⚡</span>
+                    <span>AI Usage</span>
+                </a>
             </div>
 
             <!-- YouTube Reader — hidden for users without youtube_on -->
@@ -274,6 +278,30 @@
                 </div>
             </div>
 
+            <!-- Gemini API usage widget -->
+            <div class="card" id="gemini-usage-card" style="margin-bottom:1.5rem;">
+                <div class="card-header" style="display:flex;align-items:center;gap:.75rem;">
+                    <span style="font-size:1.1rem;">⚡</span>
+                    <strong>Gemini API Usage</strong>
+                    <span style="margin-left:auto;font-size:11px;color:var(--text-muted);" id="gemini-usage-tier">Tier 1 · Standard PayGo</span>
+                </div>
+                <div class="card-body" style="display:flex;flex-wrap:wrap;gap:1.25rem;padding:1rem 1.25rem;">
+                    <div class="gemini-meter" id="gm-tpm">
+                        <div class="gemini-meter-label">Tokens / min <span class="gemini-meter-values" id="gm-tpm-vals"></span></div>
+                        <div class="gemini-bar-track"><div class="gemini-bar-fill" id="gm-tpm-bar"></div></div>
+                    </div>
+                    <div class="gemini-meter" id="gm-rpm">
+                        <div class="gemini-meter-label">Requests / min <span class="gemini-meter-values" id="gm-rpm-vals"></span></div>
+                        <div class="gemini-bar-track"><div class="gemini-bar-fill" id="gm-rpm-bar"></div></div>
+                    </div>
+                    <div class="gemini-meter" id="gm-rpd">
+                        <div class="gemini-meter-label">Requests today <span class="gemini-meter-values" id="gm-rpd-vals"></span></div>
+                        <div class="gemini-bar-track"><div class="gemini-bar-fill" id="gm-rpd-bar"></div></div>
+                    </div>
+                </div>
+                <div id="gemini-usage-warning" style="display:none;padding:.5rem 1.25rem .75rem;font-size:12px;color:var(--warning,#f59e0b);border-top:1px solid var(--border);"></div>
+            </div>
+
             <!-- Row 1: Daily line + Topic donut -->
             <div class="dash-chart-row">
                 <div class="dash-chart-card dash-wide">
@@ -457,7 +485,6 @@
                     <button class="mon-tab"         data-tab="summaries"   onclick="switchMonTab('summaries')">📬 Summaries</button>
                     <button class="mon-tab"         data-tab="messages"    onclick="switchMonTab('messages')">📥 Messages</button>
                     <button class="mon-tab"         data-tab="unclassified" onclick="switchMonTab('unclassified')">❓ Unclassified <span id="mon-uncl-badge" class="mon-uncl-badge" style="display:none;"></span></button>
-                    <button class="mon-tab"         data-tab="missed"      onclick="switchMonTab('missed')">⏭ Missed <span id="mon-missed-badge" class="mon-uncl-badge" style="display:none;"></span></button>
                     <button class="mon-tab"         data-tab="history"     onclick="switchMonTab('history')">📜 History</button>
                 </div>
 
@@ -472,7 +499,6 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-prompt-wrap')">All Prompts <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="sch-filter-prompt-dd"></div>
                         </div>
-                        <label class="mon-sort-label"><input type="checkbox" id="sch-sort-time" onchange="applySchFilters()"> Sort by next run</label>
                     </div>
                     <div id="monitor-bots-container"></div>
                 </div>
@@ -549,32 +575,6 @@
                     <div id="mon-uncl-content"><p class="mon-empty">Loading…</p></div>
                 </div>
 
-                <!-- Missed tab -->
-                <div id="mon-tab-missed" class="mon-tab-panel" style="display:none;">
-                    <div class="mon-filter-bar">
-                        <div class="mon-multi-select" id="missed-filter-bot-wrap" data-onchange="_reRenderMissed" data-label="All Bots">
-                            <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('missed-filter-bot-wrap')">All Bots <span class="mon-ms-arrow">▾</span></button>
-                            <div class="mon-ms-dropdown" id="missed-filter-bot-dd"></div>
-                        </div>
-                        <div class="mon-multi-select" id="missed-filter-topic-wrap" data-onchange="_reRenderMissed" data-label="All Topics">
-                            <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('missed-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
-                            <div class="mon-ms-dropdown" id="missed-filter-topic-dd"></div>
-                        </div>
-                        <div class="mon-multi-select" id="missed-filter-channel-wrap" data-onchange="_reRenderMissed" data-label="All Sources">
-                            <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('missed-filter-channel-wrap')">All Sources <span class="mon-ms-arrow">▾</span></button>
-                            <div class="mon-ms-dropdown" id="missed-filter-channel-dd"></div>
-                        </div>
-                        <input type="text" class="input mon-filter-search" id="missed-search" placeholder="🔍 Search text…" onkeydown="if(event.key==='Enter')loadMissedMessages()">
-                        <button class="btn btn-secondary btn-sm" onclick="loadMissedMessages()">Search</button>
-                        <input type="date" class="input" id="missed-filter-date-from" style="max-width:145px" title="From date" onchange="_renderMissed(_missedMessages)">
-                        <input type="date" class="input" id="missed-filter-date-to"   style="max-width:145px" title="To date"   onchange="_renderMissed(_missedMessages)">
-                        <button class="btn btn-sm" id="missed-flat-btn" onclick="toggleMissedFlatView()" title="Show all messages flat (latest first), no grouping">≡ Flat</button>
-                        <button class="btn btn-sm btn-secondary" id="missed-clear-btn" onclick="clearMissedView()" style="margin-left:auto;" title="Hide current messages from view (still in DB)">✕ Clear view</button>
-                        <button class="btn btn-sm btn-secondary" id="missed-showall-btn" onclick="showAllMissedView()" style="display:none;" title="Show previously cleared messages">↩ Show all</button>
-                    </div>
-                    <div id="mon-missed-stats"></div>
-                    <div id="mon-missed-content"><p class="mon-empty">Loading…</p></div>
-                </div>
 
                 <!-- History tab -->
                 <div id="mon-tab-history" class="mon-tab-panel" style="display:none;">
@@ -591,6 +591,7 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('hist-filter-status-wrap')">All Statuses <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="hist-filter-status-dd"></div>
                         </div>
+                        <button class="btn btn-secondary btn-sm" style="margin-left:auto;white-space:nowrap;" onclick="_historyRuns=[]; loadScheduleHistory()">↻ Refresh</button>
                     </div>
                     <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>
                 </div>
@@ -1155,6 +1156,7 @@
     <script src="/static/js/accounts.js"></script>
     <script src="/static/js/profile.js"></script>
     <script src="/static/js/tg-tester.js"></script>
+    <script src="/static/js/ai-usage.js"></script>
 
     <!-- Export Column Picker Modal -->
     <div id="export-col-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeExportModal()">
@@ -1175,6 +1177,17 @@
                 <button class="btn btn-secondary" onclick="closeExportModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="confirmExport()">⬇ Export CSV</button>
             </div>
+        </div>
+    </div>
+
+    <!-- ======== AI Usage Page ======== -->
+    <div id="ai-usage-page" class="page">
+        <div class="page-header">
+            <h1 class="page-title">⚡ AI Usage</h1>
+            <p class="page-subtitle">Gemini API quota, per-summary token breakdown, and hourly activity.</p>
+        </div>
+        <div id="ai-usage-content">
+            <p class="mon-empty" style="padding:32px">Loading…</p>
         </div>
     </div>
 

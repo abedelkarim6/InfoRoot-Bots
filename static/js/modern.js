@@ -256,6 +256,14 @@ function showPage(pageName) {
     if (pageName !== 'logs') {
         clearTimeout(_logsTimer);
     }
+    // Stop Gemini usage poller when leaving dashboard
+    if (pageName !== 'dashboard' && window._stopGeminiUsagePoller) {
+        _stopGeminiUsagePoller();
+    }
+    // Stop AI usage poller when leaving the AI Usage page
+    if (pageName !== 'ai-usage' && typeof _stopAiUsagePoller === 'function') {
+        _stopAiUsagePoller();
+    }
 
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
@@ -287,7 +295,10 @@ function showPage(pageName) {
         _showBotsListView();
     }
     else if (pageName === 'monitor') loadMonitorData();
-    else if (pageName === 'dashboard') loadDashboardData();
+    else if (pageName === 'dashboard') {
+        loadDashboardData();
+        if (window._startGeminiUsagePoller) _startGeminiUsagePoller();
+    }
     // YouTube pages
     else if (pageName === 'yt-channels') loadYtChannelsData();
     else if (pageName === 'yt-keywords') loadYtKeywordsData();
@@ -305,6 +316,7 @@ function showPage(pageName) {
     else if (pageName === 'tg-setup') loadTgSetupPage();
     else if (pageName === 'tg-tester') tgTesterInit();
     else if (pageName === 'logs') loadLogsPage();
+    else if (pageName === 'ai-usage') loadAiUsagePage();
     else if (pageName === 'privacy') loadPrivacyPage();
 }
 
@@ -4111,6 +4123,10 @@ style.textContent = `
     .mon-table td { padding:7px 12px; border-bottom:1px solid rgba(45,55,72,0.4); vertical-align:top; color:var(--text-secondary); }
     .mon-table tr:last-child td { border-bottom:none; }
     .mon-table tr:hover td { background:var(--bg-tertiary); }
+    .sch-timeline-table thead { position:sticky; top:0; z-index:1; }
+    .sch-timeline-table thead th { background:var(--bg-secondary); }
+    .sch-date-sep td { background:var(--bg-tertiary); color:var(--text-muted); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:5px 12px; border-bottom:1px solid var(--border-color); }
+    .sch-date-sep:hover td { background:var(--bg-tertiary) !important; cursor:default; }
     .mon-ellipsis { max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .mon-type-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; white-space:nowrap; }
     .mon-type-badge.hourly { background:rgba(59,130,246,0.18); color:#60a5fa; }
@@ -4261,7 +4277,7 @@ function switchMonTab(tab) {
         if (el) el.style.display = t === tab ? '' : 'none';
     });
     if (tab === 'messages' && !_allMessages.length) loadMonitorMessages();
-    if (tab === 'history') loadScheduleHistory();
+    if (tab === 'history' && !_historyRuns.length) loadScheduleHistory();
     if (tab === 'unclassified') {
         // Restore clear/show-all button state from persisted timestamp
         const clearedAt = localStorage.getItem('mon-uncl-cleared-at');
@@ -4383,74 +4399,137 @@ function _updateMonMsBtn(wrapId) {
 }
 function getMonMsValues(wrapId) { return _getMonMs(wrapId); }
 
+// Returns all fire timestamps for a schedule within the next 24h from nowMs.
+function getUpcomingFires24h(sch, nowMs) {
+    const toMs = nowMs + 24 * 3600000;
+    const type = sch.type;
+    const fires = [];
+
+    if (type === 'daily') {
+        for (let d = 0; d <= 1; d++) {
+            const t = new Date(nowMs);
+            t.setDate(t.getDate() + d);
+            t.setHours(sch.hour ?? 0, sch.minute ?? 0, 0, 0);
+            if (t.getTime() > nowMs && t.getTime() < toMs) fires.push(t.getTime());
+        }
+    } else if (type === 'hourly') {
+        const first = new Date(nowMs);
+        first.setMinutes(sch.minute ?? 0, 0, 0);
+        if (first.getTime() <= nowMs) first.setHours(first.getHours() + 1);
+        let t = first.getTime();
+        while (t < toMs) { fires.push(t); t += 3600000; }
+    } else if (type === 'minute') {
+        const intervalMs = (sch.minute ?? 1) * 60000;
+        let t = Math.ceil((nowMs + 1000) / intervalMs) * intervalMs;
+        // Cap at 120 rows for high-frequency schedules
+        while (t < toMs && fires.length < 120) { fires.push(t); t += intervalMs; }
+    } else if (type === 'interval_hourly' || type === 'interval_minutes') {
+        const intervalMs = type === 'interval_hourly'
+            ? (sch.hours ?? 1) * 3600000
+            : (sch.minutes ?? 30) * 60000;
+        const startH  = sch.start_hour   ?? 0;
+        const startMn = sch.start_minute ?? 0;
+        const endH    = sch.end_hour;
+        const endMn   = sch.end_minute;
+        for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
+            const anchor = new Date(nowMs);
+            anchor.setDate(anchor.getDate() + dayOffset);
+            anchor.setHours(startH, startMn, 0, 0);
+            const anchorMs = anchor.getTime();
+            let t = anchorMs <= nowMs
+                ? anchorMs + Math.ceil((nowMs - anchorMs + 1) / intervalMs) * intervalMs
+                : anchorMs;
+            while (t < toMs) {
+                if (endH != null && endMn != null) {
+                    const endDate = new Date(t);
+                    endDate.setHours(endH, endMn, 0, 0);
+                    if (t > endDate.getTime()) break;
+                }
+                fires.push(t);
+                t += intervalMs;
+            }
+        }
+    } else if (type === 'speeches_interval') {
+        // Fires every minute — show only the next 5
+        let t = Math.ceil((nowMs + 1000) / 60000) * 60000;
+        for (let i = 0; i < 5 && t < toMs; i++, t += 60000) fires.push(t);
+    }
+
+    return [...new Set(fires)].sort((a, b) => a - b);
+}
+
 function applySchFilters() {
     const container = document.getElementById('monitor-bots-container');
     const selTopics  = getMonMsValues('sch-filter-topic-wrap');
     const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
-    const sortByTime = document.getElementById('sch-sort-time')?.checked || false;
 
-    let items = _monSchFlat;
+    let items = _monSchFlat.filter(r => r.sch.enabled !== false);
     if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
     if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
 
     if (!items.length) {
-        container.innerHTML = '<p class="mon-empty">No schedules match the filter.</p>';
+        container.innerHTML = '<p class="mon-empty">No enabled schedules match the filter.</p>';
         return;
     }
 
-    // Avoid DOM flash on background refresh: update pending counts in-place if structure unchanged
-    if (!sortByTime && _tryInPlaceSchUpdate(container, items)) return;
-
-    if (sortByTime) {
-        // Sort by next run time (earliest first), disabled at bottom
-        items = [...items].sort((a, b) => {
-            if (a.sch.enabled === false && b.sch.enabled !== false) return 1;
-            if (a.sch.enabled !== false && b.sch.enabled === false) return -1;
-            const na = computeNextRun(a.sch) || Infinity;
-            const nb = computeNextRun(b.sch) || Infinity;
-            return na - nb;
+    // Expand each schedule into individual fire rows for the next 24h
+    const nowMs = Date.now();
+    const allFires = [];
+    for (const item of items) {
+        getUpcomingFires24h(item.sch, nowMs).forEach((fireAt, idx) => {
+            allFires.push({ fireAt, ...item, pending: idx === 0 ? item.pending : 0 });
         });
-        // Flat rendering (no grouping by bot/category)
-        const rows = items.map(r => renderSchRow(r)).join('');
-        container.innerHTML = `<div class="mon-bot-card"><div class="mon-bot-hdr">All Schedules (sorted by next run)</div>${rows}</div>`;
-    } else {
-        // Grouped rendering: bot → category → topic → schedules
-        const grouped = {};
-        items.forEach(r => {
-            if (!grouped[r.botName]) grouped[r.botName] = { enabled: r.botEnabled, cats: {} };
-            if (!grouped[r.botName].cats[r.catName]) grouped[r.botName].cats[r.catName] = {};
-            if (!grouped[r.botName].cats[r.catName][r.topicName]) grouped[r.botName].cats[r.catName][r.topicName] = { enabled: r.topicEnabled, rows: [] };
-            grouped[r.botName].cats[r.catName][r.topicName].rows.push(r);
-        });
-
-        container.innerHTML = Object.entries(grouped).map(([botName, bd]) => {
-            const dotCls = bd.enabled ? 'mon-bot-dot-on' : 'mon-bot-dot-off';
-            const dotTxt = bd.enabled ? '● ACTIVE' : '● OFF';
-            const botPending = _monSchFlat
-                .filter(r => r.botName === botName)
-                .reduce((s, r) => s + (r.pending || 0), 0);
-            const catsHtml = Object.entries(bd.cats).map(([catName, topics]) => {
-                const topicsHtml = Object.entries(topics).map(([topicName, td]) => {
-                    const offCls = td.enabled ? '' : ' mon-topic-off';
-                    const schRows = td.rows.map(r => renderSchRow(r)).join('');
-                    const topicPending = td.rows.reduce((s, r) => s + (r.pending || 0), 0);
-                    return `<div class="mon-topic-block">
-                        <div class="mon-topic-title${offCls}">
-                            <span>${escapeHtml(topicName)}${!td.enabled ? ' <span style="font-size:10px;color:var(--danger);">OFF</span>' : ''}</span>
-                        </div>
-                        ${schRows}
-                    </div>`;
-                }).join('');
-                return `<div class="mon-cat-hdr">${escapeHtml(catName)}</div>${topicsHtml}`;
-            }).join('');
-            return `<div class="mon-bot-card">
-                <div class="mon-bot-hdr">
-                    <span>🤖 ${escapeHtml(botName)} <span class="${dotCls}">${dotTxt}</span></span>
-                </div>
-                ${catsHtml}
-            </div>`;
-        }).join('');
     }
+    allFires.sort((a, b) => a.fireAt - b.fireAt);
+
+    if (!allFires.length) {
+        container.innerHTML = '<p class="mon-empty">No upcoming fires in the next 24 hours.</p>';
+        return;
+    }
+
+    const fmtTime = ms => new Date(ms).toLocaleTimeString('en-GB', {
+        timeZone: _BEIRUT_TZ, hour: '2-digit', minute: '2-digit'
+    });
+    const fmtDate = ms => new Date(ms).toLocaleDateString('en-GB', {
+        timeZone: _BEIRUT_TZ, weekday: 'short', day: '2-digit', month: 'short'
+    });
+
+    // Insert a date-separator row when the calendar date changes
+    let lastDate = '';
+    const tableRows = allFires.map(({ fireAt, botName, topicName, sch, pending }) => {
+        const dateLabel = fmtDate(fireAt);
+        let separator = '';
+        if (dateLabel !== lastDate) {
+            lastDate = dateLabel;
+            separator = `<tr class="sch-date-sep"><td colspan="7">${escapeHtml(dateLabel)}</td></tr>`;
+        }
+        const diff    = fireAt - nowMs;
+        const typeCls = sch.type || 'hourly';
+        const pendingCls   = pending > 0 ? 'has' : 'none';
+        const pendingTxt   = pending > 0 ? `${pending} pending` : 'none';
+        const pendingClick = pending > 0
+            ? `onclick="showPendingMessages(${escapeHtmlSys(JSON.stringify(botName))},${escapeHtmlSys(JSON.stringify(topicName))},${escapeHtmlSys(JSON.stringify(sch.type))},${escapeHtmlSys(JSON.stringify(sch))})" style="cursor:pointer"`
+            : '';
+        return separator + `<tr data-fire-at="${fireAt}">
+            <td style="white-space:nowrap;font-weight:600;font-size:13px;">${fmtTime(fireAt)}</td>
+            <td class="sch-in-cell" style="white-space:nowrap;font-size:12px;color:var(--text-muted);">${formatDuration(diff)}</td>
+            <td>${escapeHtml(botName)}</td>
+            <td>${escapeHtml(topicName)}</td>
+            <td><span class="mon-type-badge ${typeCls}">${escapeHtml(sch.type)}</span></td>
+            <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(sch.name || '—')}</td>
+            <td><span class="mon-pending ${pendingCls}" ${pendingClick}>${pendingTxt}</span></td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `<div style="overflow-x:auto;max-height:75vh;overflow-y:auto;">
+        <table class="mon-table sch-timeline-table">
+            <thead><tr>
+                <th>Time</th><th>In</th><th>Bot</th><th>Topic</th>
+                <th>Type</th><th>Schedule</th><th>Pending</th>
+            </tr></thead>
+            <tbody>${tableRows}</tbody>
+        </table>
+    </div>`;
 }
 
 function _schRowKey(r) {
@@ -4548,6 +4627,22 @@ function startMonitorCountdowns() {
 const _BEIRUT_TZ = 'Asia/Beirut';
 
 function tickCountdowns() {
+    // Tick the 24h timeline "In" cells
+    const nowMs = Date.now();
+    document.querySelectorAll('tr[data-fire-at]').forEach(row => {
+        const cdEl = row.querySelector('.sch-in-cell');
+        if (!cdEl) return;
+        const diff = parseInt(row.dataset.fireAt) - nowMs;
+        if (diff <= 0) {
+            cdEl.textContent = 'now';
+            cdEl.style.color = 'var(--success,#22c55e)';
+        } else {
+            cdEl.textContent = formatDuration(diff);
+            cdEl.style.color = diff < 300000 ? 'var(--danger)' : 'var(--text-muted)';
+        }
+    });
+
+    // Legacy: tick mon-sch-row countdowns (used by pending-messages detail view)
     document.querySelectorAll('[data-schedule]').forEach(row => {
         const cdEl   = row.querySelector('.mon-countdown');
         const timeEl = row.querySelector('.mon-next-time');
@@ -4665,6 +4760,17 @@ function _scheduleStartTime(sch) {
     return '—';
 }
 
+function _scheduleEndTime(sch) {
+    const type = sch.type;
+    if (type === 'interval_hourly' || type === 'interval_minutes') {
+        if (sch.end_hour != null && sch.end_minute != null) {
+            return `${String(sch.end_hour).padStart(2, '0')}:${String(sch.end_minute).padStart(2, '0')}`;
+        }
+        return '—';
+    }
+    return '—';
+}
+
 function _scheduleRepeatsText(sch) {
     const type = sch.type;
     if (type === 'daily')    return 'once daily';
@@ -4687,19 +4793,22 @@ function _scheduleFiresPerDay(sch) {
     if (type === 'hourly')   return 24;
     if (type === 'minute')   return Math.floor(1440 / (sch.minute || 60));
     if (type === 'interval_hourly') {
-        const startH = sch.start_hour   ?? 0;
-        const endH   = sch.end_hour     ?? 23;
-        const hours  = sch.hours        ?? 1;
-        return Math.max(1, Math.floor(((endH - startH) * 60) / (hours * 60)));
+        const hours = sch.hours ?? 1;
+        if (sch.end_hour != null && sch.end_minute != null) {
+            const startH = sch.start_hour ?? 0;
+            const windowH = sch.end_hour - startH;
+            return Math.max(1, Math.floor(windowH / hours));
+        }
+        return Math.max(1, Math.floor(24 / hours));
     }
     if (type === 'interval_minutes') {
-        const startH = sch.start_hour   ?? 0;
-        const startM = sch.start_minute ?? 0;
-        const endH   = sch.end_hour     ?? 23;
-        const endM   = sch.end_minute   ?? 59;
-        const mins   = sch.minutes      ?? 1;
-        const windowMins = (endH * 60 + endM) - (startH * 60 + startM);
-        return Math.max(1, Math.floor(windowMins / mins));
+        const mins = sch.minutes ?? 1;
+        if (sch.end_hour != null && sch.end_minute != null) {
+            const startMins = (sch.start_hour ?? 0) * 60 + (sch.start_minute ?? 0);
+            const endMins   = sch.end_hour * 60 + sch.end_minute;
+            return Math.max(1, Math.floor((endMins - startMins) / mins));
+        }
+        return Math.max(1, Math.floor(1440 / mins));
     }
     return 0;
 }
@@ -4784,15 +4893,20 @@ function applyMonSummaryFilters() {
     const tableRows = rows.map(({ botName, topicName, sch, stat, total, remain }) => {
         const typeCls   = sch.type || 'hourly';
         const startTime = _scheduleStartTime(sch);
+        const endTime   = _scheduleEndTime(sch);
         const repeats   = _scheduleRepeatsText(sch);
         const sentCell   = stat.sent   > 0 ? `<span style="color:var(--success,#22c55e);font-weight:600;">${stat.sent}</span>`   : `<span style="color:var(--text-muted);">0</span>`;
         const failedCell = stat.failed > 0 ? `<span style="color:var(--danger);font-weight:600;">${stat.failed}</span>`          : `<span style="color:var(--text-muted);">0</span>`;
         const remainCell = remain       > 0 ? `<span style="color:var(--text-secondary);">${remain}</span>`                      : `<span style="color:var(--text-muted);">0</span>`;
+        const endCell    = endTime !== '—'
+            ? `<span style="white-space:nowrap;font-size:12px;">${escapeHtml(endTime)}</span>`
+            : `<span style="color:var(--text-muted);font-size:12px;">—</span>`;
         return `<tr>
             <td>${escapeHtml(botName)}</td>
             <td>${escapeHtml(topicName)}</td>
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(sch.type)}</span></td>
             <td style="white-space:nowrap;font-size:12px;">${escapeHtml(startTime)}</td>
+            <td>${endCell}</td>
             <td style="font-size:12px;">${escapeHtml(repeats)}</td>
             <td style="text-align:center;">${sentCell}</td>
             <td style="text-align:center;">${failedCell}</td>
@@ -4804,7 +4918,7 @@ function applyMonSummaryFilters() {
         <table class="mon-table">
             <thead><tr>
                 <th>Bot</th><th>Topic</th><th>Type</th>
-                <th>Start Time</th><th>Repeats</th>
+                <th>Start Time</th><th>End Time</th><th>Repeats</th>
                 <th style="text-align:center;">Sent Today</th>
                 <th style="text-align:center;">Failed Today</th>
                 <th style="text-align:center;">Remaining</th>
@@ -6396,6 +6510,9 @@ function loadPrivacyPage() {
             border-radius:20px; background:rgba(16,185,129,.15); color:#6ee7b7; }
         .hist-badge-fail { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px;
             border-radius:20px; background:rgba(239,68,68,.15); color:#fca5a5; }
+        .hist-prompt-link { cursor:pointer; font-size:11.5px; color:var(--accent,#7c6af7);
+            text-decoration:underline; text-underline-offset:2px; white-space:nowrap; }
+        .hist-prompt-link:hover { opacity:.75; }
     `;
     document.head.appendChild(s);
 })();
@@ -6459,6 +6576,12 @@ function _renderScheduleHistory(runs) {
         const msgsCell = r.summary_id
             ? `<span class="mon-msgs-link" onclick="showHistoryMessages(${r.summary_id})">${r.message_count || 0}</span>`
             : (r.message_count || 0);
+        const promptCell = r.prompt_key
+            ? `<span class="hist-prompt-link"
+                   data-bot="${escapeHtmlSys(r.bot_name)}"
+                   data-key="${escapeHtmlSys(r.prompt_key)}"
+                   onclick="showHistPrompt(this.dataset.bot, this.dataset.key)">${escapeHtml(r.prompt_key)}</span>`
+            : '<span style="color:var(--text-muted)">—</span>';
         return `<tr class="${rowCls}">
             <td class="hist-time">${escapeHtml(timeStr)}</td>
             <td>${escapeHtml(r.bot_name   || '—')}</td>
@@ -6466,6 +6589,7 @@ function _renderScheduleHistory(runs) {
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(r.schedule_type || '—')}</span></td>
             <td>${statusEl}</td>
             <td style="text-align:center">${msgsCell}</td>
+            <td>${promptCell}</td>
             <td>${errorBtn}</td>
         </tr>`;
     }).join('');
@@ -6473,7 +6597,7 @@ function _renderScheduleHistory(runs) {
         <table class="hist-table">
             <thead><tr>
                 <th>Time</th><th>Bot</th><th>Topic</th><th>Type</th>
-                <th>Status</th><th>Msgs</th><th>Error</th>
+                <th>Status</th><th>Msgs</th><th>Prompt</th><th>Error</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
@@ -6520,6 +6644,26 @@ window.showHistError = function (btn) {
         </details>`;
 
     showAlert(html, { title: 'Schedule Run Error', icon: '⚠️' });
+};
+
+window.showHistPrompt = async function (botName, promptKey) {
+    const data = await api(`/api/monitor/prompt-preview?bot_name=${encodeURIComponent(botName)}&prompt_key=${encodeURIComponent(promptKey)}`);
+    if (data.status !== 'ok') {
+        showAlert(`Failed to load prompt: ${escapeHtml(data.message || '')}`, { title: 'Error', icon: '⚠️' });
+        return;
+    }
+
+    const combined = [data.system_prompt, data.fixed_prefix, data.user_prompt]
+        .filter(Boolean).join('\n\n');
+
+    const html = `
+        <div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--text-primary);">
+            Prompt: <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">${escapeHtml(promptKey)}</code>
+            &nbsp;·&nbsp; Bot: <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">${escapeHtml(botName)}</code>
+        </div>
+        <pre style="margin:0;font-size:12px;background:var(--bg-secondary,#f5f5f5);padding:10px 12px;border-radius:6px;white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;border:1px solid var(--border-color,#e0e0e0);">${escapeHtml(combined || '(empty)')}</pre>`;
+
+    showAlert(html, { title: 'Prompt Preview', icon: '📋' });
 };
 
 // ---------- History Source Messages — inline view ----------

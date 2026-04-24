@@ -255,6 +255,8 @@ class Database:
                 cursor.execute('ALTER TABLE summaries ADD COLUMN topic_name TEXT')
             if 'message_ids' not in cols2:
                 cursor.execute('ALTER TABLE summaries ADD COLUMN message_ids TEXT')
+            if 'tokens_used' not in cols2:
+                cursor.execute('ALTER TABLE summaries ADD COLUMN tokens_used INTEGER DEFAULT 0')
 
             # ==================== Config tables (replaces config.yaml) ====================
 

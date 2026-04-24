@@ -480,6 +480,18 @@ body.chat-page-active .main-content {
     color: var(--text-muted);
     font-size: 14px;
 }
+.page-title {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+    line-height: 1.2;
+}
+.page-subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 0;
+}
 
 .section-title {
     font-size: 18px;
@@ -2234,6 +2246,107 @@ html[data-theme="dark"] .tag-user-kw {
 
 .dash-chart-row:nth-child(odd) {
     grid-template-columns: 1fr 2fr;
+}
+
+.gemini-meter {
+    flex: 1 1 220px;
+    min-width: 180px;
+}
+.gemini-meter-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.gemini-meter-values {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.gemini-bar-track {
+    height: 8px;
+    background: var(--bg-hover);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.gemini-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--success, #22c55e);
+    transition: width .4s ease, background .4s ease;
+    width: 0%;
+}
+
+/* ── Generic card component (used across multiple pages) ── */
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+}
+.card-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+}
+.card-body {
+    padding: 16px 20px;
+}
+
+/* ── Colored pill tags (used in AI Usage page tables) ── */
+.tag-blue, .tag-green {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.5;
+}
+.tag-blue  { background: rgba(59, 130, 246, .18); color: #93c5fd; }
+.tag-green { background: rgba(16, 185, 129, .18); color: #6ee7b7; }
+html[data-theme="light"] .tag-blue  { background: rgba(59, 130, 246, .12); color: #1d4ed8; }
+html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color: #065f46; }
+
+/* ── AI Usage page meters ── */
+.aiu-meter {
+    flex: 1 1 220px;
+    min-width: 180px;
+}
+.aiu-meter-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.aiu-meter-vals {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.aiu-bar-track {
+    height: 10px;
+    background: var(--bg-hover, rgba(255,255,255,.05));
+    border-radius: 5px;
+    overflow: hidden;
+}
+.aiu-bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width .4s ease, background .4s ease;
+}
+.aiu-bar-ok     { background: var(--success, #10b981); }
+.aiu-bar-warn   { background: var(--warning, #f59e0b); }
+.aiu-bar-danger { background: var(--danger,  #ef4444); }
+.aiu-bar-pct {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: right;
+    margin-top: 2px;
 }
 
 .dash-chart-card {

@@ -544,3 +544,50 @@ window.filterSourceMatrix = function () {
     row.style.display = (row.dataset.source || '').toLowerCase().includes(q) ? '' : 'none';
   });
 };
+
+/* ══ Gemini usage widget ══════════════════════════════════════════════ */
+let _geminiUsageTimer = null;
+
+function _pct(used, limit) { return limit > 0 ? Math.min(100, (used / limit) * 100) : 0; }
+function _fmtK(n) { return n >= 1_000_000 ? (n/1_000_000).toFixed(2)+'M' : n >= 1_000 ? (n/1_000).toFixed(1)+'k' : String(n); }
+
+function _setMeter(barId, valId, used, limit, warn, danger) {
+    const pct = _pct(used, limit);
+    const bar = document.getElementById(barId);
+    const val = document.getElementById(valId);
+    if (!bar || !val) return;
+    bar.style.width = pct + '%';
+    bar.style.background = pct >= danger ? 'var(--danger,#ef4444)'
+        : pct >= warn ? 'var(--warning,#f59e0b)'
+        : 'var(--success,#22c55e)';
+    val.textContent = `${_fmtK(used)} / ${_fmtK(limit)} (${pct.toFixed(1)}%)`;
+}
+
+async function loadGeminiUsage() {
+    try {
+        const d = await api('/api/system/gemini-usage');
+        if (d.status !== 'ok') return;
+        _setMeter('gm-tpm-bar', 'gm-tpm-vals', d.tpm.used, d.tpm.limit, 60, 85);
+        _setMeter('gm-rpm-bar', 'gm-rpm-vals', d.rpm.used, d.rpm.limit, 60, 85);
+        _setMeter('gm-rpd-bar', 'gm-rpd-vals', d.rpd.used, d.rpd.limit, 70, 90);
+        const tpmPct = _pct(d.tpm.used, d.tpm.limit);
+        const rpmPct = _pct(d.rpm.used, d.rpm.limit);
+        const w = document.getElementById('gemini-usage-warning');
+        if (!w) return;
+        const warnings = [];
+        if (tpmPct >= 85) warnings.push(`⚠️ TPM at ${tpmPct.toFixed(0)}% — approaching Tier 1 limit (${_fmtK(d.tpm.limit)} tokens/min). Avoid scheduling more concurrent topics.`);
+        else if (tpmPct >= 60) warnings.push(`⚡ TPM at ${tpmPct.toFixed(0)}% — moderate usage. New high-frequency schedules may push you over the limit.`);
+        if (rpmPct >= 85) warnings.push(`⚠️ RPM at ${rpmPct.toFixed(0)}% — too many concurrent schedule fires.`);
+        w.style.display = warnings.length ? '' : 'none';
+        w.innerHTML = warnings.join('<br>');
+    } catch (e) { /* silent */ }
+}
+
+window._startGeminiUsagePoller = function () {
+    loadGeminiUsage();
+    if (_geminiUsageTimer) clearInterval(_geminiUsageTimer);
+    _geminiUsageTimer = setInterval(loadGeminiUsage, 15000);
+};
+window._stopGeminiUsagePoller = function () {
+    if (_geminiUsageTimer) { clearInterval(_geminiUsageTimer); _geminiUsageTimer = null; }
+};

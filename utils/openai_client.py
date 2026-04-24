@@ -32,7 +32,7 @@ class OpenAIClient:
         openai.api_key = self.api_key
         logger.info(f"OpenAI client initialized with model: {self.model}")
     
-    def generate_summary(self, prompt: str) -> str:
+    def generate_summary(self, prompt: str) -> tuple[str, int]:
         """
         Generate a summary using OpenAI API.
         
@@ -57,8 +57,12 @@ class OpenAIClient:
             
             summary = response.choices[0].message.content.strip()
             logger.info(f"Summary generated successfully (length: {len(summary)} chars)")
-            
-            return summary
+            tokens = 0
+            if hasattr(response, 'usage') and response.usage:
+                tokens = (response.usage.prompt_tokens or 0) + (response.usage.completion_tokens or 0)
+            if not tokens:
+                tokens = (len(prompt) + len(summary)) // 4
+            return summary, tokens
             
         except Exception as e:
             logger.error(f"Error generating summary: {e}")
