@@ -28,7 +28,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 BEIRUT_TZ = ZoneInfo('Asia/Beirut')
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils as tg_utils
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel as TelegramChannel
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -135,7 +135,8 @@ async def build_source_channel_map():
             try:
                 await _try_join_channel(ch_identifier)
                 entity = await client.get_entity(ch_identifier)
-                num_id = entity.id
+                # Use get_peer_id so the key matches event.chat_id (negative for channels)
+                num_id = tg_utils.get_peer_id(entity)
                 if num_id not in new_map:
                     new_map[num_id] = []
                 if coll_name not in new_map[num_id]:
@@ -214,7 +215,8 @@ async def read_channel_messages(event):
         # logger.info(f"[MSG] RECEIVED | id={channel_id_numeric} | @{channel_id} ({channel_title}) | \"{text_intro}\"")
 
         # Step 1: Find which collections include this channel as a source.
-        matching_collections = list(_source_channel_map.get(channel_id_numeric, []))
+        # Use chat_id (negative peer ID from event) — consistent with map keys from build_source_channel_map.
+        matching_collections = list(_source_channel_map.get(chat_id, []))
         if not matching_collections:
             return
 

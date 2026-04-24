@@ -4284,8 +4284,6 @@ function switchMonTab(tab) {
 // ---------- Topics & Schedules ----------
 let _monSchFlat = []; // flat list of {botName, catName, topicName, topicEnabled, sch, pending}
 
-let _schSelectedTopics = new Set(); // multi-select state
-
 function renderMonitorBots(bots) {
     // Build flat schedule list for filtering/sorting
     _monSchFlat = [];
@@ -4309,27 +4307,8 @@ function renderMonitorBots(bots) {
         });
     });
 
-    // Populate topic multi-select dropdown (preserve selection)
-    const dd = document.getElementById('sch-filter-topic-dd');
-    if (dd) {
-        const sorted = [...allTopics].sort();
-        dd.innerHTML = `<label class="mon-ms-item all-item"><input type="checkbox" onchange="schTopicSelectAll(this.checked)" ${_schSelectedTopics.size === 0 ? 'checked' : ''}> All Topics</label>` +
-            sorted.map(t => {
-                const checked = _schSelectedTopics.has(t) ? 'checked' : '';
-                return `<label class="mon-ms-item"><input type="checkbox" value="${escapeHtml(t)}" ${checked} onchange="schTopicToggle(this)"> ${escapeHtml(t)}</label>`;
-            }).join('');
-        _updateSchTopicBtnLabel();
-    }
-
-    // Populate prompt filter dropdown (preserve selection)
-    const promptSel = document.getElementById('sch-filter-prompt');
-    if (promptSel) {
-        const cur = promptSel.value;
-        promptSel.innerHTML = '<option value="">All Prompts</option>' +
-            [...allPrompts].sort().map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
-        promptSel.value = cur;
-    }
-
+    populateMonMultiSelect('sch-filter-topic-wrap',  [...allTopics].sort());
+    populateMonMultiSelect('sch-filter-prompt-wrap', [...allPrompts].sort());
     applySchFilters();
 }
 
@@ -4346,49 +4325,73 @@ document.addEventListener('click', e => {
     });
 });
 
-function schTopicSelectAll(checked) {
-    _schSelectedTopics.clear();
-    const dd = document.getElementById('sch-filter-topic-dd');
+// -------- Generic multi-select engine --------
+const _monMsState = {};
+function _getMonMs(wrapId) {
+    if (!_monMsState[wrapId]) _monMsState[wrapId] = new Set();
+    return _monMsState[wrapId];
+}
+function populateMonMultiSelect(wrapId, values) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    const allLabel = wrap.dataset.label || 'All';
+    const dd = wrap.querySelector('.mon-ms-dropdown');
+    if (!dd) return;
+    const selected = _getMonMs(wrapId);
+    for (const v of [...selected]) if (!values.includes(v)) selected.delete(v);
+    dd.innerHTML = `<label class="mon-ms-item all-item"><input type="checkbox" ${selected.size === 0 ? 'checked' : ''} onchange="_monMsSelectAll('${wrapId}',this.checked)"> ${allLabel}</label>` +
+        values.map(v => {
+            const ch = selected.has(v) ? 'checked' : '';
+            return `<label class="mon-ms-item"><input type="checkbox" value="${escapeHtmlSys(v)}" ${ch} onchange="_monMsToggle('${wrapId}',this)"> ${escapeHtml(v)}</label>`;
+        }).join('');
+    _updateMonMsBtn(wrapId);
+}
+function _monMsSelectAll(wrapId, checked) {
+    const wrap = document.getElementById(wrapId);
+    const selected = _getMonMs(wrapId);
+    selected.clear();
+    const dd = wrap?.querySelector('.mon-ms-dropdown');
     if (dd) dd.querySelectorAll('input[value]').forEach(cb => cb.checked = false);
-    _updateSchTopicBtnLabel();
-    applySchFilters();
+    _updateMonMsBtn(wrapId);
+    const fn = wrap?.dataset?.onchange;
+    if (fn && window[fn]) window[fn]();
 }
-
-function schTopicToggle(cb) {
-    if (cb.checked) _schSelectedTopics.add(cb.value);
-    else _schSelectedTopics.delete(cb.value);
-    // Update "All" checkbox
-    const dd = document.getElementById('sch-filter-topic-dd');
-    if (dd) {
-        const allCb = dd.querySelector('.all-item input');
-        if (allCb) allCb.checked = _schSelectedTopics.size === 0;
-    }
-    _updateSchTopicBtnLabel();
-    applySchFilters();
+function _monMsToggle(wrapId, cb) {
+    const selected = _getMonMs(wrapId);
+    if (cb.checked) selected.add(cb.value); else selected.delete(cb.value);
+    const wrap = document.getElementById(wrapId);
+    const dd = wrap?.querySelector('.mon-ms-dropdown');
+    if (dd) { const allCb = dd.querySelector('.all-item input'); if (allCb) allCb.checked = selected.size === 0; }
+    _updateMonMsBtn(wrapId);
+    const fn = wrap?.dataset?.onchange;
+    if (fn && window[fn]) window[fn]();
 }
-
-function _updateSchTopicBtnLabel() {
-    const wrap = document.getElementById('sch-filter-topic-wrap');
+function _updateMonMsBtn(wrapId) {
+    const wrap = document.getElementById(wrapId);
     if (!wrap) return;
     const btn = wrap.querySelector('.mon-ms-btn');
     if (!btn) return;
-    if (_schSelectedTopics.size === 0) {
-        btn.innerHTML = 'All Topics <span class="mon-ms-arrow">▾</span>';
-    } else if (_schSelectedTopics.size <= 2) {
-        btn.innerHTML = `${[..._schSelectedTopics].join(', ')} <span class="mon-ms-arrow">▾</span>`;
+    const allLabel = wrap.dataset.label || 'All';
+    const selected = _getMonMs(wrapId);
+    if (selected.size === 0) {
+        btn.innerHTML = `${allLabel} <span class="mon-ms-arrow">▾</span>`;
+    } else if (selected.size <= 2) {
+        btn.innerHTML = `${[...selected].map(escapeHtml).join(', ')} <span class="mon-ms-arrow">▾</span>`;
     } else {
-        btn.innerHTML = `${_schSelectedTopics.size} topics <span class="mon-ms-arrow">▾</span>`;
+        btn.innerHTML = `${selected.size} selected <span class="mon-ms-arrow">▾</span>`;
     }
 }
+function getMonMsValues(wrapId) { return _getMonMs(wrapId); }
 
 function applySchFilters() {
     const container = document.getElementById('monitor-bots-container');
-    const filterPrompt = document.getElementById('sch-filter-prompt')?.value || '';
+    const selTopics  = getMonMsValues('sch-filter-topic-wrap');
+    const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
     const sortByTime = document.getElementById('sch-sort-time')?.checked || false;
 
     let items = _monSchFlat;
-    if (_schSelectedTopics.size > 0) items = items.filter(r => _schSelectedTopics.has(r.topicName));
-    if (filterPrompt) items = items.filter(r => (r.sch.prompt_key || '') === filterPrompt);
+    if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
+    if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
 
     if (!items.length) {
         container.innerHTML = '<p class="mon-empty">No schedules match the filter.</p>';
@@ -4705,7 +4708,7 @@ async function renderMonSummaries(summaries) {
     // summaries arg kept for compatibility but no longer used directly in the table
     _allSummaries = summaries;
 
-    // Populate bot/topic filter dropdowns from bots_data
+    // Populate bot/topic/type filter dropdowns from bots_data
     const botsData = _monitorData?.bots || {};
     const allBots   = Object.keys(botsData).sort();
     const allTopics = [...new Set(
@@ -4713,8 +4716,16 @@ async function renderMonSummaries(summaries) {
             Object.values(b.categories || {}).flatMap(c => Object.keys(c.topics || {}))
         )
     )].sort();
-    _populateMonSelect('sum-filter-bot',   allBots,   'All Bots');
-    _populateMonSelect('sum-filter-topic', allTopics, 'All Topics');
+    const allTypes = [...new Set(
+        Object.values(botsData).flatMap(b =>
+            Object.values(b.categories || {}).flatMap(c =>
+                Object.values(c.topics || {}).flatMap(t => (t.schedules || []).map(s => s.type).filter(Boolean))
+            )
+        )
+    )].sort();
+    populateMonMultiSelect('sum-filter-bot-wrap',   allBots);
+    populateMonMultiSelect('sum-filter-topic-wrap', allTopics);
+    populateMonMultiSelect('sum-filter-type-wrap',  allTypes);
 
     // Fetch today's stats
     const statsData = await api('/api/monitor/schedule-stats');
@@ -4724,9 +4735,9 @@ async function renderMonSummaries(summaries) {
 }
 
 function applyMonSummaryFilters() {
-    const filterBot   = document.getElementById('sum-filter-bot')?.value   || '';
-    const filterTopic = document.getElementById('sum-filter-topic')?.value || '';
-    const filterType  = document.getElementById('sum-filter-type')?.value  || '';
+    const selBots   = getMonMsValues('sum-filter-bot-wrap');
+    const selTopics = getMonMsValues('sum-filter-topic-wrap');
+    const selTypes  = getMonMsValues('sum-filter-type-wrap');
 
     const el = document.getElementById('mon-summaries-content');
     if (!el) return;
@@ -4743,16 +4754,16 @@ function applyMonSummaryFilters() {
     // Flatten all schedules from bots config
     const rows = [];
     for (const [botName, botData] of Object.entries(botsData)) {
-        if (filterBot && botName !== filterBot) continue;
+        if (selBots.size > 0 && !selBots.has(botName)) continue;
         if (!botData.enabled) continue;
         for (const [, catData] of Object.entries(botData.categories || {})) {
             if (!catData.enabled) continue;
             for (const [topicName, topicData] of Object.entries(catData.topics || {})) {
-                if (filterTopic && topicName !== filterTopic) continue;
+                if (selTopics.size > 0 && !selTopics.has(topicName)) continue;
                 if (!topicData.enabled) continue;
                 for (const sch of (topicData.schedules || [])) {
                     if (!sch.enabled) continue;
-                    if (filterType && sch.type !== filterType) continue;
+                    if (selTypes.size > 0 && !selTypes.has(sch.type || '')) continue;
 
                     const key    = `${botName}|${topicName}|${sch.type}`;
                     const stat   = statsLookup[key] || { sent: 0, failed: 0 };
@@ -4915,15 +4926,18 @@ function _closeSummaryMessages() {
     const panel = document.getElementById('mon-tab-summaries');
     panel.innerHTML = `
         <div class="mon-filter-bar">
-            <select class="select mon-filter-sel" id="sum-filter-bot"   onchange="applyMonSummaryFilters()"><option value="">All Bots</option></select>
-            <select class="select mon-filter-sel" id="sum-filter-topic" onchange="applyMonSummaryFilters()"><option value="">All Topics</option></select>
-            <select class="select mon-filter-sel" id="sum-filter-type"  onchange="applyMonSummaryFilters()">
-                <option value="">All Types</option>
-                <option value="hourly">Hourly</option>
-                <option value="daily">Daily</option>
-                <option value="minute">Minute</option>
-                <option value="interval_hourly">Interval</option>
-            </select>
+            <div class="mon-multi-select" id="sum-filter-bot-wrap" data-onchange="applyMonSummaryFilters" data-label="All Bots">
+                <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sum-filter-bot-wrap')">All Bots <span class="mon-ms-arrow">▾</span></button>
+                <div class="mon-ms-dropdown" id="sum-filter-bot-dd"></div>
+            </div>
+            <div class="mon-multi-select" id="sum-filter-topic-wrap" data-onchange="applyMonSummaryFilters" data-label="All Topics">
+                <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sum-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
+                <div class="mon-ms-dropdown" id="sum-filter-topic-dd"></div>
+            </div>
+            <div class="mon-multi-select" id="sum-filter-type-wrap" data-onchange="applyMonSummaryFilters" data-label="All Types">
+                <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sum-filter-type-wrap')">All Types <span class="mon-ms-arrow">▾</span></button>
+                <div class="mon-ms-dropdown" id="sum-filter-type-dd"></div>
+            </div>
         </div>
         <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>`;
     renderMonSummaries(_allSummaries || []);
@@ -4994,13 +5008,14 @@ function _closePendingMessages() {
     const panel = document.getElementById('mon-tab-schedules');
     panel.innerHTML = `
         <div class="mon-filter-bar">
-            <div class="mon-multi-select" id="sch-filter-topic-wrap">
+            <div class="mon-multi-select" id="sch-filter-topic-wrap" data-onchange="applySchFilters" data-label="All Topics">
                 <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
                 <div class="mon-ms-dropdown" id="sch-filter-topic-dd"></div>
             </div>
-            <select class="select mon-filter-sel" id="sch-filter-prompt" onchange="applySchFilters()">
-                <option value="">All Prompts</option>
-            </select>
+            <div class="mon-multi-select" id="sch-filter-prompt-wrap" data-onchange="applySchFilters" data-label="All Prompts">
+                <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-prompt-wrap')">All Prompts <span class="mon-ms-arrow">▾</span></button>
+                <div class="mon-ms-dropdown" id="sch-filter-prompt-dd"></div>
+            </div>
             <label class="mon-sort-label"><input type="checkbox" id="sch-sort-time" onchange="applySchFilters()"> Sort by next run</label>
         </div>
         <div id="monitor-bots-container"><p class="mon-empty">Loading…</p></div>`;
@@ -5039,9 +5054,9 @@ function renderMonMessages() {
     const colls    = [...new Set(_allMessages.map(m => m.collection).filter(Boolean))].sort();
     const channels = [...new Set(_allMessages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
     const topics   = [...new Set(_allMessages.flatMap(m => (m.topics || '').split(',').map(t => t.trim())).filter(Boolean))].sort();
-    _populateMonSelect('msg-filter-coll',    colls,    'All Collections');
-    _populateMonSelect('msg-filter-channel', channels, 'All Channels');
-    _populateMonSelect('msg-filter-topic',   topics,   'All Topics');
+    populateMonMultiSelect('msg-filter-coll-wrap',    colls);
+    populateMonMultiSelect('msg-filter-channel-wrap', channels);
+    populateMonMultiSelect('msg-filter-topic-wrap',   topics);
     applyMonMessageFilters();
 }
 
@@ -5058,17 +5073,17 @@ function toggleMsgFlatView() {
 }
 
 function applyMonMessageFilters() {
-    const coll     = document.getElementById('msg-filter-coll')?.value      || '';
-    const channel  = document.getElementById('msg-filter-channel')?.value   || '';
-    const topic    = document.getElementById('msg-filter-topic')?.value     || '';
+    const selColls    = getMonMsValues('msg-filter-coll-wrap');
+    const selChannels = getMonMsValues('msg-filter-channel-wrap');
+    const selTopics   = getMonMsValues('msg-filter-topic-wrap');
     const search   = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
     const dateFrom = document.getElementById('msg-filter-date-from')?.value || '';
     const dateTo   = document.getElementById('msg-filter-date-to')?.value   || '';
 
     let filtered = _allMessages;
-    if (coll)     filtered = filtered.filter(m => m.collection === coll);
-    if (channel)  filtered = filtered.filter(m => `@${m.channel_username}` === channel);
-    if (topic)    filtered = filtered.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
+    if (selColls.size > 0)    filtered = filtered.filter(m => selColls.has(m.collection || ''));
+    if (selChannels.size > 0) filtered = filtered.filter(m => selChannels.has(`@${m.channel_username}`));
+    if (selTopics.size > 0)   filtered = filtered.filter(m => (m.topics || '').split(',').map(t => t.trim()).some(t => selTopics.has(t)));
     if (search)   filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
     if (dateFrom) filtered = filtered.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
     if (dateTo)   filtered = filtered.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
@@ -5247,9 +5262,13 @@ function _renderUnclassified(messages) {
         ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > clearedAtMs)
         : messages;
 
-    // Apply channel filter
-    const chFilter = document.getElementById('uncl-filter-channel')?.value || '';
-    if (chFilter) visible = visible.filter(m => (m.channel_username || '') === chFilter);
+    // Apply multi-select filters (bot, collection, channel)
+    const unclSelBots  = getMonMsValues('uncl-filter-bot-wrap');
+    const unclSelColls = getMonMsValues('uncl-filter-coll-wrap');
+    const unclSelCh    = getMonMsValues('uncl-filter-channel-wrap');
+    if (unclSelBots.size  > 0) visible = visible.filter(m => unclSelBots.has(m.bot_name || ''));
+    if (unclSelColls.size > 0) visible = visible.filter(m => unclSelColls.has(m.collection_name || ''));
+    if (unclSelCh.size    > 0) visible = visible.filter(m => unclSelCh.has(`@${m.channel_username}`));
 
     // Apply date filters
     const dateFrom = document.getElementById('uncl-filter-date-from')?.value || '';
@@ -5257,13 +5276,9 @@ function _renderUnclassified(messages) {
     if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
     if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
 
-    // Populate channel dropdown from loaded data (once)
-    const chSel = document.getElementById('uncl-filter-channel');
-    if (chSel && chSel.options.length <= 1) {
-        const channels = [...new Set(messages.map(m => m.channel_username).filter(Boolean))].sort();
-        channels.forEach(ch => { const o = document.createElement('option'); o.value = ch; o.textContent = `@${ch}`; chSel.appendChild(o); });
-        if (chFilter) chSel.value = chFilter;
-    }
+    // Populate channel multi-select from loaded data
+    const chValues = [...new Set(messages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
+    populateMonMultiSelect('uncl-filter-channel-wrap', chValues);
 
     if (!visible.length) {
         content.innerHTML = _unclClearedAt
@@ -5444,26 +5459,29 @@ const _UNCL_PAGE_SIZE = 50;
 let _unclOffset = 0;
 let _unclHasMore = true;
 
+function _reRenderUnclassified() { _renderUnclassified(_unclMessages); }
+
 async function loadUnclassifiedMessages(append = false) {
     const content = document.getElementById('mon-uncl-content');
     if (!append) {
         _unclOffset = 0;
         _unclHasMore = true;
         _unclMessages = [];
-        _unclInitialized = false; // reset so dropdowns rebuild
-        const chSel = document.getElementById('uncl-filter-channel');
-        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
+        _unclInitialized = false;
+        // Clear multi-select state so dropdowns rebuild from fresh data
+        ['uncl-filter-bot-wrap', 'uncl-filter-coll-wrap', 'uncl-filter-channel-wrap'].forEach(w => {
+            _getMonMs(w).clear();
+            _updateMonMsBtn(w);
+            const dd = document.getElementById(w.replace('-wrap', '-dd'));
+            if (dd) dd.innerHTML = '';
+        });
         content.innerHTML = '<p class="mon-empty">Loading…</p>';
     }
     const scrollY = window.scrollY;
 
-    const bot  = document.getElementById('uncl-filter-bot')?.value  || '';
-    const coll = document.getElementById('uncl-filter-coll')?.value || '';
     const search = document.getElementById('uncl-search')?.value?.trim() || '';
 
     let url = `/api/monitor/unclassified?limit=${_UNCL_PAGE_SIZE}&offset=${_unclOffset}`;
-    if (bot)            url += `&bot=${encodeURIComponent(bot)}`;
-    if (coll)           url += `&collection=${encodeURIComponent(coll)}`;
     if (search)         url += `&search=${encodeURIComponent(search)}`;
     if (_unclClearedAt) url += `&since=${encodeURIComponent(_unclClearedAt)}`;
 
@@ -5487,17 +5505,12 @@ async function loadUnclassifiedMessages(append = false) {
         badge.style.display = totalUncl > 0 ? 'inline-block' : 'none';
     }
 
-    // Populate filter dropdowns (only once)
+    // Populate bot/collection multi-selects (only once per load)
     if (!_unclInitialized) {
         const bots  = [...new Set(stats.map(s => s.bot_name).filter(Boolean))].sort();
         const colls = [...new Set(stats.map(s => s.collection_name).filter(Boolean))].sort();
-        _populateMonSelect('uncl-filter-bot',  bots,  'All Bots');
-        _populateMonSelect('uncl-filter-coll', colls, 'All Collections');
-        if (bot)  document.getElementById('uncl-filter-bot').value  = bot;
-        if (coll) document.getElementById('uncl-filter-coll').value = coll;
-        // Reset channel dropdown so _renderUnclassified can re-populate from messages
-        const chSel = document.getElementById('uncl-filter-channel');
-        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
+        populateMonMultiSelect('uncl-filter-bot-wrap',  bots);
+        populateMonMultiSelect('uncl-filter-coll-wrap', colls);
         _unclInitialized = true;
     }
 
@@ -5550,25 +5563,28 @@ function toggleMissedFlatView() {
     _renderMissed(_missedMessages);
 }
 
+function _reRenderMissed() { _renderMissed(_missedMessages); }
+
 async function loadMissedMessages(append = false) {
     const content = document.getElementById('mon-missed-content');
     if (!append) {
         _missedOffset   = 0;
         _missedHasMore  = true;
         _missedMessages = [];
-        const chSel = document.getElementById('missed-filter-channel');
-        if (chSel) chSel.innerHTML = '<option value="">All Sources</option>';
+        // Clear multi-select state so dropdowns rebuild from fresh data
+        ['missed-filter-bot-wrap', 'missed-filter-topic-wrap', 'missed-filter-channel-wrap'].forEach(w => {
+            _getMonMs(w).clear();
+            _updateMonMsBtn(w);
+            const dd = document.getElementById(w.replace('-wrap', '-dd'));
+            if (dd) dd.innerHTML = '';
+        });
         if (content) content.innerHTML = '<p class="mon-empty">Loading…</p>';
     }
     const scrollY = window.scrollY;
 
-    const bot    = document.getElementById('missed-filter-bot')?.value   || '';
-    const topic  = document.getElementById('missed-filter-topic')?.value || '';
-    const search = document.getElementById('missed-search')?.value        || '';
+    const search = document.getElementById('missed-search')?.value || '';
 
     let url = `/api/monitor/missed?limit=${_MISSED_PAGE_SIZE}&offset=${_missedOffset}`;
-    if (bot)              url += `&bot=${encodeURIComponent(bot)}`;
-    if (topic)            url += `&topic=${encodeURIComponent(topic)}`;
     if (search)           url += `&search=${encodeURIComponent(search)}`;
     if (_missedClearedAt) url += `&since=${encodeURIComponent(_missedClearedAt)}`;
 
@@ -5581,26 +5597,12 @@ async function loadMissedMessages(append = false) {
     _missedMessages = _missedMessages.concat(newMsgs);
     _missedOffset  += newMsgs.length;
 
-    // Populate filters on first load
+    // Populate bot/topic multi-selects on first load
     if (!append) {
-        const botSel   = document.getElementById('missed-filter-bot');
-        const topicSel = document.getElementById('missed-filter-topic');
-        if (botSel && botSel.options.length <= 1) {
-            const bots = [...new Set(_missedMessages.map(m => m.bot_name).filter(Boolean))].sort();
-            bots.forEach(b => {
-                const o = document.createElement('option'); o.value = b; o.textContent = b;
-                botSel.appendChild(o);
-            });
-            if (bot) botSel.value = bot;
-        }
-        if (topicSel && topicSel.options.length <= 1) {
-            const topics = [...new Set(_missedMessages.map(m => m.topic_name).filter(Boolean))].sort();
-            topics.forEach(t => {
-                const o = document.createElement('option'); o.value = t; o.textContent = t;
-                topicSel.appendChild(o);
-            });
-            if (topic) topicSel.value = topic;
-        }
+        const bots   = [...new Set(_missedMessages.map(m => m.bot_name).filter(Boolean))].sort();
+        const topics = [...new Set(_missedMessages.map(m => m.topic_name).filter(Boolean))].sort();
+        populateMonMultiSelect('missed-filter-bot-wrap',   bots);
+        populateMonMultiSelect('missed-filter-topic-wrap', topics);
     }
 
     // Update badge
@@ -5632,9 +5634,13 @@ function _renderMissed(messages) {
         ? messages.filter(m => m.timestamp && new Date(m.timestamp).getTime() > missedClearedAtMs)
         : messages;
 
-    // Apply channel filter
-    const chFilter = document.getElementById('missed-filter-channel')?.value || '';
-    if (chFilter) visible = visible.filter(m => (m.channel_username || '') === chFilter);
+    // Apply multi-select filters (bot, topic, channel)
+    const missedSelBots   = getMonMsValues('missed-filter-bot-wrap');
+    const missedSelTopics = getMonMsValues('missed-filter-topic-wrap');
+    const missedSelCh     = getMonMsValues('missed-filter-channel-wrap');
+    if (missedSelBots.size   > 0) visible = visible.filter(m => missedSelBots.has(m.bot_name || ''));
+    if (missedSelTopics.size > 0) visible = visible.filter(m => missedSelTopics.has(m.topic_name || ''));
+    if (missedSelCh.size     > 0) visible = visible.filter(m => missedSelCh.has(`@${m.channel_username}`));
 
     // Apply date filters
     const dateFrom = document.getElementById('missed-filter-date-from')?.value || '';
@@ -5642,13 +5648,9 @@ function _renderMissed(messages) {
     if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
     if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
 
-    // Populate channel dropdown from loaded data
-    const chSel = document.getElementById('missed-filter-channel');
-    if (chSel && chSel.options.length <= 1) {
-        const channels = [...new Set(messages.map(m => m.channel_username).filter(Boolean))].sort();
-        channels.forEach(ch => { const o = document.createElement('option'); o.value = ch; o.textContent = `@${ch}`; chSel.appendChild(o); });
-        if (chFilter) chSel.value = chFilter;
-    }
+    // Populate channel multi-select from loaded data
+    const missedChValues = [...new Set(messages.map(m => m.channel_username ? `@${m.channel_username}` : null).filter(Boolean))].sort();
+    populateMonMultiSelect('missed-filter-channel-wrap', missedChValues);
 
     if (!visible.length) {
         content.innerHTML = _missedClearedAt
@@ -5828,27 +5830,27 @@ function _csvRow(values) {
 }
 
 function _getExportSummaries() {
-    const bot    = document.getElementById('sum-filter-bot')?.value   || '';
-    const topic  = document.getElementById('sum-filter-topic')?.value || '';
-    const type   = document.getElementById('sum-filter-type')?.value  || '';
+    const selBots   = getMonMsValues('sum-filter-bot-wrap');
+    const selTopics = getMonMsValues('sum-filter-topic-wrap');
+    const selTypes  = getMonMsValues('sum-filter-type-wrap');
     const search = (document.getElementById('sum-search')?.value || '').trim().toLowerCase();
     let d = _allSummaries;
-    if (bot)    d = d.filter(s => s.bot_name     === bot);
-    if (topic)  d = d.filter(s => s.topic_name   === topic);
-    if (type)   d = d.filter(s => s.summary_type === type);
+    if (selBots.size   > 0) d = d.filter(s => selBots.has(s.bot_name || ''));
+    if (selTopics.size > 0) d = d.filter(s => selTopics.has(s.topic_name || ''));
+    if (selTypes.size  > 0) d = d.filter(s => selTypes.has(s.summary_type || ''));
     if (search) d = d.filter(s => (s.preview || '').toLowerCase().includes(search));
     return d;
 }
 
 function _getExportMessages() {
-    const coll    = document.getElementById('msg-filter-coll')?.value    || '';
-    const channel = document.getElementById('msg-filter-channel')?.value || '';
-    const topic   = document.getElementById('msg-filter-topic')?.value   || '';
+    const selColls    = getMonMsValues('msg-filter-coll-wrap');
+    const selChannels = getMonMsValues('msg-filter-channel-wrap');
+    const selTopics   = getMonMsValues('msg-filter-topic-wrap');
     const search  = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
     let d = _allMessages;
-    if (coll)    d = d.filter(m => m.collection === coll);
-    if (channel) d = d.filter(m => `@${m.channel_username}` === channel);
-    if (topic)   d = d.filter(m => (m.topics || '').split(',').map(t => t.trim()).includes(topic));
+    if (selColls.size    > 0) d = d.filter(m => selColls.has(m.collection || ''));
+    if (selChannels.size > 0) d = d.filter(m => selChannels.has(`@${m.channel_username}`));
+    if (selTopics.size   > 0) d = d.filter(m => (m.topics || '').split(',').map(t => t.trim()).some(t => selTopics.has(t)));
     if (search)  d = d.filter(m => (m.preview || '').toLowerCase().includes(search));
     return d;
 }
@@ -6398,35 +6400,41 @@ function loadPrivacyPage() {
     document.head.appendChild(s);
 })();
 
+let _historyRuns = [];  // all fetched runs; client-side filtering applied on render
+
 async function loadScheduleHistory() {
     const wrap = document.getElementById('mon-history-content');
     if (!wrap) return;
     wrap.innerHTML = '<p class="mon-empty">Loading…</p>';
 
-    const bot    = document.getElementById('hist-filter-bot')?.value    || '';
-    const topic  = document.getElementById('hist-filter-topic')?.value  || '';
-    const status = document.getElementById('hist-filter-status')?.value || '';
-
-    let url = '/api/monitor/schedule-history?limit=200';
-    if (bot)    url += '&bot='    + encodeURIComponent(bot);
-    if (topic)  url += '&topic='  + encodeURIComponent(topic);
-    if (status) url += '&status=' + encodeURIComponent(status);
-
-    const data = await api(url);
+    const data = await api('/api/monitor/schedule-history?limit=200');
     if (data.status !== 'ok') {
         wrap.innerHTML = `<p class="mon-empty">Error: ${escapeHtml(data.message || '')}</p>`;
         return;
     }
-    const runs = data.runs || [];
-    _populateHistoryFilters(runs);
+    _historyRuns = data.runs || [];
+    _populateHistoryFilters(_historyRuns);
+    _reRenderHistory();
+}
+
+function _reRenderHistory() {
+    const selBots    = getMonMsValues('hist-filter-bot-wrap');
+    const selTopics  = getMonMsValues('hist-filter-topic-wrap');
+    const selStatus  = getMonMsValues('hist-filter-status-wrap');
+    let runs = _historyRuns;
+    if (selBots.size   > 0) runs = runs.filter(r => selBots.has(r.bot_name || ''));
+    if (selTopics.size > 0) runs = runs.filter(r => selTopics.has(r.topic_name || ''));
+    if (selStatus.size > 0) runs = runs.filter(r => selStatus.has(r.status || ''));
     _renderScheduleHistory(runs);
 }
 
 function _populateHistoryFilters(runs) {
-    const bots   = [...new Set(runs.map(r => r.bot_name).filter(Boolean))].sort();
-    const topics = [...new Set(runs.map(r => r.topic_name).filter(Boolean))].sort();
-    _populateMonSelect('hist-filter-bot',   bots,   'All Bots');
-    _populateMonSelect('hist-filter-topic', topics, 'All Topics');
+    const bots     = [...new Set(runs.map(r => r.bot_name).filter(Boolean))].sort();
+    const topics   = [...new Set(runs.map(r => r.topic_name).filter(Boolean))].sort();
+    const statuses = [...new Set(runs.map(r => r.status).filter(Boolean))].sort();
+    populateMonMultiSelect('hist-filter-bot-wrap',    bots);
+    populateMonMultiSelect('hist-filter-topic-wrap',  topics);
+    populateMonMultiSelect('hist-filter-status-wrap', statuses);
 }
 
 function _renderScheduleHistory(runs) {
@@ -6617,13 +6625,18 @@ function _closeHistoryMessages() {
     if (panel) {
         panel.innerHTML = `
             <div class="mon-filter-bar">
-                <select class="select mon-filter-sel" id="hist-filter-bot"    onchange="loadScheduleHistory()"><option value="">All Bots</option></select>
-                <select class="select mon-filter-sel" id="hist-filter-topic"  onchange="loadScheduleHistory()"><option value="">All Topics</option></select>
-                <select class="select mon-filter-sel" id="hist-filter-status" onchange="loadScheduleHistory()">
-                    <option value="">All Statuses</option>
-                    <option value="success">✓ Success</option>
-                    <option value="failed">✗ Failed</option>
-                </select>
+                <div class="mon-multi-select" id="hist-filter-bot-wrap" data-onchange="_reRenderHistory" data-label="All Bots">
+                    <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('hist-filter-bot-wrap')">All Bots <span class="mon-ms-arrow">▾</span></button>
+                    <div class="mon-ms-dropdown" id="hist-filter-bot-dd"></div>
+                </div>
+                <div class="mon-multi-select" id="hist-filter-topic-wrap" data-onchange="_reRenderHistory" data-label="All Topics">
+                    <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('hist-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
+                    <div class="mon-ms-dropdown" id="hist-filter-topic-dd"></div>
+                </div>
+                <div class="mon-multi-select" id="hist-filter-status-wrap" data-onchange="_reRenderHistory" data-label="All Statuses">
+                    <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('hist-filter-status-wrap')">All Statuses <span class="mon-ms-arrow">▾</span></button>
+                    <div class="mon-ms-dropdown" id="hist-filter-status-dd"></div>
+                </div>
             </div>
             <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>`;
     }
