@@ -252,9 +252,11 @@ function initNavigation() {
 }
 
 function showPage(pageName) {
-    // Stop log auto-refresh when leaving the logs page
+    // Stop log auto-refresh when leaving the logs page; reset failure bot cache
     if (pageName !== 'logs') {
         clearTimeout(_logsTimer);
+        _logsActiveTab     = 'system';
+        _failuresKnownBots = [];
     }
     // Stop Gemini usage poller when leaving dashboard
     if (pageName !== 'dashboard' && window._stopGeminiUsagePoller) {
@@ -5864,6 +5866,36 @@ const _EXPORT_COLS = {
         { key: 'target',  label: 'Target' },
         { key: 'preview', label: 'Preview' },
     ],
+    schedules_24h: [
+        { key: 'time',    label: 'Fire Time' },
+        { key: 'bot',     label: 'Bot' },
+        { key: 'topic',   label: 'Topic' },
+        { key: 'type',    label: 'Type' },
+        { key: 'name',    label: 'Schedule Name' },
+        { key: 'pending', label: 'Pending Messages' },
+    ],
+    mon_summaries: [
+        { key: 'bot',     label: 'Bot' },
+        { key: 'topic',   label: 'Topic' },
+        { key: 'type',    label: 'Type' },
+        { key: 'start',   label: 'Start Time' },
+        { key: 'end',     label: 'End Time' },
+        { key: 'repeats', label: 'Repeats' },
+        { key: 'sent',    label: 'Sent Today' },
+        { key: 'failed',  label: 'Failed Today' },
+        { key: 'remain',  label: 'Remaining' },
+        { key: 'total',   label: 'Total / Day' },
+    ],
+    history: [
+        { key: 'time',    label: 'Time' },
+        { key: 'bot',     label: 'Bot' },
+        { key: 'topic',   label: 'Topic' },
+        { key: 'type',    label: 'Type' },
+        { key: 'status',  label: 'Status' },
+        { key: 'msgs',    label: 'Messages' },
+        { key: 'prompt',  label: 'Prompt' },
+        { key: 'error',   label: 'Error' },
+    ],
     messages: [
         { key: 'time',       label: 'Time' },
         { key: 'collection', label: 'Collection' },
@@ -5888,7 +5920,14 @@ function openExportModal(tabName) {
     _exportTab = tabName;
     const cols = _EXPORT_COLS[tabName] || [];
 
-    const tabLabels = { summaries: 'Summaries', messages: 'Messages', unclassified: 'Unclassified' };
+    const tabLabels = {
+        summaries:    'Summaries',
+        schedules_24h:'Schedules (next 24h)',
+        mon_summaries:'Monitor Summaries',
+        history:      'Schedule History',
+        messages:     'Messages',
+        unclassified: 'Unclassified',
+    };
     document.getElementById('export-col-title').textContent =
         `Export ${tabLabels[tabName] || tabName} — Select Columns`;
 
@@ -5993,6 +6032,96 @@ function _doExport(tabName, selectedKeys) {
                 default: return '';
             }
         }));
+    } else if (tabName === 'schedules_24h') {
+        const nowMs = Date.now();
+        const selTopics  = getMonMsValues('sch-filter-topic-wrap');
+        const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
+        let items = _monSchFlat.filter(r => r.sch.enabled !== false);
+        if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
+        if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
+        const fires = [];
+        for (const item of items) {
+            getUpcomingFires24h(item.sch, nowMs).forEach((fireAt, idx) => {
+                fires.push({ fireAt, ...item, pending: idx === 0 ? item.pending : 0 });
+            });
+        }
+        fires.sort((a, b) => a.fireAt - b.fireAt);
+        rows = fires.map(({ fireAt, botName, topicName, sch, pending }) => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':    return new Date(fireAt).toLocaleString();
+                case 'bot':     return botName   || '';
+                case 'topic':   return topicName || '';
+                case 'type':    return sch.type  || '';
+                case 'name':    return sch.name  || '';
+                case 'pending': return pending ?? 0;
+                default: return '';
+            }
+        }));
+    } else if (tabName === 'mon_summaries') {
+        const selBots   = getMonMsValues('sum-filter-bot-wrap');
+        const selTopics = getMonMsValues('sum-filter-topic-wrap');
+        const selTypes  = getMonMsValues('sum-filter-type-wrap');
+        const botsData  = _monitorData?.bots || {};
+        const statsLookup = {};
+        for (const s of _scheduleStats) {
+            statsLookup[`${s.bot_name}|${s.topic_name}|${s.schedule_type}`] = { sent: s.sent || 0, failed: s.failed || 0 };
+        }
+        const sumRows = [];
+        for (const [botName, botData] of Object.entries(botsData)) {
+            if (selBots.size > 0 && !selBots.has(botName)) continue;
+            if (!botData.enabled) continue;
+            for (const [, catData] of Object.entries(botData.categories || {})) {
+                if (!catData.enabled) continue;
+                for (const [topicName, topicData] of Object.entries(catData.topics || {})) {
+                    if (selTopics.size > 0 && !selTopics.has(topicName)) continue;
+                    if (!topicData.enabled) continue;
+                    for (const sch of (topicData.schedules || [])) {
+                        if (!sch.enabled) continue;
+                        if (selTypes.size > 0 && !selTypes.has(sch.type || '')) continue;
+                        const stat   = statsLookup[`${botName}|${topicName}|${sch.type}`] || { sent: 0, failed: 0 };
+                        const total  = _scheduleFiresPerDay(sch);
+                        const remain = Math.max(0, total - stat.sent - stat.failed);
+                        sumRows.push({ botName, topicName, sch, stat, total, remain });
+                    }
+                }
+            }
+        }
+        rows = sumRows.map(({ botName, topicName, sch, stat, total, remain }) => colDefs.map(c => {
+            switch (c.key) {
+                case 'bot':     return botName   || '';
+                case 'topic':   return topicName || '';
+                case 'type':    return sch.type  || '';
+                case 'start':   return _scheduleStartTime(sch);
+                case 'end':     return _scheduleEndTime(sch);
+                case 'repeats': return _scheduleRepeatsText(sch);
+                case 'sent':    return stat.sent;
+                case 'failed':  return stat.failed;
+                case 'remain':  return remain;
+                case 'total':   return total;
+                default: return '';
+            }
+        }));
+    } else if (tabName === 'history') {
+        const selBots   = getMonMsValues('hist-filter-bot-wrap');
+        const selTopics = getMonMsValues('hist-filter-topic-wrap');
+        const selStatus = getMonMsValues('hist-filter-status-wrap');
+        let runs = _historyRuns;
+        if (selBots.size   > 0) runs = runs.filter(r => selBots.has(r.bot_name   || ''));
+        if (selTopics.size > 0) runs = runs.filter(r => selTopics.has(r.topic_name || ''));
+        if (selStatus.size > 0) runs = runs.filter(r => selStatus.has(r.status    || ''));
+        rows = runs.map(r => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':   return r.fired_at ? r.fired_at.replace('T', ' ').slice(0, 19) : '';
+                case 'bot':    return r.bot_name    || '';
+                case 'topic':  return r.topic_name  || '';
+                case 'type':   return r.schedule_type || '';
+                case 'status': return r.status      || '';
+                case 'msgs':   return r.message_count ?? '';
+                case 'prompt': return r.prompt_key  || '';
+                case 'error':  return r.error_text  || '';
+                default: return '';
+            }
+        }));
     } else if (tabName === 'messages') {
         rows = _getExportMessages().map(m => colDefs.map(c => {
             switch (c.key) {
@@ -6032,7 +6161,8 @@ function _doExport(tabName, selectedKeys) {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `${tabName}_${new Date().toISOString().slice(0, 10)}.csv`;
+    const fileLabel = { schedules_24h: 'schedules_24h', mon_summaries: 'monitor_summaries', history: 'schedule_history' }[tabName] || tabName;
+    a.download = `${fileLabel}_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -6822,6 +6952,9 @@ const _LOG_LEVEL_CLS = {
         .log-level-debug   { color:var(--text-muted); }
         tr.log-row-error td { background:rgba(239,68,68,.04); }
         tr.log-row-warn  td { background:rgba(245,158,11,.04); }
+        .log-tag { display:inline-block; font-weight:700; font-size:11px;
+                   background:rgba(99,102,241,.12); color:var(--accent-primary,#6366f1);
+                   border-radius:3px; padding:0 3px; margin-right:2px; font-family:monospace; }
     `;
     document.head.appendChild(s);
 })();
@@ -6841,11 +6974,17 @@ async function loadLogsPage() {
     const data = await api(url);
     if (data.status !== 'ok') { wrap.innerHTML = `<p class="mon-empty" style="padding:24px">Error: ${escapeHtml(data.message||'')}</p>`; return; }
 
-    _allLogs   = data.logs || [];
+    _allLogs    = data.logs || [];
     _logsLoaded = true;
-    _renderLogTable(_allLogs);
+    _renderLogTable(_getTagFilteredLogs());
     _updateLogsErrorBadge();
     _scheduleLogAutoRefresh();
+}
+
+function _getTagFilteredLogs() {
+    const tag = document.getElementById('log-filter-tag')?.value || '';
+    if (!tag) return _allLogs;
+    return _allLogs.filter(r => (r.message || '').includes(tag));
 }
 
 function _renderLogTable(logs) {
@@ -6856,13 +6995,18 @@ function _renderLogTable(logs) {
         return;
     }
     const rows = logs.map(r => {
-        const lvlCls  = _LOG_LEVEL_CLS[r.level] || '';
-        const rowCls  = r.level === 'ERROR' ? 'log-row-error' : r.level === 'WARNING' ? 'log-row-warn' : '';
+        const lvlCls = _LOG_LEVEL_CLS[r.level] || '';
+        const rowCls = r.level === 'ERROR' ? 'log-row-error' : r.level === 'WARNING' ? 'log-row-warn' : '';
+        // Highlight [TAG] patterns in message
+        const msg = escapeHtml(r.message || '').replace(
+            /(\[([A-Z][A-Z0-9_-]+)\])/g,
+            '<span class="log-tag">$1</span>'
+        );
         return `<tr class="${rowCls}">
             <td class="log-time">${escapeHtml(r.time || '')}</td>
             <td class="log-name" title="${escapeHtmlSys(r.name || '')}">${escapeHtml(r.name || '')}</td>
             <td class="log-level ${lvlCls}">${escapeHtml(r.level || '')}</td>
-            <td class="log-msg">${escapeHtml(r.message || '')}</td>
+            <td class="log-msg">${msg}</td>
         </tr>`;
     }).join('');
     wrap.innerHTML = `<table>
@@ -6874,9 +7018,14 @@ function _renderLogTable(logs) {
 }
 
 function applyLogFilters() {
-    // Re-fetch from server (filters applied server-side for efficiency)
+    // Level / search → re-fetch from server; tag filter applied client-side after
     clearTimeout(_logsTimer);
     loadLogsPage();
+}
+
+function applyLogTagFilter() {
+    // Tag filter is purely client-side — no re-fetch needed
+    _renderLogTable(_getTagFilteredLogs());
 }
 
 function toggleLogAutoRefresh() {
@@ -6925,4 +7074,135 @@ function downloadLogs() {
     a.download  = `logs_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
     a.click();
     URL.revokeObjectURL(a.href);
+}
+// ==================== Logs Page — Tab Switching ====================
+
+let _logsActiveTab = 'system';
+
+function switchLogsTab(tab) {
+    _logsActiveTab = tab;
+    document.getElementById('logs-panel-system').style.display   = tab === 'system'   ? '' : 'none';
+    document.getElementById('logs-panel-failures').style.display = tab === 'failures' ? '' : 'none';
+    document.getElementById('logs-tab-system').classList.toggle('active',   tab === 'system');
+    document.getElementById('logs-tab-failures').classList.toggle('active', tab === 'failures');
+    if (tab === 'failures') loadSummaryFailures();
+}
+
+// ==================== Summary Failures Tab ====================
+
+let _failuresKnownBots = [];
+
+function _fmtRateVal(v) {
+    if (v === null || v === undefined) return '<span style="color:var(--text-muted)">—</span>';
+    if (v >= 1000000) return (v / 1000000).toFixed(2) + 'M';
+    if (v >= 1000)    return (v / 1000).toFixed(1) + 'K';
+    return String(v);
+}
+
+function _fmtFailTime(iso) {
+    if (!iso) return '—';
+    const norm = iso.endsWith('Z') ? iso : iso + 'Z';
+    return new Date(norm).toLocaleString();
+}
+
+async function loadSummaryFailures() {
+    const wrap = document.getElementById('failures-table-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = '<p class="mon-empty" style="padding:24px">Loading…</p>';
+
+    const botFilter  = document.getElementById('fail-filter-bot')?.value  || '';
+    const daysFilter = document.getElementById('fail-filter-days')?.value || '7';
+
+    let url = '/api/monitor/schedule-history?status=failed&limit=500';
+    if (botFilter) url += '&bot=' + encodeURIComponent(botFilter);
+
+    const data = await api(url);
+    if (!data || data.status !== 'ok') {
+        wrap.innerHTML = '<p class="mon-empty" style="padding:24px">Failed to load failures.</p>';
+        return;
+    }
+
+    let runs = data.runs || [];
+
+    // Client-side days filter
+    if (daysFilter && daysFilter !== '0') {
+        const cutoff = Date.now() - parseInt(daysFilter) * 86400000;
+        runs = runs.filter(r => {
+            const t = r.fired_at
+                ? new Date(r.fired_at.endsWith('Z') ? r.fired_at : r.fired_at + 'Z').getTime()
+                : 0;
+            return t >= cutoff;
+        });
+    }
+
+    // Populate bot filter dropdown (once per page load)
+    const botSel = document.getElementById('fail-filter-bot');
+    if (botSel && _failuresKnownBots.length === 0) {
+        const bots = [...new Set((data.runs || []).map(r => r.bot_name).filter(Boolean))].sort();
+        _failuresKnownBots = bots;
+        bots.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b; opt.textContent = b;
+            botSel.appendChild(opt);
+        });
+        if (botFilter) botSel.value = botFilter;
+    }
+
+    // Update badge
+    const badge = document.getElementById('logs-failures-badge');
+    if (badge) {
+        badge.textContent = runs.length > 99 ? '99+' : runs.length;
+        badge.style.display = runs.length > 0 ? '' : 'none';
+    }
+
+    if (!runs.length) {
+        wrap.innerHTML = '<p class="mon-empty" style="padding:24px">No failures in this period.</p>';
+        return;
+    }
+
+    const rows = runs.map(r => {
+        const rpm = r.rpm_at_failure;
+        const tpm = r.tpm_at_failure;
+        const rpd = r.rpd_at_failure;
+
+        const rpmHtml = (rpm != null)
+            ? '<span style="' + (rpm > 25000 ? 'color:#ef4444;font-weight:700' : '') + '">' + _fmtRateVal(rpm) + '</span>'
+            : _fmtRateVal(null);
+        const tpmHtml = (tpm != null)
+            ? '<span style="' + (tpm > 1700000 ? 'color:#ef4444;font-weight:700' : '') + '">' + _fmtRateVal(tpm) + '</span>'
+            : _fmtRateVal(null);
+        const rpdHtml = (rpd != null)
+            ? '<span style="' + (rpd > 85000 ? 'color:#f59e0b;font-weight:700' : '') + '">' + _fmtRateVal(rpd) + '</span>'
+            : _fmtRateVal(null);
+
+        const errShort = (r.error_text || '').slice(0, 120);
+        const errHtml  = r.error_text
+            ? '<details style="cursor:pointer"><summary style="color:#ef4444;font-size:12px">' +
+              escapeHtml(errShort) + (r.error_text.length > 120 ? '…' : '') +
+              '</summary><pre style="white-space:pre-wrap;font-size:11px;margin-top:4px;color:var(--text-secondary)">' +
+              escapeHtmlSys(r.error_text) + '</pre></details>'
+            : '<span style="color:var(--text-muted)">—</span>';
+
+        return '<tr>' +
+            '<td style="white-space:nowrap;font-size:12px;color:var(--text-muted)">' + escapeHtml(_fmtFailTime(r.fired_at)) + '</td>' +
+            '<td><span class="tag-blue">'  + escapeHtml(r.bot_name   || '—') + '</span></td>' +
+            '<td><span class="tag-green">' + escapeHtml(r.topic_name || '—') + '</span></td>' +
+            '<td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(r.schedule_type || '—') + '</td>' +
+            '<td style="text-align:center;font-size:12px">' + rpmHtml + '</td>' +
+            '<td style="text-align:center;font-size:12px">' + tpmHtml + '</td>' +
+            '<td style="text-align:center;font-size:12px">' + rpdHtml + '</td>' +
+            '<td style="min-width:220px;text-align:left">'  + errHtml + '</td>' +
+            '</tr>';
+    }).join('');
+
+    wrap.innerHTML =
+        '<table class="yt-table">' +
+        '<thead><tr>' +
+        '<th>Time</th><th>Bot</th><th>Topic</th><th>Type</th>' +
+        '<th style="text-align:center">RPM</th>' +
+        '<th style="text-align:center">TPM</th>' +
+        '<th style="text-align:center">RPD today</th>' +
+        '<th style="text-align:left">Error</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody></table>';
 }

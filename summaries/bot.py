@@ -519,9 +519,18 @@ async def generate_and_send_summary(job_data):
 
     except Exception as e:
         logger.error(f"[CRITICAL] summary generation failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+        try:
+            from utils.gemini_usage import get_gemini_usage as _gu
+            _usage = _gu()
+            _rpm = _usage.get('rpm', {}).get('used')
+            _tpm = _usage.get('tpm', {}).get('used')
+            _rpd = _usage.get('rpd', {}).get('used')
+        except Exception:
+            _rpm = _tpm = _rpd = None
         db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
                             schedule_type=schedule_type, status='failed',
-                            error_text=str(e))
+                            error_text=str(e),
+                            rpm_at_failure=_rpm, tpm_at_failure=_tpm, rpd_at_failure=_rpd)
 
 # ==================== Speeches Interval ====================
 
@@ -668,9 +677,18 @@ async def generate_speech_buckets(job_data: dict):
 
     except Exception as e:
         logger.error(f"[SPEECH] Error in generate_speech_buckets: {e}", exc_info=True)
+        try:
+            from utils.gemini_usage import get_gemini_usage as _gu
+            _usage = _gu()
+            _rpm = _usage.get('rpm', {}).get('used')
+            _tpm = _usage.get('tpm', {}).get('used')
+            _rpd = _usage.get('rpd', {}).get('used')
+        except Exception:
+            _rpm = _tpm = _rpd = None
         db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
                             schedule_type=schedule_type, status='failed',
-                            error_text=str(e))
+                            error_text=str(e),
+                            rpm_at_failure=_rpm, tpm_at_failure=_tpm, rpd_at_failure=_rpd)
 
 
 async def trigger_summary(job_data):

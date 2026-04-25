@@ -673,6 +673,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS schedule_runs_fired_at_idx
                 ON schedule_runs(fired_at DESC)
             """)
+            # Add rate-limit-at-failure columns (idempotent; safe on existing DBs)
+            cursor.execute("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS rpm_at_failure INTEGER")
+            cursor.execute("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS tpm_at_failure INTEGER")
+            cursor.execute("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS rpd_at_failure INTEGER")
 
             # Migrate: rename schedule type 'interval' → 'interval_hourly' (one-time, idempotent)
             cursor.execute("UPDATE schedules SET type = 'interval_hourly' WHERE type = 'interval'")

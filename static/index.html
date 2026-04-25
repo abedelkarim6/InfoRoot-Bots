@@ -76,10 +76,6 @@
                     <span class="icon">📡</span>
                     <span>Schedules Monitor</span>
                 </a>
-                <a href="#" class="nav-item" data-page="ai-usage">
-                    <span class="icon">⚡</span>
-                    <span>AI Usage</span>
-                </a>
             </div>
 
             <!-- YouTube Reader — hidden for users without youtube_on -->
@@ -143,6 +139,10 @@
                     <span class="icon">📋</span>
                     <span>Logs</span>
                     <span class="badge badge-error" id="logs-error-badge" style="display:none">0</span>
+                </a>
+                <a href="#" class="nav-item" data-page="ai-usage">
+                    <span class="icon">⚡</span>
+                    <span>AI Usage</span>
                 </a>
             </div>
         </nav>
@@ -499,6 +499,7 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-prompt-wrap')">All Prompts <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="sch-filter-prompt-dd"></div>
                         </div>
+                        <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('schedules_24h')" title="Export next 24h schedule fires to CSV">⬇ Export</button>
                     </div>
                     <div id="monitor-bots-container"></div>
                 </div>
@@ -518,6 +519,7 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sum-filter-type-wrap')">All Types <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="sum-filter-type-dd"></div>
                         </div>
+                        <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="openExportModal('mon_summaries')" title="Export today's schedule stats to CSV">⬇ Export</button>
                     </div>
                     <div id="mon-summaries-content"><p class="mon-empty">Loading…</p></div>
                 </div>
@@ -591,7 +593,8 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('hist-filter-status-wrap')">All Statuses <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="hist-filter-status-dd"></div>
                         </div>
-                        <button class="btn btn-secondary btn-sm" style="margin-left:auto;white-space:nowrap;" onclick="_historyRuns=[]; loadScheduleHistory()">↻ Refresh</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openExportModal('history')" title="Export visible history rows to CSV">⬇ Export</button>
+                        <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="_historyRuns=[]; loadScheduleHistory()">↻ Refresh</button>
                     </div>
                     <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>
                 </div>
@@ -1067,6 +1070,108 @@
             </div>
         </div>
 
+        <!-- ══ AI Usage Page ══════════════════════════════════════════════ -->
+        <div id="ai-usage-page" class="page">
+            <div class="page-header">
+                <h1 class="page-title">⚡ AI Usage</h1>
+                <p class="page-subtitle">Gemini API quota, per-summary token breakdown, and hourly activity.</p>
+            </div>
+            <div id="ai-usage-content">
+                <p class="mon-empty" style="padding:32px">Loading…</p>
+            </div>
+        </div>
+
+        <!-- ══ Logs Page ══════════════════════════════════════════════════ -->
+        <div id="logs-page" class="page">
+            <div class="page-header">
+                <h1 class="page-title">📋 System Logs</h1>
+                <p class="page-subtitle">Live server logs and persistent summary failure history.</p>
+            </div>
+
+            <!-- Tab bar -->
+            <div class="mon-tab-bar" style="margin-bottom:16px;">
+                <button class="mon-tab active" id="logs-tab-system" onclick="switchLogsTab('system')">📋 System Logs</button>
+                <button class="mon-tab" id="logs-tab-failures" onclick="switchLogsTab('failures')">
+                    ❌ Summary Failures
+                    <span class="badge badge-error" id="logs-failures-badge" style="display:none;margin-left:4px">0</span>
+                </button>
+            </div>
+
+            <!-- ── System Logs panel ── -->
+            <div id="logs-panel-system">
+                <!-- Filter bar -->
+                <div class="card" style="padding:14px 18px;margin-bottom:16px;">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <select id="log-filter-level" class="select" style="width:130px" onchange="applyLogFilters()">
+                            <option value="">All Levels</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="INFO">INFO</option>
+                            <option value="DEBUG">DEBUG</option>
+                        </select>
+                        <select id="log-filter-tag" class="select" style="width:170px" onchange="applyLogTagFilter()">
+                            <option value="">All Tags</option>
+                            <option value="[YT-WORKER]">[YT-WORKER]</option>
+                            <option value="[WEBSUB]">[WEBSUB]</option>
+                            <option value="[WEBSUB-RENEW]">[WEBSUB-RENEW]</option>
+                            <option value="[YT-CHAT]">[YT-CHAT]</option>
+                            <option value="[CATEG]">[CATEG]</option>
+                            <option value="[SAVED]">[SAVED]</option>
+                            <option value="[CATCH_ALL]">[CATCH_ALL]</option>
+                            <option value="[BOT]">[BOT]</option>
+                            <option value="[AUTH]">[AUTH]</option>
+                            <option value="[DIALOGS]">[DIALOGS]</option>
+                            <option value="[TG-TEST]">[TG-TEST]</option>
+                            <option value="[TESTER-SUMMARY]">[TESTER-SUMMARY]</option>
+                            <option value="[TESTER-SEND]">[TESTER-SEND]</option>
+                            <option value="[RECYCLE-BIN]">[RECYCLE-BIN]</option>
+                            <option value="[KEYWORDS]">[KEYWORDS]</option>
+                            <option value="[MIGRATE]">[MIGRATE]</option>
+                        </select>
+                        <input type="text" id="log-search" class="input" placeholder="Search logs…"
+                               style="flex:1;min-width:180px;max-width:320px"
+                               oninput="applyLogFilters()">
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;color:var(--text-secondary)">
+                            <input type="checkbox" id="log-auto-refresh" checked onchange="toggleLogAutoRefresh()">
+                            Auto-refresh (5s)
+                        </label>
+                        <button class="btn btn-secondary btn-sm" onclick="loadLogsPage()">↻ Refresh</button>
+                        <button class="btn btn-secondary btn-sm" onclick="downloadLogs()">⬇ Download</button>
+                        <button class="btn btn-danger btn-sm" onclick="clearLogs()" style="margin-left:auto">🗑 Clear</button>
+                    </div>
+                </div>
+
+                <div class="card" style="padding:0;overflow:hidden;">
+                    <div id="logs-table-wrap" style="overflow-x:auto;max-height:70vh;overflow-y:auto;">
+                        <p class="mon-empty" style="padding:24px">Loading…</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Summary Failures panel ── -->
+            <div id="logs-panel-failures" style="display:none">
+                <div class="card" style="padding:14px 18px;margin-bottom:16px;">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <select id="fail-filter-bot" class="select" style="width:180px" onchange="loadSummaryFailures()">
+                            <option value="">All Bots</option>
+                        </select>
+                        <select id="fail-filter-days" class="select" style="width:140px" onchange="loadSummaryFailures()">
+                            <option value="1">Last 24 hours</option>
+                            <option value="7" selected>Last 7 days</option>
+                            <option value="30">Last 30 days</option>
+                            <option value="0">All time</option>
+                        </select>
+                        <button class="btn btn-secondary btn-sm" onclick="loadSummaryFailures()">↻ Refresh</button>
+                    </div>
+                </div>
+                <div class="card" style="padding:0;overflow:hidden;">
+                    <div id="failures-table-wrap" style="overflow-x:auto;max-height:70vh;overflow-y:auto;">
+                        <p class="mon-empty" style="padding:24px">Loading…</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- ══ Site Footer ════════════════════════════════════════════════ -->
         <footer class="site-footer">
             <span>© 2026 Inforoot.org. All rights reserved.</span>
@@ -1180,54 +1285,6 @@
         </div>
     </div>
 
-    <!-- ======== AI Usage Page ======== -->
-    <div id="ai-usage-page" class="page">
-        <div class="page-header">
-            <h1 class="page-title">⚡ AI Usage</h1>
-            <p class="page-subtitle">Gemini API quota, per-summary token breakdown, and hourly activity.</p>
-        </div>
-        <div id="ai-usage-content">
-            <p class="mon-empty" style="padding:32px">Loading…</p>
-        </div>
-    </div>
-
-    <!-- ======== Logs Page ======== -->
-    <div id="logs-page" class="page">
-        <div class="page-header">
-            <h1 class="page-title">📋 System Logs</h1>
-            <p class="page-subtitle">Live view of the last 1000 server log records. Admin only.</p>
-        </div>
-
-        <!-- Filter bar -->
-        <div class="card" style="padding:14px 18px;margin-bottom:16px;">
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <select id="log-filter-level" class="select" style="width:140px" onchange="applyLogFilters()">
-                    <option value="">All Levels</option>
-                    <option value="ERROR">ERROR</option>
-                    <option value="WARNING">WARNING</option>
-                    <option value="INFO">INFO</option>
-                    <option value="DEBUG">DEBUG</option>
-                </select>
-                <input type="text" id="log-search" class="input" placeholder="Search logs…"
-                       style="flex:1;min-width:180px;max-width:360px"
-                       oninput="applyLogFilters()">
-                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;color:var(--text-secondary)">
-                    <input type="checkbox" id="log-auto-refresh" checked onchange="toggleLogAutoRefresh()">
-                    Auto-refresh (5s)
-                </label>
-                <button class="btn btn-secondary btn-sm" onclick="loadLogsPage()">↻ Refresh</button>
-                <button class="btn btn-secondary btn-sm" onclick="downloadLogs()">⬇ Download</button>
-                <button class="btn btn-danger btn-sm" onclick="clearLogs()" style="margin-left:auto">🗑 Clear</button>
-            </div>
-        </div>
-
-        <!-- Log table -->
-        <div class="card" style="padding:0;overflow:hidden;">
-            <div id="logs-table-wrap" style="overflow-x:auto;max-height:70vh;overflow-y:auto;">
-                <p class="mon-empty" style="padding:24px">Loading…</p>
-            </div>
-        </div>
-    </div>
 
 </body>
 </html>

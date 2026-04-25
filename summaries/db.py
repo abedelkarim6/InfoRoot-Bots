@@ -455,14 +455,18 @@ class SummariesDB(Database):
             self._commit()
 
     def log_schedule_run(self, bot_name: str, topic_name: str, schedule_type: str,
-                         status: str, message_count: int = 0, error_text: str = None):
+                         status: str, message_count: int = 0, error_text: str = None,
+                         rpm_at_failure: int = None, tpm_at_failure: int = None,
+                         rpd_at_failure: int = None):
         try:
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO schedule_runs
-                   (bot_name, topic_name, schedule_type, status, message_count, error_text)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (bot_name, topic_name, schedule_type, status, message_count, error_text)
+                   (bot_name, topic_name, schedule_type, status, message_count, error_text,
+                    rpm_at_failure, tpm_at_failure, rpd_at_failure)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (bot_name, topic_name, schedule_type, status, message_count, error_text,
+                 rpm_at_failure, tpm_at_failure, rpd_at_failure)
             )
         finally:
             self._commit()
@@ -514,6 +518,7 @@ class SummariesDB(Database):
             cursor.execute(
                 f"""SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
                            r.message_count, r.error_text, r.fired_at,
+                           r.rpm_at_failure, r.tpm_at_failure, r.rpd_at_failure,
                            (SELECT s.id FROM summaries s
                             WHERE s.bot_name = r.bot_name
                               AND s.topic_name = r.topic_name

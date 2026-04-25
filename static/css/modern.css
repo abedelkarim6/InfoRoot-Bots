@@ -2348,6 +2348,11 @@ html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color
     text-align: right;
     margin-top: 2px;
 }
+.aiu-warning {
+    font-size: 12px;
+    color: var(--warning, #f59e0b);
+    line-height: 1.6;
+}
 
 .dash-chart-card {
     background: var(--bg-card);
@@ -2848,6 +2853,12 @@ html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color
 .yt-table td:last-child {
     text-align: right;
     white-space: nowrap;
+}
+
+/* When a yt-table lives inside a .card the card already provides the border */
+.card .yt-table {
+    border: none;
+    border-radius: 0;
 }
 
 .yt-vid-link {
