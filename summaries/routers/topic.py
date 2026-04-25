@@ -125,6 +125,8 @@ def add_topic(request: Request, data: dict = Body(...)):
 
     if not bot_name or not category_name or not topic_name:
         return {"status": "error", "message": "Missing required fields"}
+    if topic_name.lower() in ('none', 'null', 'undefined', 'true', 'false'):
+        return {"status": "error", "message": f"'{topic_name}' is a reserved name and cannot be used as a topic"}
 
     if not _can_modify_bot(request, bot_name):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)

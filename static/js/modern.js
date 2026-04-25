@@ -100,6 +100,22 @@ function showPrompt(title, defaultValue, onConfirm) {
     input.select();
 }
 
+// ==================== Utility ====================
+function debounce(fn, ms = 250) {
+    let timer;
+    return function (...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), ms);
+    };
+}
+
+// Debounced wrappers for oninput search/filter handlers (prevents re-render on every keystroke)
+const _dApplyMonMessageFilters    = debounce(() => typeof applyMonMessageFilters === 'function'    && applyMonMessageFilters(), 220);
+const _dApplyMonUnclassFilters    = debounce(() => typeof applyMonUnclassFilters === 'function'    && applyMonUnclassFilters(), 220);
+const _dApplyMonMissedFilters     = debounce(() => typeof applyMonMissedFilters === 'function'     && applyMonMissedFilters(), 220);
+const _dApplyLogFilters           = debounce(() => typeof applyLogFilters === 'function'           && applyLogFilters(), 220);
+const _dFilterSourceMatrix        = debounce(() => typeof filterSourceMatrix === 'function'        && filterSourceMatrix(), 220);
+
 // ==================== Global State ====================
 let globalConfig = null;
 let globalPrompts = null;
@@ -356,8 +372,10 @@ function closeSysBot() {
 // ==================== Data Loading ====================
 async function loadAllData() {
     try {
-        globalConfig = await api('/api/config');
-        globalPrompts = await api('/api/prompts');
+        [globalConfig, globalPrompts] = await Promise.all([
+            api('/api/config'),
+            api('/api/prompts'),
+        ]);
         updateStats();
         updateSystemStatus();
     } catch (error) {
@@ -1570,7 +1588,11 @@ function _renderBotDetailView(name, bot, keepOpen = null) {
         if (keepOpen) {
             (Array.isArray(keepOpen) ? keepOpen : [keepOpen]).forEach(id => {
                 const el = document.getElementById(id);
-                if (el) el.classList.add('open');
+                if (el) {
+                    el.classList.add('open');
+                    _renderLazyCategoryContent(el);
+                    _renderLazyTopicContent(el);
+                }
             });
         }
         // If the prompts tab is already active on render, load fixed prompts
@@ -2087,48 +2109,18 @@ function openCategoryAndFocusNewTopic(sectionId, b, c) {
     if (input) input.focus();
 }
 
-function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled = true) {
+function _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEnabled = true) {
     const keywords = topic.keywords || [];
-    const seoHidden = topic._keyword_count != null;   // admin stripped keyword text
+    const seoHidden = topic._keyword_count != null;
     const _ukKey    = `${botName}|${categoryName}|${topicName}`;
     const userKws   = seoHidden ? (_userAddedKeywords[_ukKey] || []) : [];
-    // seoCount = admin's count + user's own additions (shown separately)
     const seoCount  = seoHidden ? topic._keyword_count : keywords.length;
     const schedules = topic.schedules || [];
     const linkedTopics = topic.linked_topics || [];
     const catchAll = !!topic.catch_all;
-    const sectionId = `topic-${botName}-${categoryName}-${topicName}`;
-    const savedState = loadCollapsibleState(sectionId);
-    const defaultOpen = savedState !== null ? savedState : false; // Default closed for Topics
-    const isDisabledByCategory = !categoryEnabled;
     const b = jsAttr(botName), c = jsAttr(categoryName), t = jsAttr(topicName);
 
-    return `
-        <div class="topic-box collapsible-section ${defaultOpen ? 'open' : ''} ${isDisabledByCategory ? 'category-disabled' : ''}" id="${sectionId}">
-            <div class="topic-header-row" onclick="toggleCollapsible('${jsAttr(sectionId)}')">
-                <div class="topic-title-group">
-                    <strong>📌 ${escapeHtmlSys(topicName)}</strong>
-                    ${isDisabledByCategory ? '<span class="disabled-badge">Category Disabled</span>' : ''}
-                    ${catchAll ? '<span class="linked-badge" style="background:var(--accent-primary,#6366f1);color:#fff;">🌐 Catch All</span>' : ''}
-                    ${linkedTopics.length > 0 ? `<span class="linked-badge">🔗 ${linkedTopics.length} linked</span>` : ''}
-                    <span class="schedule-indicator">🕐 ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''}</span>
-                </div>
-                <div class="topic-controls" onclick="event.stopPropagation()">
-                    <label class="toggle-switch">
-                        <input type="checkbox" ${topic.enabled ? 'checked' : ''}
-                               onchange="toggleTopic('${b}', '${c}', '${t}', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                    <button class="btn-icon" title="Rename topic"
-                            onclick="renameTopic('${b}', '${c}', '${t}')">✏️</button>
-                    <button class="btn-icon btn-danger" title="Delete topic"
-                            onclick="deleteTopic('${b}', '${c}', '${t}')">🗑️</button>
-                    <span class="collapsible-toggle">▼</span>
-                </div>
-            </div>
-
-            <div class="collapsible-content">
-              <div class="collapsible-inner">
+    return `<div class="collapsible-inner">
                 <div class="topic-body">
                     <div class="form-group" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-secondary,#1e1e2e);border-radius:6px;margin-bottom:8px;">
                         <label class="toggle-switch">
@@ -2196,7 +2188,7 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                 <div class="topic-schedules-section">
                     <div class="form-group">
                         <label class="form-label">Schedules</label>
-                        ${schedules.map((schedule, idx) => `
+                        ${schedules.map((schedule) => `
                             <div class="summary-block">
                                 <div class="summary-header">
                                     <div class="summary-title">
@@ -2227,8 +2219,62 @@ function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled
                         </button>
                     </div>
                 </div>
-              </div>
+              </div>`;
+}
+
+function _renderLazyTopicContent(section) {
+    const ph = section.querySelector('.topic-lazy-body');
+    if (!ph) return;
+    const { lazyBot: botName, lazyCat: categoryName, lazyTopic: topicName } = ph.dataset;
+    const topic = globalConfig.bots?.[botName]?.categories?.[categoryName]?.topics?.[topicName];
+    const categoryEnabled = globalConfig.bots?.[botName]?.categories?.[categoryName]?.enabled !== false;
+    ph.className = 'collapsible-content';
+    ph.innerHTML = topic
+        ? _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEnabled)
+        : '';
+    delete ph.dataset.lazyBot; delete ph.dataset.lazyCat; delete ph.dataset.lazyTopic;
+}
+
+function createTopicBox(botName, categoryName, topicName, topic, categoryEnabled = true) {
+    const schedules = topic.schedules || [];
+    const linkedTopics = topic.linked_topics || [];
+    const catchAll = !!topic.catch_all;
+    const sectionId = `topic-${botName}-${categoryName}-${topicName}`;
+    const savedState = loadCollapsibleState(sectionId);
+    const defaultOpen = savedState !== null ? savedState : false; // Default closed for Topics
+    const isDisabledByCategory = !categoryEnabled;
+    const b = jsAttr(botName), c = jsAttr(categoryName), t = jsAttr(topicName);
+
+    // Lazy: render body only when topic is open; closed topics get a lightweight placeholder.
+    const bodyHtml = defaultOpen
+        ? `<div class="collapsible-content">${_buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEnabled)}</div>`
+        : `<div class="collapsible-content topic-lazy-body" data-lazy-bot="${b}" data-lazy-cat="${c}" data-lazy-topic="${t}"></div>`;
+
+    return `
+        <div class="topic-box collapsible-section ${defaultOpen ? 'open' : ''} ${isDisabledByCategory ? 'category-disabled' : ''}" id="${sectionId}">
+            <div class="topic-header-row" onclick="toggleCollapsible('${jsAttr(sectionId)}')">
+                <div class="topic-title-group">
+                    <strong>📌 ${escapeHtmlSys(topicName)}</strong>
+                    ${isDisabledByCategory ? '<span class="disabled-badge">Category Disabled</span>' : ''}
+                    ${catchAll ? '<span class="linked-badge" style="background:var(--accent-primary,#6366f1);color:#fff;">🌐 Catch All</span>' : ''}
+                    ${linkedTopics.length > 0 ? `<span class="linked-badge">🔗 ${linkedTopics.length} linked</span>` : ''}
+                    <span class="schedule-indicator">🕐 ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''}</span>
+                </div>
+                <div class="topic-controls" onclick="event.stopPropagation()">
+                    <label class="toggle-switch">
+                        <input type="checkbox" ${topic.enabled ? 'checked' : ''}
+                               onchange="toggleTopic('${b}', '${c}', '${t}', this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <button class="btn-icon" title="Rename topic"
+                            onclick="renameTopic('${b}', '${c}', '${t}')">✏️</button>
+                    <button class="btn-icon btn-danger" title="Delete topic"
+                            onclick="deleteTopic('${b}', '${c}', '${t}')">🗑️</button>
+                    <span class="collapsible-toggle">▼</span>
+                </div>
             </div>
+
+            ${bodyHtml}
         </div>
     `;
 }
@@ -3979,8 +4025,11 @@ function toggleCollapsible(id) {
         const isOpen = section.classList.contains('open');
         saveCollapsibleState(id, isOpen);
 
-        // Lazy-render category topics on first open
-        if (isOpen) _renderLazyCategoryContent(section);
+        // Lazy-render content on first open
+        if (isOpen) {
+            _renderLazyCategoryContent(section);
+            _renderLazyTopicContent(section);
+        }
     }
 }
 

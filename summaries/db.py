@@ -1555,6 +1555,8 @@ class SummariesDB(Database):
                     }
 
             for t in topics_rows:
+                if not t['name'] or t['name'].strip() in ('None', 'null', 'NULL', ''):
+                    continue  # skip corrupt topic names that sneak in from Python str(None)
                 bn, cn = t['bot_name'], t['category_name']
                 if bn in result and cn in result[bn]['categories']:
                     kws = self.get_topic_keywords(bn, cn, t['name'], owner_id=owner_id)

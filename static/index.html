@@ -340,7 +340,7 @@
                 <div class="dash-chart-header">
                     <span class="dash-chart-title">Source × Topic Breakdown</span>
                     <input type="text" class="input dash-filter-input" id="dash-src-filter"
-                           placeholder="Filter sources…" oninput="filterSourceMatrix()">
+                           placeholder="Filter sources…" oninput="_dFilterSourceMatrix()">
                 </div>
                 <div class="dash-matrix-wrap" id="dash-matrix">
                     <p class="mon-empty">Select the Dashboard page to load data.</p>
@@ -539,7 +539,7 @@
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('msg-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="msg-filter-topic-dd"></div>
                         </div>
-                        <input type="text" class="input mon-filter-search" id="msg-search" placeholder="🔍 Search preview…" oninput="applyMonMessageFilters()">
+                        <input type="text" class="input mon-filter-search" id="msg-search" placeholder="🔍 Search preview…" oninput="_dApplyMonMessageFilters()">
                         <input type="date" class="input" id="msg-filter-date-from" style="max-width:145px" title="From date" onchange="applyMonMessageFilters()">
                         <input type="date" class="input" id="msg-filter-date-to"   style="max-width:145px" title="To date"   onchange="applyMonMessageFilters()">
                         <button class="btn btn-sm" id="msg-flat-btn" onclick="toggleMsgFlatView()" title="Show all messages flat (latest first), no grouping">≡ Flat</button>
@@ -1130,7 +1130,7 @@
                         </select>
                         <input type="text" id="log-search" class="input" placeholder="Search logs…"
                                style="flex:1;min-width:180px;max-width:320px"
-                               oninput="applyLogFilters()">
+                               oninput="_dApplyLogFilters()">
                         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;color:var(--text-secondary)">
                             <input type="checkbox" id="log-auto-refresh" checked onchange="toggleLogAutoRefresh()">
                             Auto-refresh (5s)
