@@ -50,8 +50,11 @@ def get_gemini_usage():
 
 
 @router.get("/system/ai-usage-details")
-def get_ai_usage_details():
-    """Return full AI usage breakdown: live meters + hourly stats + recent summaries."""
+def get_ai_usage_details(request: Request):
+    """Return full AI usage breakdown: live meters + hourly stats + recent summaries. Admin only."""
+    if not is_admin_request(request):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
     from utils.gemini_usage import get_gemini_usage as _get, RPM_LIMIT, TPM_LIMIT, RPD_LIMIT
     db = get_db()
     live = _get()

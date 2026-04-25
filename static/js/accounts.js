@@ -53,7 +53,7 @@ const authReady = new Promise(res => { _authReadyResolve = res; });
         const newsPages  = ['collections', 'bots', 'monitor', 'dashboard'];
         const ytPages    = ['yt-channels', 'yt-keywords', 'yt-videos'];
         const aiPages    = ['agent-chat'];
-        const adminPages = ['accounts'];
+        const adminPages = ['accounts', 'tg-tester', 'logs', 'ai-usage'];
         const activePage = localStorage.getItem('activePage') || 'system';
 
         const pageHidden =

@@ -251,7 +251,18 @@ function initNavigation() {
     });
 }
 
+const _ADMIN_ONLY_PAGES = new Set(['accounts', 'tg-tester', 'logs', 'ai-usage']);
+
 function showPage(pageName) {
+    // Enforce admin-only pages — block even if URL hash is edited manually
+    if (_ADMIN_ONLY_PAGES.has(pageName)) {
+        // currentUser is the global from accounts.js; null means auth not yet resolved
+        if (typeof currentUser !== 'undefined' && currentUser !== null && currentUser.role !== 'admin') {
+            history.replaceState({ page: 'system' }, '', '#system');
+            pageName = 'system';
+        }
+    }
+
     // Stop log auto-refresh when leaving the logs page; reset failure bot cache
     if (pageName !== 'logs') {
         clearTimeout(_logsTimer);
