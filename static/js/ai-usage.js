@@ -5,6 +5,7 @@ let _aiUsageTimer = null;
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function _aiuFmtNum(n) {
+    if (!Number.isFinite(n)) return '0';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
     return String(n);
@@ -35,8 +36,9 @@ function _aiuMeterHtml(label, used, limit) {
 
 function _aiuRelTime(iso) {
     if (!iso) return '—';
-    const norm = iso.endsWith('Z') ? iso : iso + 'Z';
-    const diff = Math.floor((Date.now() - new Date(norm).getTime()) / 1000);
+    const d0 = new Date(iso);
+    if (isNaN(d0.getTime())) return '—';
+    const diff = Math.floor((Date.now() - d0.getTime()) / 1000);
     if (diff < 60)    return diff + 's ago';
     if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
     if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
@@ -45,12 +47,10 @@ function _aiuRelTime(iso) {
 
 function _aiuFmtHour(isoHour) {
     if (!isoHour) return '—';
-    const norm = isoHour.endsWith('Z') ? isoHour : isoHour + 'Z';
-    const d  = new Date(norm);
-    const hh = String(d.getUTCHours()).padStart(2, '0');
-    const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const dd = String(d.getUTCDate()).padStart(2, '0');
-    return `${dd}/${mo} ${hh}:00`;
+    // Accept both 'T' and ' ' separators — psycopg2 may return either depending on tz config
+    const m = String(isoHour).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2})/);
+    if (!m) return '—';
+    return `${m[3]}/${m[2]} ${m[4]}:00`;
 }
 
 // ── Render meters block (used by initial load + poller) ────────────────────
@@ -119,7 +119,7 @@ async function loadAiUsagePage() {
             const bots   = (row.bots   || []).map(b => `<span class="tag-blue">${escapeHtml(b)}</span>`).join(' ');
             const topics = (row.topics || []).map(t => `<span class="tag-green">${escapeHtml(t)}</span>`).join(' ');
             hourlyRows += `<tr>
-                <td style="white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--text-muted);font-size:12px">${_aiuFmtHour(row.hour_utc)} UTC</td>
+                <td style="white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--text-muted);font-size:12px">${_aiuFmtHour(row.hour_lbn)}</td>
                 <td style="text-align:center;font-weight:600">${row.summary_count}</td>
                 <td style="text-align:center">${_aiuFmtNum(row.total_tokens || 0)}</td>
                 <td>${bots   || '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -195,12 +195,12 @@ async function loadAiUsagePage() {
     <div class="card" style="margin-bottom:1.25rem">
         <div class="card-header">
             <strong>📅 Hourly Activity</strong>
-            <span style="font-size:11px;color:var(--text-muted)">(last 24h · ${hourly.length} hour${hourly.length !== 1 ? 's' : ''} with activity)</span>
+            <span style="font-size:11px;color:var(--text-muted)">(last 24h · Lebanon time · ${hourly.length} hour${hourly.length !== 1 ? 's' : ''} with activity)</span>
         </div>
         <div style="overflow-x:auto">
             <table class="yt-table">
                 <thead><tr>
-                    <th>Hour (UTC)</th>
+                    <th>Hour</th>
                     <th style="text-align:center">Summaries</th>
                     <th style="text-align:center">Tokens</th>
                     <th>Bots</th>

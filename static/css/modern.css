@@ -1654,13 +1654,13 @@ html[data-theme="dark"] .tag-user-kw {
     border-bottom: 1px solid var(--border-color);
 }
 .smp-table { width: 100%; table-layout: fixed; }
-.smp-table th:nth-child(1) { width: 130px; }
-.smp-table th:nth-child(2) { width: 120px; }
-.smp-table th:nth-child(3) { width: 110px; }
-.smp-table th:nth-child(4) { width: 100px; }
-.smp-table th:nth-child(5) { width: 110px; }
-.smp-table th:nth-child(6) { width: 110px; }
-.smp-table th:nth-child(7) { width: auto; }
+.smp-table th,
+.smp-table td { padding: 7px 14px; }
+.smp-table th:nth-child(1) { width: 145px; }
+.smp-table th:nth-child(2) { width: 130px; }
+.smp-table th:nth-child(3) { width: 140px; }
+.smp-table th:nth-child(4) { width: 140px; }
+.smp-table th:nth-child(5) { width: auto; }
 .smp-msg-cell {
     font-size: 12px;
     color: var(--text-secondary);

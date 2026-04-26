@@ -365,6 +365,28 @@ def _chunked_summarize(texts: list, bot_name: str, prompt_key: str, topic_name: 
     return merged_text, total_tokens + merge_tk
 
 
+# ==================== LLM retry helper ====================
+_RETRYABLE_NETWORK_ERRORS = (OSError, ConnectionError, TimeoutError)
+
+async def _run_with_retry(fn, *args, max_attempts=3, base_delay=5):
+    """Run a sync LLM call in a thread, retrying up to max_attempts on transient network errors."""
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, fn, *args)
+        except _RETRYABLE_NETWORK_ERRORS as e:
+            last_exc = e
+            if attempt < max_attempts - 1:
+                delay = base_delay * (3 ** attempt)  # 5s → 15s → 45s
+                logger.warning(
+                    f"[RETRY] Network error (attempt {attempt+1}/{max_attempts}), "
+                    f"retrying in {delay}s: {e}"
+                )
+                await asyncio.sleep(delay)
+    raise last_exc
+
+
 # ==================== Summary Handler ====================
 async def generate_and_send_summary(job_data):
     """
@@ -383,20 +405,32 @@ async def generate_and_send_summary(job_data):
         logger.error(f"Missing required job data: {job_data}")
         return
 
-    # ── End-time gate: skip this fire if we're past the daily end window ───
+    # ── Time-window gate: skip fires outside the configured active window ──
     _end_h = job_data.get('sch_end_hour')
     _end_m = job_data.get('sch_end_minute')
     if _end_h is not None and _end_m is not None:
-        _now_local = datetime.datetime.now(BEIRUT_TZ)
-        _end_today = _now_local.replace(hour=int(_end_h), minute=int(_end_m), second=0, microsecond=0)
-        if _now_local > _end_today:
-            logger.info(f"[SKIP] Past end time {int(_end_h):02d}:{int(_end_m):02d} | Bot={bot_name} | Topic={topic_name}")
+        _now_local  = datetime.datetime.now(BEIRUT_TZ)
+        _start_h    = int(job_data.get('sch_start_hour') or 0)
+        _start_m    = int(job_data.get('sch_start_minute') or 0)
+        _end_h_i    = int(_end_h)
+        _end_m_i    = int(_end_m)
+        _now_mins   = _now_local.hour * 60 + _now_local.minute
+        _end_mins   = _end_h_i * 60 + _end_m_i
+        _start_mins = _start_h * 60 + _start_m
+        if _end_mins >= _start_mins:
+            # Normal window (e.g. 08:00–20:00): dead period is after end time
+            _in_dead = _now_mins > _end_mins
+        else:
+            # Overnight window (e.g. 08:00–02:00): dead period is between end and start
+            _in_dead = _end_mins < _now_mins < _start_mins
+        if _in_dead:
+            logger.info(f"[SKIP] Outside active window {_start_h:02d}:{_start_m:02d}–{_end_h_i:02d}:{_end_m_i:02d} | Bot={bot_name} | Topic={topic_name}")
             return
 
     try:
         bots_cfg = db.get_all_bots_config()
         bot_cfg = bots_cfg.get(bot_name, {})
-        min_messages = int(bot_cfg.get('minimum_messages') or 0)
+        min_messages = int(bot_cfg.get('minimum_messages') or 1)
 
         # ── Compute time window ──────────────────────────────────────────────
         window_start = _compute_window_start(job_data)
@@ -408,11 +442,14 @@ async def generate_and_send_summary(job_data):
         all_msgs = db.get_messages_for_schedule_window(
             bot_name, topic_name, schedule_type, after_dt=window_start
         )
+        logger.info(f"[SUMMARY] raw_msgs={len(all_msgs)} | Bot={bot_name} | Topic={topic_name} | Type={schedule_type}")
+
+        # Filter to messages with actual text content
+        all_msgs = [m for m in all_msgs if (m.get('text') or '').strip()]
         total_msg_count = len(all_msgs)
-        logger.info(f"[SUMMARY] raw_msgs={total_msg_count} | Bot={bot_name} | Topic={topic_name} | Type={schedule_type}")
 
         if total_msg_count == 0:
-            logger.info(f"[SKIP] No messages to summarize | Bot={bot_name} | Topic={topic_name}")
+            logger.info(f"[SKIP] No messages with content | Bot={bot_name} | Topic={topic_name}")
             return
 
         if total_msg_count < min_messages:
@@ -420,7 +457,6 @@ async def generate_and_send_summary(job_data):
             return
 
         # ── Build final summary — batch in groups of 25 if needed ────────────
-        loop = asyncio.get_event_loop()
         all_ids   = [m['id']   for m in all_msgs]
         all_texts = [m['text'] for m in all_msgs]
 
@@ -428,7 +464,7 @@ async def generate_and_send_summary(job_data):
         total_tokens = 0
         if len(all_texts) <= BATCH:
             prompt = get_summary_prompt(all_texts, bot_name, prompt_key, topic_name=topic_name)
-            summary_text, tk = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+            summary_text, tk = await _run_with_retry(llm_client.generate_summary, prompt)
             total_tokens += tk
         else:
             # Summarize each 25-message chunk, then merge
@@ -436,7 +472,7 @@ async def generate_and_send_summary(job_data):
             for i in range(0, len(all_texts), BATCH):
                 chunk = all_texts[i:i + BATCH]
                 p = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
-                s, tk = await loop.run_in_executor(None, llm_client.generate_summary, p)
+                s, tk = await _run_with_retry(llm_client.generate_summary, p)
                 total_tokens += tk
                 partial_summaries.append(s)
 
@@ -448,10 +484,14 @@ async def generate_and_send_summary(job_data):
                     "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
                     + "\n---\n".join(partial_summaries)
                 )
-                summary_text, merge_tk = await loop.run_in_executor(None, llm_client.generate_summary, merge_prompt)
+                summary_text, merge_tk = await _run_with_retry(llm_client.generate_summary, merge_prompt)
                 total_tokens += merge_tk
 
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)} | tokens={total_tokens}")
+
+        if not summary_text.strip():
+            logger.warning(f"[SKIP] AI returned empty summary | Bot={bot_name} | Topic={topic_name}")
+            return
 
         # ── Resolve target channels ──────────────────────────────────────────
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
@@ -652,8 +692,7 @@ async def generate_speech_buckets(job_data: dict):
         msg_ids = [m['id']   for m in in_window]
 
         prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-        loop         = asyncio.get_event_loop()
-        llm_response, _ = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+        llm_response, _ = await _run_with_retry(llm_client.generate_summary, prompt)
         buckets      = _parse_speech_buckets(llm_response)
 
         # Cancel any existing pending send task and restart the countdown
@@ -840,8 +879,7 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 msg_ids = [m['id'] for m in messages]
 
                 prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-                loop = asyncio.get_event_loop()
-                summary_text, _ = await loop.run_in_executor(None, llm_client.generate_summary, prompt)
+                summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
 
                 db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
                 db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name)

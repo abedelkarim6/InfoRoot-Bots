@@ -380,7 +380,7 @@ class SummariesDB(Database):
             if days:
                 from datetime import datetime, timedelta
                 conditions.append("timestamp >= %s")
-                params.append(datetime.utcnow() - timedelta(days=days))
+                params.append(datetime.now() - timedelta(days=days))
 
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             params.append(limit)
@@ -411,7 +411,7 @@ class SummariesDB(Database):
             cursor = self._get_cursor()
             cursor.execute("""
                 SELECT
-                    DATE_TRUNC('hour', timestamp AT TIME ZONE 'UTC') AS hour_utc,
+                    DATE_TRUNC('hour', timestamp) AS hour_lbn,
                     COUNT(*)                                          AS summary_count,
                     SUM(COALESCE(tokens_used, 0))                    AS total_tokens,
                     SUM(COALESCE(message_count, 0))                  AS total_messages,
@@ -425,7 +425,7 @@ class SummariesDB(Database):
             result = []
             for row in cursor.fetchall():
                 d = dict(row)
-                d['hour_utc'] = d['hour_utc'].isoformat() if d['hour_utc'] else None
+                d['hour_lbn'] = d['hour_lbn'].isoformat() if d['hour_lbn'] else None
                 d['bots']   = [b for b in (d['bots']   or []) if b]
                 d['topics'] = [t for t in (d['topics'] or []) if t]
                 result.append(d)
@@ -829,15 +829,10 @@ class SummariesDB(Database):
                         if windows and msg_ts is not None:
                             win = windows.get((bn, topic, stype))
                             if win is not None:
-                                # Compare timezone-aware to timezone-aware
-                                msg_ts_cmp = msg_ts
-                                if hasattr(msg_ts, 'tzinfo') and msg_ts.tzinfo is None:
-                                    import datetime as _dt
-                                    try:
-                                        from zoneinfo import ZoneInfo
-                                        msg_ts_cmp = msg_ts.replace(tzinfo=ZoneInfo('Asia/Beirut'))
-                                    except Exception:
-                                        msg_ts_cmp = msg_ts.replace(tzinfo=_dt.timezone.utc)
+                                import datetime as _dt
+                                from zoneinfo import ZoneInfo
+                                # messages.timestamp is TIMESTAMP (no tz) storing Beirut local time
+                                msg_ts_cmp = msg_ts if msg_ts.tzinfo is not None else msg_ts.replace(tzinfo=ZoneInfo('Asia/Beirut'))
                                 if msg_ts_cmp < win:
                                     continue
                         counts[bn][topic][stype] += 1
@@ -1555,8 +1550,6 @@ class SummariesDB(Database):
                     }
 
             for t in topics_rows:
-                if not t['name'] or t['name'].strip() in ('None', 'null', 'NULL', ''):
-                    continue  # skip corrupt topic names that sneak in from Python str(None)
                 bn, cn = t['bot_name'], t['category_name']
                 if bn in result and cn in result[bn]['categories']:
                     kws = self.get_topic_keywords(bn, cn, t['name'], owner_id=owner_id)
@@ -1596,6 +1589,10 @@ class SummariesDB(Database):
                         sch['start_hour'] = s['start_hour']
                     if s['start_minute'] is not None:
                         sch['start_minute'] = s['start_minute']
+                    if s['end_hour'] is not None:
+                        sch['end_hour'] = s['end_hour']
+                    if s['end_minute'] is not None:
+                        sch['end_minute'] = s['end_minute']
                     result[bn]['categories'][cn]['topics'][tn]['schedules'].append(sch)
 
             return result

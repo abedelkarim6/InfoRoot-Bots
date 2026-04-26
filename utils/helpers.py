@@ -378,6 +378,11 @@ def compute_window_start(job_data: dict, tz=None) -> datetime.datetime:
             n = math.floor(elapsed_seconds / (hours * 3600))
 
             if n == 0:
+                # Overnight schedule: end time is before start time (e.g. start=08:00, end=02:00).
+                # The previous cycle ended THIS morning at end_h:end_m, not yesterday.
+                overnight = (int(end_h) * 60 + int(end_m)) < (start_h * 60 + start_m)
+                if overnight:
+                    return now.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
                 yesterday_anchor = anchor - datetime.timedelta(days=1)
                 return yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
             return anchor + datetime.timedelta(hours=(n - 1) * hours)
@@ -399,6 +404,9 @@ def compute_window_start(job_data: dict, tz=None) -> datetime.datetime:
             n = math.floor(elapsed_seconds / (minutes * 60))
 
             if n == 0:
+                overnight = (int(end_h) * 60 + int(end_m)) < (start_h * 60 + start_m)
+                if overnight:
+                    return now.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
                 yesterday_anchor = anchor - datetime.timedelta(days=1)
                 return yesterday_anchor.replace(hour=int(end_h), minute=int(end_m), second=0, microsecond=0)
             return anchor + datetime.timedelta(minutes=(n - 1) * minutes)

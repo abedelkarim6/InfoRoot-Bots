@@ -686,14 +686,33 @@ function createBotDetailCard(name, bot) {
     const catEntries = Object.entries(bot.categories || {});
     const collectionsCount = (bot.collections || []).length;
 
-    let totalCats = catEntries.length;
-    let enabledCats = catEntries.filter(([, c]) => c.enabled !== false).length;
-    let totalTopics = 0, enabledTopics = 0;
-    catEntries.forEach(([, cat]) => {
-        const topicEntries = Object.entries(cat.topics || {});
-        totalTopics += topicEntries.length;
-        enabledTopics += topicEntries.filter(([, t]) => t.enabled !== false).length;
-    });
+    const totalCats = catEntries.length;
+    let enabledCats = 0, totalTopics = 0, enabledTopics = 0;
+
+    // Single pass over categories: collect totals AND build per-category breakdown rows
+    const catRowParts = [];
+    for (let i = 0; i < catEntries.length; i++) {
+        const [catName, cat] = catEntries[i];
+        const catOn = cat.enabled !== false;
+        if (catOn) enabledCats++;
+        let tCount = 0, tOn = 0;
+        const topics = cat.topics || {};
+        for (const tName in topics) {
+            tCount++;
+            if (topics[tName].enabled !== false) tOn++;
+        }
+        totalTopics += tCount;
+        enabledTopics += tOn;
+        const tOff = tCount - tOn;
+        const dotColor = catOn ? 'var(--success)' : 'var(--danger)';
+        const topicStr = tCount === 0 ? '—'
+            : `${tOn} on` + (tOff > 0 ? ` / <span style="color:var(--danger);">${tOff} off</span>` : '');
+        catRowParts.push(`<div class="sys-cat-row">
+            <span style="color:${dotColor};font-size:10px;flex-shrink:0;">●</span>
+            <span class="sys-cat-name">${escapeHtmlSys(catName)}</span>
+            <span class="sys-cat-topics">${topicStr} topics</span>
+        </div>`);
+    }
     const disabledCats   = totalCats   - enabledCats;
     const disabledTopics = totalTopics - enabledTopics;
 
@@ -701,21 +720,7 @@ function createBotDetailCard(name, bot) {
         `<span style="color:var(--success);font-weight:600;">${on} on</span>`
         + (off > 0 ? ` / <span style="color:var(--danger);font-weight:600;">${off} off</span>` : '');
 
-    // Per-category breakdown rows
-    const catRows = catEntries.map(([catName, cat]) => {
-        const topicEntries = Object.entries(cat.topics || {});
-        const catOn  = cat.enabled !== false;
-        const tOn    = topicEntries.filter(([, t]) => t.enabled !== false).length;
-        const tOff   = topicEntries.length - tOn;
-        const dotColor = catOn ? 'var(--success)' : 'var(--danger)';
-        const topicStr = topicEntries.length === 0 ? '—'
-            : `${tOn} on` + (tOff > 0 ? ` / <span style="color:var(--danger);">${tOff} off</span>` : '');
-        return `<div class="sys-cat-row">
-            <span style="color:${dotColor};font-size:10px;flex-shrink:0;">●</span>
-            <span class="sys-cat-name">${escapeHtmlSys(catName)}</span>
-            <span class="sys-cat-topics">${topicStr} topics</span>
-        </div>`;
-    }).join('');
+    const catRows = catRowParts.join('');
 
     return `
         <div class="bot-detail-card">
@@ -814,13 +819,16 @@ function updateStats() {
     const enabledColls = Object.values(collections).filter(c => c.enabled !== false).length;
 
     let totalCats = 0, enabledCats = 0, totalTopics = 0, enabledTopics = 0;
-    for (const bot of Object.values(bots)) {
-        for (const [, cat] of Object.entries(bot.categories || {})) {
+    for (const botName in bots) {
+        const cats = bots[botName].categories || {};
+        for (const catName in cats) {
+            const cat = cats[catName];
             totalCats++;
             if (cat.enabled !== false) enabledCats++;
-            for (const [, topic] of Object.entries(cat.topics || {})) {
+            const topics = cat.topics || {};
+            for (const topicName in topics) {
                 totalTopics++;
-                if (topic.enabled !== false) enabledTopics++;
+                if (topics[topicName].enabled !== false) enabledTopics++;
             }
         }
     }
@@ -1590,8 +1598,11 @@ function _renderBotDetailView(name, bot, keepOpen = null) {
                 const el = document.getElementById(id);
                 if (el) {
                     el.classList.add('open');
-                    _renderLazyCategoryContent(el);
-                    _renderLazyTopicContent(el);
+                    if (el.classList.contains('category-box')) {
+                        _renderLazyCategoryContent(el);
+                    } else if (el.classList.contains('topic-box')) {
+                        _renderLazyTopicContent(el);
+                    }
                 }
             });
         }
@@ -2029,7 +2040,7 @@ function createCategoryBox(botName, categoryName, category) {
     // Closed categories get a lightweight placeholder that is populated on first open.
     const topicsContent = defaultOpen
         ? _buildCategoryTopicsHtml(botName, categoryName, category)
-        : `<div class="topics-container" data-lazy-bot="${b}" data-lazy-cat="${c}"></div>`;
+        : `<div class="topics-container category-lazy-body" data-lazy-bot="${b}" data-lazy-cat="${c}"></div>`;
 
     return `
         <div class="category-box collapsible-section ${defaultOpen ? 'open' : ''}" id="${sectionId}">
@@ -2083,12 +2094,13 @@ function _buildCategoryTopicsHtml(botName, categoryName, category) {
 }
 
 function _renderLazyCategoryContent(section) {
-    const placeholder = section.querySelector('[data-lazy-bot]');
+    const placeholder = section.querySelector('.category-lazy-body');
     if (!placeholder) return;
     const botName = placeholder.getAttribute('data-lazy-bot');
     const catName = placeholder.getAttribute('data-lazy-cat');
     placeholder.removeAttribute('data-lazy-bot');
     placeholder.removeAttribute('data-lazy-cat');
+    placeholder.classList.remove('category-lazy-body');
     const bot = globalConfig.bots?.[botName];
     const category = bot?.categories?.[catName];
     if (!category) return;
@@ -2288,14 +2300,24 @@ function formatSchedule(schedule) {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
         const endPart = (schedule.end_hour != null && schedule.end_minute != null)
-            ? ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}` : '';
+            ? (() => {
+                const startMins = (schedule.start_hour ?? 0) * 60 + (schedule.start_minute ?? 0);
+                const endMins   = schedule.end_hour * 60 + schedule.end_minute;
+                const tag = endMins < startMins ? ' (+1d)' : '';
+                return ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}${tag}`;
+            })() : '';
         return `Every ${schedule.minutes || 30}min — starts ${sh}:${sm}${endPart}`;
     }
     if (type === 'interval_hourly') {
         const sh = String(schedule.start_hour   ?? 0).padStart(2, '0');
         const sm = String(schedule.start_minute ?? 0).padStart(2, '0');
         const endPart = (schedule.end_hour != null && schedule.end_minute != null)
-            ? ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}` : '';
+            ? (() => {
+                const startMins = (schedule.start_hour ?? 0) * 60 + (schedule.start_minute ?? 0);
+                const endMins   = schedule.end_hour * 60 + schedule.end_minute;
+                const tag = endMins < startMins ? ' (+1d)' : '';
+                return ` → ${String(schedule.end_hour).padStart(2,'0')}:${String(schedule.end_minute).padStart(2,'0')}${tag}`;
+            })() : '';
         return `Every ${schedule.hours || 1}h — starts ${sh}:${sm}${endPart}`;
     }
     if (type === 'daily') return `Daily at ${String(schedule.hour || 0).padStart(2, '0')}:${String(schedule.minute || 0).padStart(2, '0')}`;
@@ -3551,7 +3573,7 @@ function updateTopicScheduleInputs() {
                 <input type="number" class="input" id="topic-schedule-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="topic-schedule-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>
+            <small class="text-muted">Fires every X minutes within the window. If end &lt; start (e.g. 08:00 → 02:00), runs overnight until end time next day.</small>
         `;
     } else if (type === 'interval_hourly') {
         container.innerHTML = `
@@ -3567,7 +3589,7 @@ function updateTopicScheduleInputs() {
                 <input type="number" class="input" id="topic-schedule-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="topic-schedule-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at start time, then every X hours until end time. Next day resumes at start time and sends all messages since end time.</small>
+            <small class="text-muted">Fires every X hours within the window. If end &lt; start (e.g. 08:00 → 02:00), runs overnight until end time next day.</small>
         `;
     } else if (type === 'daily') {
         container.innerHTML = `
@@ -3780,7 +3802,7 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
     modal.dataset.topicName = topicName;
 
     const typeOptions = ['minute', 'hourly', 'interval_minutes', 'interval_hourly', 'daily', 'speeches_interval'];
-    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval: 'Every X Hours', daily: 'Daily', speeches_interval: 'Speeches Interval' };
+    const typeLabels  = { minute: 'Every Minute', hourly: 'Hourly', interval_minutes: 'Every X Minutes', interval_hourly: 'Every X Hours', daily: 'Daily', speeches_interval: 'Speeches Interval' };
 
     modal.innerHTML = `
         <div class="modal-dialog">
@@ -3887,7 +3909,7 @@ function buildEditScheduleInputs(schedule) {
                     <input type="number" class="input" id="edit-sch-end-hour" min="0" max="23" value="${ehM}" placeholder="HH" style="width:80px;">
                     <input type="number" class="input" id="edit-sch-end-minute" min="0" max="59" value="${emM}" placeholder="MM" style="width:80px;">
                 </div>
-                <small class="text-muted">First run at start time, then every X minutes until end time. Next day resumes at start time.</small>`;
+                <small class="text-muted">Fires every X minutes within the window. If end &lt; start (e.g. 08:00 → 02:00), runs overnight until end time next day.</small>`;
     } else if (type === 'interval_hourly') {
         const ehI = schedule.end_hour   != null ? schedule.end_hour   : '';
         const emI = schedule.end_minute != null ? schedule.end_minute : '';
@@ -3903,7 +3925,7 @@ function buildEditScheduleInputs(schedule) {
                     <input type="number" class="input" id="edit-sch-end-hour" min="0" max="23" value="${ehI}" placeholder="HH" style="width:80px;">
                     <input type="number" class="input" id="edit-sch-end-minute" min="0" max="59" value="${emI}" placeholder="MM" style="width:80px;">
                 </div>
-                <small class="text-muted">First run at start time, then every X hours until end time. Next day resumes at start time and sends all messages since end time.</small>`;
+                <small class="text-muted">Fires every X hours within the window. If end &lt; start (e.g. 08:00 → 02:00), runs overnight until end time next day.</small>`;
     } else if (type === 'daily') {
         return `<label class="form-label">Hour</label>
                 <input type="number" class="input" id="edit-sch-hour" min="0" max="23" value="${schedule.hour || 0}">
@@ -4025,10 +4047,13 @@ function toggleCollapsible(id) {
         const isOpen = section.classList.contains('open');
         saveCollapsibleState(id, isOpen);
 
-        // Lazy-render content on first open
+        // Lazy-render content on first open — call only the renderer matching this section type
         if (isOpen) {
-            _renderLazyCategoryContent(section);
-            _renderLazyTopicContent(section);
+            if (section.classList.contains('category-box')) {
+                _renderLazyCategoryContent(section);
+            } else if (section.classList.contains('topic-box')) {
+                _renderLazyTopicContent(section);
+            }
         }
     }
 }
@@ -4367,23 +4392,31 @@ function renderMonitorBots(bots) {
     _monSchFlat = [];
     const allTopics = new Set();
     const allPrompts = new Set();
-    Object.entries(bots).forEach(([botName, botData]) => {
-        Object.entries(botData.categories || {}).forEach(([catName, catData]) => {
-            Object.entries(catData.topics || {}).forEach(([topicName, topicData]) => {
+    for (const botName in bots) {
+        const botData = bots[botName];
+        const cats = botData.categories || {};
+        for (const catName in cats) {
+            const catData = cats[catName];
+            const topics = catData.topics || {};
+            for (const topicName in topics) {
+                const topicData = topics[topicName];
                 allTopics.add(topicName);
-                (topicData.schedules || []).forEach(sch => {
+                const schedules = topicData.schedules || [];
+                const p = topicData.pending || {};
+                const topicEnabled = topicData.enabled !== false;
+                for (let i = 0; i < schedules.length; i++) {
+                    const sch = schedules[i];
                     if (sch.prompt_key) allPrompts.add(sch.prompt_key);
-                    const p = topicData.pending || {};
                     _monSchFlat.push({
                         botName, catName, topicName,
                         botEnabled: botData.enabled,
-                        topicEnabled: topicData.enabled !== false,
+                        topicEnabled,
                         sch, pending: p[sch.type] || 0
                     });
-                });
-            });
-        });
-    });
+                }
+            }
+        }
+    }
 
     populateMonMultiSelect('sch-filter-topic-wrap',  [...allTopics].sort());
     populateMonMultiSelect('sch-filter-prompt-wrap', [...allPrompts].sort());
@@ -4438,15 +4471,19 @@ function _monMsToggle(wrapId, cb) {
     const selected = _getMonMs(wrapId);
     if (cb.checked) selected.add(cb.value); else selected.delete(cb.value);
     const wrap = document.getElementById(wrapId);
-    const dd = wrap?.querySelector('.mon-ms-dropdown');
+    if (!wrap) { _updateMonMsBtn(wrapId); return; }
+    const dd = wrap.querySelector('.mon-ms-dropdown');
     if (dd) { const allCb = dd.querySelector('.all-item input'); if (allCb) allCb.checked = selected.size === 0; }
-    _updateMonMsBtn(wrapId);
-    const fn = wrap?.dataset?.onchange;
+    _updateMonMsBtnFromWrap(wrap, wrapId);
+    const fn = wrap.dataset?.onchange;
     if (fn && window[fn]) window[fn]();
 }
 function _updateMonMsBtn(wrapId) {
     const wrap = document.getElementById(wrapId);
     if (!wrap) return;
+    _updateMonMsBtnFromWrap(wrap, wrapId);
+}
+function _updateMonMsBtnFromWrap(wrap, wrapId) {
     const btn = wrap.querySelector('.mon-ms-btn');
     if (!btn) return;
     const allLabel = wrap.dataset.label || 'All';
@@ -4691,10 +4728,12 @@ const _BEIRUT_TZ = 'Asia/Beirut';
 function tickCountdowns() {
     // Tick the 24h timeline "In" cells
     const nowMs = Date.now();
-    document.querySelectorAll('tr[data-fire-at]').forEach(row => {
+    const fireRows = document.querySelectorAll('tr[data-fire-at]');
+    for (let i = 0; i < fireRows.length; i++) {
+        const row = fireRows[i];
         const cdEl = row.querySelector('.sch-in-cell');
-        if (!cdEl) return;
-        const diff = parseInt(row.dataset.fireAt) - nowMs;
+        if (!cdEl) continue;
+        const diff = Number(row.dataset.fireAt) - nowMs;
         if (diff <= 0) {
             cdEl.textContent = 'now';
             cdEl.style.color = 'var(--success,#22c55e)';
@@ -4702,27 +4741,29 @@ function tickCountdowns() {
             cdEl.textContent = formatDuration(diff);
             cdEl.style.color = diff < 300000 ? 'var(--danger)' : 'var(--text-muted)';
         }
-    });
+    }
 
     // Legacy: tick mon-sch-row countdowns (used by pending-messages detail view)
-    document.querySelectorAll('[data-schedule]').forEach(row => {
+    const schRows = document.querySelectorAll('[data-schedule]');
+    for (let i = 0; i < schRows.length; i++) {
+        const row = schRows[i];
         const cdEl   = row.querySelector('.mon-countdown');
         const timeEl = row.querySelector('.mon-next-time');
-        if (!cdEl) return;
+        if (!cdEl) continue;
         let sch;
-        try { sch = JSON.parse(row.dataset.schedule); } catch { return; }
+        try { sch = JSON.parse(row.dataset.schedule); } catch { continue; }
         if (sch.enabled === false) {
             cdEl.textContent = '—';
             if (timeEl) timeEl.textContent = '';
-            return;
+            continue;
         }
         const next = computeNextRun(sch);
         if (!next) {
             cdEl.textContent = '—';
             if (timeEl) timeEl.textContent = '';
-            return;
+            continue;
         }
-        const diff = Math.max(0, next - Date.now());
+        const diff = Math.max(0, next - nowMs);
         cdEl.textContent = formatDuration(diff);
         cdEl.classList.toggle('urgent', diff < 60000);
         if (timeEl) {
@@ -4732,7 +4773,7 @@ function tickCountdowns() {
                 minute: '2-digit',
             });
         }
-    });
+    }
 }
 
 function computeNextRun(sch) {
@@ -4924,15 +4965,22 @@ function applyMonSummaryFilters() {
 
     // Flatten all schedules from bots config
     const rows = [];
-    for (const [botName, botData] of Object.entries(botsData)) {
+    for (const botName in botsData) {
         if (selBots.size > 0 && !selBots.has(botName)) continue;
+        const botData = botsData[botName];
         if (!botData.enabled) continue;
-        for (const [, catData] of Object.entries(botData.categories || {})) {
+        const cats = botData.categories || {};
+        for (const catName in cats) {
+            const catData = cats[catName];
             if (!catData.enabled) continue;
-            for (const [topicName, topicData] of Object.entries(catData.topics || {})) {
+            const topics = catData.topics || {};
+            for (const topicName in topics) {
                 if (selTopics.size > 0 && !selTopics.has(topicName)) continue;
+                const topicData = topics[topicName];
                 if (!topicData.enabled) continue;
-                for (const sch of (topicData.schedules || [])) {
+                const schedules = topicData.schedules || [];
+                for (let i = 0; i < schedules.length; i++) {
+                    const sch = schedules[i];
                     if (!sch.enabled) continue;
                     if (selTypes.size > 0 && !selTypes.has(sch.type || '')) continue;
 
@@ -5252,9 +5300,12 @@ function applyMonMessageFilters() {
     const selColls    = getMonMsValues('msg-filter-coll-wrap');
     const selChannels = getMonMsValues('msg-filter-channel-wrap');
     const selTopics   = getMonMsValues('msg-filter-topic-wrap');
-    const search   = (document.getElementById('msg-search')?.value || '').trim().toLowerCase();
-    const dateFrom = document.getElementById('msg-filter-date-from')?.value || '';
-    const dateTo   = document.getElementById('msg-filter-date-to')?.value   || '';
+    const searchEl   = document.getElementById('msg-search');
+    const dateFromEl = document.getElementById('msg-filter-date-from');
+    const dateToEl   = document.getElementById('msg-filter-date-to');
+    const search   = (searchEl?.value || '').trim().toLowerCase();
+    const dateFrom = dateFromEl?.value || '';
+    const dateTo   = dateToEl?.value   || '';
 
     let filtered = _allMessages;
     if (selColls.size > 0)    filtered = filtered.filter(m => selColls.has(m.collection || ''));
@@ -5447,8 +5498,10 @@ function _renderUnclassified(messages) {
     if (unclSelCh.size    > 0) visible = visible.filter(m => unclSelCh.has(`@${m.channel_username}`));
 
     // Apply date filters
-    const dateFrom = document.getElementById('uncl-filter-date-from')?.value || '';
-    const dateTo   = document.getElementById('uncl-filter-date-to')?.value   || '';
+    const dateFromEl = document.getElementById('uncl-filter-date-from');
+    const dateToEl   = document.getElementById('uncl-filter-date-to');
+    const dateFrom = dateFromEl?.value || '';
+    const dateTo   = dateToEl?.value   || '';
     if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
     if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
 
@@ -5819,8 +5872,10 @@ function _renderMissed(messages) {
     if (missedSelCh.size     > 0) visible = visible.filter(m => missedSelCh.has(`@${m.channel_username}`));
 
     // Apply date filters
-    const dateFrom = document.getElementById('missed-filter-date-from')?.value || '';
-    const dateTo   = document.getElementById('missed-filter-date-to')?.value   || '';
+    const missedFromEl = document.getElementById('missed-filter-date-from');
+    const missedToEl   = document.getElementById('missed-filter-date-to');
+    const dateFrom = missedFromEl?.value || '';
+    const dateTo   = missedToEl?.value   || '';
     if (dateFrom) visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) >= dateFrom);
     if (dateTo)   visible = visible.filter(m => m.timestamp && m.timestamp.slice(0,10) <= dateTo);
 
@@ -6915,16 +6970,12 @@ function _renderHistMsgTable() {
     const rows = filtered.map(m => {
         const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
         const src = m.channel_username ? `@${m.channel_username}` : '—';
-        const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
-        const bot = m.bot_name         ? escapeHtml(m.bot_name)         : '—';
         const top = m.topics           ? escapeHtml(m.topics)           : '—';
         const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
         const txt = escapeHtml(m.preview || '');
         return `<tr>
             <td style="white-space:nowrap;font-size:11px;">${ts}</td>
             <td>${src}</td>
-            <td>${col}</td>
-            <td>${bot}</td>
             <td>${top}</td>
             <td>${kw}</td>
             <td class="smp-msg-cell" title="${txt}">${txt}</td>
@@ -6936,8 +6987,8 @@ function _renderHistMsgTable() {
         <div style="overflow-x:auto">
             <table class="mon-table smp-table">
                 <thead><tr>
-                    <th>Date / Time</th><th>Source</th><th>Collection</th>
-                    <th>Bot</th><th>Topics</th><th>Keywords</th><th>Message</th>
+                    <th>Date / Time</th><th>Source</th>
+                    <th>Topics</th><th>Keywords</th><th>Message</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>

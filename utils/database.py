@@ -316,18 +316,6 @@ class Database:
             topic_cols = [r['column_name'] for r in cursor.fetchall()]
             if 'catch_all' not in topic_cols:
                 cursor.execute("ALTER TABLE topics ADD COLUMN catch_all BOOLEAN DEFAULT FALSE")
-            # Cleanup: remove topics with invalid names (e.g. Python str(None) = "None" stored by accident)
-            cursor.execute("DELETE FROM topics WHERE name IS NULL OR TRIM(name) = '' OR name IN ('None', 'null', 'NULL')")
-            # Cleanup: remove "None" from topics column in messages (strip any comma-separated "None" entries)
-            cursor.execute("""
-                UPDATE messages
-                SET topics = (
-                    SELECT NULLIF(STRING_AGG(t, ',' ORDER BY ord), '')
-                    FROM UNNEST(STRING_TO_ARRAY(topics, ',')) WITH ORDINALITY AS u(t, ord)
-                    WHERE TRIM(t) NOT IN ('None', 'null', 'NULL', '')
-                )
-                WHERE topics ~ '(^|,)\\s*(None|null|NULL)\\s*(,|$)'
-            """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
