@@ -110,7 +110,8 @@ class SummariesDB(Database):
             self._commit()
 
     def mark_as_summarized(self, message_ids: List[int], schedule_type: str,
-                           bot_name: str, topic_name: str, status: str = 'summarized'):
+                           bot_name: str, topic_name: str, status: str = 'summarized',
+                           interim_id: int = None):
         try:
             """Mark messages for a specific (bot, topic, schedule_type) with the given status."""
             if not message_ids:
@@ -119,10 +120,10 @@ class SummariesDB(Database):
             for mid in message_ids:
                 cursor.execute(
                     """INSERT INTO message_summarizations
-                           (message_id, bot_name, topic_name, schedule_type, status)
-                       VALUES (%s, %s, %s, %s, %s)
+                           (message_id, bot_name, topic_name, schedule_type, status, interim_id)
+                       VALUES (%s, %s, %s, %s, %s, %s)
                        ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO NOTHING""",
-                    (mid, bot_name, topic_name, schedule_type, status)
+                    (mid, bot_name, topic_name, schedule_type, status, interim_id)
                 )
         finally:
             self._commit()
@@ -319,6 +320,75 @@ class SummariesDB(Database):
             )
         finally:
             self._commit()
+
+    def get_interims(self, bot_name: str = None, topic_name: str = None, limit: int = 300) -> list:
+        """Return recent interim summaries, newest first, with optional filters."""
+        try:
+            cursor = self._get_cursor()
+            clauses, params = [], []
+            if bot_name:
+                clauses.append("bot_name = %s"); params.append(bot_name)
+            if topic_name:
+                clauses.append("topic_name = %s"); params.append(topic_name)
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.append(limit)
+            cursor.execute(
+                f"""SELECT id, bot_name, topic_name, summary_text, message_count,
+                           created_at, sent_at
+                    FROM topic_interim_summaries
+                    {where}
+                    ORDER BY created_at DESC LIMIT %s""",
+                params,
+            )
+            rows = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['status'] = 'pending' if d['sent_at'] is None else 'done'
+                d['created_at'] = d['created_at'].isoformat() if d['created_at'] else None
+                d['sent_at']    = d['sent_at'].isoformat()    if d['sent_at']    else None
+                d['preview']    = (d.get('summary_text') or '')[:250]
+                rows.append(d)
+            return rows
+        finally:
+            self._commit()
+
+    def get_interim_messages(self, interim_id: int) -> list:
+        """Return the messages linked to a specific interim (requires interim_id migration)."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT m.id, m.channel_id, m.channel_username, m.collection_name,
+                          m.bot_name, m.topics, m.categories, m.keywords_found,
+                          m.timestamp, m.text
+                   FROM messages m
+                   JOIN message_summarizations ms ON ms.message_id = m.id
+                   WHERE ms.interim_id = %s
+                   ORDER BY m.timestamp ASC""",
+                (interim_id,),
+            )
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                txt = d.pop('text', '') or ''
+                d['preview'] = txt[:300]
+                if d['timestamp']:
+                    d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def get_interim_batch_limit(self) -> int:
+        """Return the configured messages-per-interim batch size (default 10)."""
+        val = self.get_setting('interim_batch_limit')
+        try:
+            return int(val) if val is not None else 10
+        except (TypeError, ValueError):
+            return 10
+
+    def set_interim_batch_limit(self, limit: int):
+        """Persist the messages-per-interim batch size."""
+        self.set_setting('interim_batch_limit', limit)
 
     def get_old_unsummarized_messages(self, before_dt) -> list:
         """Return all messages older than before_dt that have no interim tracking record."""
@@ -846,7 +916,7 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_dashboard_stats(self, days: int = 14, filter_source: str = None, filter_topic: str = None,
+    def get_dashboard_stats(self, days: int = 14, filter_sources: list = None, filter_topics: list = None,
                             filter_bot_names: list = None, filter_channels: list = None) -> dict:
         try:
             """Return comprehensive analytics for the dashboard page."""
@@ -857,15 +927,15 @@ class SummariesDB(Database):
 
             # channels_clause: multi-channel include filter (from filter_channels tag picker)
             channels_clause = " AND channel_username = ANY(%s)" if filter_channels else ""
-            src_clause      = " AND channel_username = %s"      if filter_source   else ""
-            topic_clause    = " AND TRIM(t.topic) = %s"         if filter_topic    else ""
+            src_clause      = " AND channel_username = ANY(%s)" if filter_sources  else ""
+            topic_clause    = " AND TRIM(t.topic) = ANY(%s)"    if filter_topics   else ""
             bot_clause      = " AND bot_name = ANY(%s)"         if filter_bot_names is not None else ""
 
             # p(): queries with channels + src + bot (no topic clause)
             def p(*base):
                 extra = []
                 if filter_channels:  extra.append(filter_channels)
-                if filter_source:    extra.append(filter_source)
+                if filter_sources:   extra.append(filter_sources)
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
@@ -879,8 +949,8 @@ class SummariesDB(Database):
             def p_topic(*base):
                 extra = []
                 if filter_channels:  extra.append(filter_channels)
-                if filter_source:    extra.append(filter_source)
-                if filter_topic:     extra.append(filter_topic)
+                if filter_sources:   extra.append(filter_sources)
+                if filter_topics:    extra.append(filter_topics)
                 if filter_bot_names is not None: extra.append(filter_bot_names)
                 return tuple(base) + tuple(extra)
 
@@ -930,7 +1000,7 @@ class SummariesDB(Database):
             """, p(days))
             active_sources = cursor.fetchone()['cnt']
 
-            if filter_topic:
+            if filter_topics:
                 cursor.execute(f"""
                     SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
                     FROM messages,
@@ -960,7 +1030,7 @@ class SummariesDB(Database):
             top6 = [r['topic'] for r in messages_per_topic[:6]]
             if top6:
                 extra_trend = ((filter_channels,) if filter_channels else ()) + \
-                              ((filter_source,)   if filter_source   else ()) + \
+                              ((filter_sources,)  if filter_sources  else ()) + \
                               ((filter_bot_names,) if filter_bot_names is not None else ())
                 cursor.execute(f"""
                     SELECT DATE(timestamp) AS day, TRIM(t.topic) AS topic, COUNT(*) AS cnt
@@ -975,7 +1045,7 @@ class SummariesDB(Database):
             else:
                 topic_trend = []
 
-            if filter_topic:
+            if filter_topics:
                 cursor.execute(f"""
                     SELECT channel_username AS source, COUNT(*) AS cnt
                     FROM messages,
@@ -1035,8 +1105,8 @@ class SummariesDB(Database):
                 'days':                   days,
                 'all_sources':            all_sources,
                 'all_topics':             all_topics,
-                'filter_source':          filter_source,
-                'filter_topic':           filter_topic,
+                'filter_sources':         filter_sources or [],
+                'filter_topics':          filter_topics  or [],
                 'filter_channels':        filter_channels or [],
             }
         finally:
@@ -1580,6 +1650,7 @@ class SummariesDB(Database):
                         'header_datetime': s['header_datetime'] or False,
                         'header_date_arabic': s.get('header_date_arabic') or False,
                         'header_time_arabic': s.get('header_time_arabic') or False,
+                        'header_datetime_offset': s.get('header_datetime_offset') or 0,
                         'telegram_targets': _parse_jsonb_list(s.get('telegram_targets')),
                     }
                     if s['minute'] is not None:
@@ -2040,6 +2111,24 @@ class SummariesDB(Database):
                            (new_name, cat_id, old_name))
             updated = cursor.rowcount > 0
             if updated:
+                # Cascade rename to denormalized topic_name columns
+                if owner_id is None:
+                    cursor.execute(
+                        "UPDATE topic_keywords SET topic_name = %s "
+                        "WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL",
+                        (new_name, bot_name, category_name, old_name),
+                    )
+                    cursor.execute(
+                        "UPDATE topic_interim_summaries SET topic_name = %s "
+                        "WHERE bot_name = %s AND topic_name = %s",
+                        (new_name, bot_name, old_name),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE topic_keywords SET topic_name = %s "
+                        "WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s",
+                        (new_name, bot_name, category_name, old_name, owner_id),
+                    )
                 self._bump_config_version()
             return updated
         finally:
@@ -2136,10 +2225,10 @@ class SummariesDB(Database):
             cursor = self._get_cursor()
             cursor.execute("""
                 INSERT INTO schedules (topic_id, name, type, enabled, prompt_key, header, header_datetime,
-                                       header_date_arabic, header_time_arabic,
+                                       header_date_arabic, header_time_arabic, header_datetime_offset,
                                        minute, hour, hours, minutes, start_hour, start_minute,
                                        telegram_targets, wait_time, end_hour, end_minute)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 topic_id,
@@ -2151,6 +2240,7 @@ class SummariesDB(Database):
                 schedule.get('header_datetime', False),
                 schedule.get('header_date_arabic', False),
                 schedule.get('header_time_arabic', False),
+                schedule.get('header_datetime_offset', 0) or 0,
                 schedule.get('minute'),
                 schedule.get('hour'),
                 schedule.get('hours'),
@@ -2172,6 +2262,7 @@ class SummariesDB(Database):
         try:
             allowed = {'name', 'type', 'enabled', 'prompt_key', 'header',
                        'header_datetime', 'header_date_arabic', 'header_time_arabic',
+                       'header_datetime_offset',
                        'minute', 'hour', 'hours', 'minutes',
                        'start_hour', 'start_minute', 'telegram_targets', 'wait_time',
                        'end_hour', 'end_minute'}

@@ -2177,7 +2177,7 @@ function _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEn
                                 <button class="btn btn-danger btn-sm kw-del-sel-btn" style="font-size:10px;padding:2px 8px;display:none;" data-topic="${b}|${c}|${t}" onclick="kwDeleteSelected('${b}','${c}','${t}')">Delete Selected</button>
                                 <button class="btn btn-danger btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwDeleteAll('${b}','${c}','${t}')">Delete All</button>
                                 ` : ''}
-                                <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;" onclick="suggestSEOs('${b}','${c}','${t}')">✨ Suggest with AI</button>
+                                <button class="btn-ai-suggest" onclick="suggestSEOs('${b}','${c}','${t}')"><span class="btn-ai-shine"></span>✨ Suggest with AI</button>
                             </div>
                         </div>
                         <div class="tags-container tags-scrollable" id="kw-tags-${b}-${c}-${t}">
@@ -2246,7 +2246,7 @@ function _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEn
                                 <div class="summary-details">
                                     <span>📅 ${formatSchedule(schedule)}</span>
                                     <span>📝 ${escapeHtmlSys(schedule.prompt_key)}</span>
-                                    <span>📨 ${escapeHtmlSys(schedule.header || `*${schedule.name}*`)}${schedule.header_datetime ? ' 🕐' : ''}${schedule.telegram_targets?.length ? ` 📡 ${schedule.telegram_targets.length}` : ''}</span>
+                                    <span>📨 ${escapeHtmlSys(schedule.header || `*${schedule.name}*`)}${schedule.header_datetime ? ' 🕐' : ''}${schedule.header_datetime && schedule.header_datetime_offset ? ` <span class="text-muted" style="font-size:11px;">(${schedule.header_datetime_offset > 0 ? '+' : ''}${schedule.header_datetime_offset}min)</span>` : ''}${schedule.telegram_targets?.length ? ` 📡 ${schedule.telegram_targets.length}` : ''}</span>
                                 </div>
                             </div>
                         `).join('')}
@@ -3480,8 +3480,62 @@ async function removeKeyword(botName, categoryName, topicName, index) {
 }
 
 // ==================== AI SEO Suggestions ====================
-let _seoSuggestContext = null; // { b, c, t }
-let _seoGenerating    = false; // prevent double-submit
+let _seoSuggestContext        = null;  // { b, c, t }
+let _seoGenerating            = false;
+let _seoFakeProgressInterval  = null;
+let _seoLoadingTextInterval   = null;
+
+const _SEO_LOADING_MSGS = [
+    'Analyzing topic keywords…',
+    'Generating suggestions…',
+    'Finding relevant terms…',
+    'Expanding keyword list…',
+    'Almost done…',
+];
+
+function _seoStartFakeProgress(startPct, endPct) {
+    if (_seoFakeProgressInterval) clearInterval(_seoFakeProgressInterval);
+    const ceiling = startPct + (endPct - startPct) * 0.88;
+    let current = startPct;
+    _seoFakeProgressInterval = setInterval(() => {
+        const bar = document.getElementById('seo-progress-bar');
+        if (!bar) return;
+        current += (ceiling - current) * 0.04;   // ease-out: fast then slow
+        bar.style.width = current.toFixed(2) + '%';
+    }, 80);
+}
+
+function _seoStopFakeProgress(actualPct) {
+    if (_seoFakeProgressInterval) { clearInterval(_seoFakeProgressInterval); _seoFakeProgressInterval = null; }
+    const bar = document.getElementById('seo-progress-bar');
+    if (bar) bar.style.width = actualPct + '%';
+}
+
+function _seoStartLoadingText() {
+    let idx = 0;
+    const el = document.getElementById('seo-loading-text');
+    if (el) el.textContent = _SEO_LOADING_MSGS[0];
+    _seoLoadingTextInterval = setInterval(() => {
+        idx = (idx + 1) % _SEO_LOADING_MSGS.length;
+        const e = document.getElementById('seo-loading-text');
+        if (e) e.textContent = _SEO_LOADING_MSGS[idx];
+    }, 2400);
+}
+
+function _seoStartProgressText() {
+    let idx = 0;
+    const update = () => {
+        const e = document.getElementById('seo-progress-subtext');
+        if (e) e.textContent = _SEO_LOADING_MSGS[idx % _SEO_LOADING_MSGS.length];
+        idx++;
+    };
+    update();
+    _seoLoadingTextInterval = setInterval(update, 2400);
+}
+
+function _seoStopLoadingText() {
+    if (_seoLoadingTextInterval) { clearInterval(_seoLoadingTextInterval); _seoLoadingTextInterval = null; }
+}
 
 // Step 1 — open config modal
 function suggestSEOs(b, c, t) {
@@ -3523,27 +3577,36 @@ async function startSeoSuggest() {
         'Approve Selected (<span id="seo-sel-count">0</span>)';
     document.getElementById('seo-suggest-modal').style.display = 'flex';
 
-    const batches  = Math.ceil(total / 50);
+    _seoStartLoadingText();
+
+    const batches    = Math.ceil(total / 50);
+    const batchPct   = 100 / batches;
     let allSuggested = [];
 
     for (let i = 0; i < batches; i++) {
-        const batchSize = Math.min(50, total - i * 50);
+        const batchSize  = Math.min(50, total - i * 50);
+        const fromPct    = i * batchPct;
+        const toPct      = (i + 1) * batchPct;
 
-        // Show / update progress bar
+        // Switch from dots spinner to progress bar on first batch
         document.getElementById('seo-suggest-loading').style.display = 'none';
         document.getElementById('seo-progress-wrap').style.display = 'block';
+        _seoStopLoadingText();
+        _seoStartProgressText();
         document.getElementById('seo-progress-label').textContent =
-            batches === 1 ? 'Asking AI…' : `Pass ${i + 1} of ${batches}…`;
+            batches === 1 ? 'Generating…' : `Pass ${i + 1} of ${batches}`;
         document.getElementById('seo-progress-count').textContent =
             `${allSuggested.length} / ${total}`;
-        document.getElementById('seo-progress-bar').style.width =
-            Math.round((i / batches) * 100) + '%';
+        _seoStopFakeProgress(fromPct);
+        _seoStartFakeProgress(fromPct, toPct);
 
         const result = await api('/api/topic/suggest-seos', {
             bot_name: b, category_name: c, topic_name: t,
             count: batchSize, languages, note,
             exclude: allSuggested,
         });
+
+        _seoStopFakeProgress(toPct);
 
         if (result.status !== 'ok') {
             _seoAppendError(result.message || 'AI error');
@@ -3552,16 +3615,18 @@ async function startSeoSuggest() {
 
         allSuggested.push(...result.suggestions);
         _seoAppendChips(result.suggestions);
-        document.getElementById('seo-progress-bar').style.width =
-            Math.round(((i + 1) / batches) * 100) + '%';
         document.getElementById('seo-progress-count').textContent =
             `${allSuggested.length} / ${total}`;
 
         if (allSuggested.length > 0) document.getElementById('seo-approve-btn').disabled = false;
     }
 
+    _seoStopFakeProgress(100);
+    _seoStopLoadingText();
     document.getElementById('seo-progress-label').textContent =
-        allSuggested.length ? `Done — ${allSuggested.length} suggestions generated` : 'Done';
+        allSuggested.length ? `✓ ${allSuggested.length} suggestions ready` : 'Done';
+    const sub = document.getElementById('seo-progress-subtext');
+    if (sub) sub.textContent = '';
     document.getElementById('seo-select-all-cb').checked = true;
     _seoUpdateCount();
     _seoGenerating = false;
@@ -3634,6 +3699,8 @@ async function _approveSuggestedSEOs() {
 
 function closeSeoSuggestModal() {
     if (_seoGenerating) _seoGenerating = false;
+    _seoStopFakeProgress(0);
+    _seoStopLoadingText();
     document.getElementById('seo-suggest-modal').style.display = 'none';
     _seoSuggestContext = null;
 }
@@ -3707,6 +3774,14 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                             <span class="toggle-slider"></span>
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
+                    </div>
+                    <div class="form-group" style="margin-top:8px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <label class="form-label" style="margin:0;width:110px;flex-shrink:0;">Time offset</label>
+                            <input type="number" class="input" id="topic-schedule-datetime-offset" value="0" style="width:90px;">
+                            <span class="text-muted" style="font-size:12px;">min (+ = later, − = earlier)</span>
+                        </div>
+                        <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
                     </div>
                 </div>
                 <div class="form-group">
@@ -3804,8 +3879,9 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     const header_datetime = document.getElementById('topic-schedule-header-datetime').checked;
     const header_date_arabic = document.getElementById('topic-schedule-date-arabic').checked;
     const header_time_arabic = document.getElementById('topic-schedule-time-arabic').checked;
+    const header_datetime_offset = Number(document.getElementById('topic-schedule-datetime-offset')?.value || 0);
     const telegram_targets = getSchTgTargets('topic-schedule');
-    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, telegram_targets };
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
@@ -4043,6 +4119,14 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals (٠٣:٠٩ م)</span>
                     </div>
+                    <div class="form-group" style="margin-top:8px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <label class="form-label" style="margin:0;width:110px;flex-shrink:0;">Time offset</label>
+                            <input type="number" class="input" id="edit-sch-datetime-offset" value="${schedule.header_datetime_offset || 0}" style="width:90px;">
+                            <span class="text-muted" style="font-size:12px;">min (+ = later, − = earlier)</span>
+                        </div>
+                        <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Telegram Targets (optional)</label>
@@ -4143,8 +4227,9 @@ async function saveEditedSchedule(scheduleId) {
     const header_datetime = document.getElementById('edit-sch-header-datetime').checked;
     const header_date_arabic = document.getElementById('edit-sch-date-arabic').checked;
     const header_time_arabic = document.getElementById('edit-sch-time-arabic').checked;
+    const header_datetime_offset = Number(document.getElementById('edit-sch-datetime-offset')?.value || 0);
     const telegram_targets = getSchTgTargets('edit-sch');
-    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, telegram_targets };
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
@@ -4543,7 +4628,7 @@ function switchMonTab(tab) {
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
-    ['schedules', 'summaries', 'messages', 'unclassified', 'missed', 'history'].forEach(t => {
+    ['schedules', 'summaries', 'messages', 'unclassified', 'missed', 'history', 'interims'].forEach(t => {
         const el = document.getElementById('mon-tab-' + t);
         if (el) el.style.display = t === tab ? '' : 'none';
     });
@@ -4558,6 +4643,7 @@ function switchMonTab(tab) {
         if (showAllBtn) showAllBtn.style.display  = clearedAt ? '' : 'none';
         if (!_unclMessages.length) loadUnclassifiedMessages();
     }
+    if (tab === 'interims' && !_interimsData.length) loadInterims();
     if (tab === 'missed') {
         const clearedAt = localStorage.getItem('mon-missed-cleared-at');
         const clearBtn   = document.getElementById('missed-clear-btn');
@@ -6205,6 +6291,13 @@ const _EXPORT_COLS = {
         { key: 'bot',        label: 'Bot' },
         { key: 'preview',    label: 'Preview' },
     ],
+    history_messages: [
+        { key: 'time',     label: 'Time' },
+        { key: 'source',   label: 'Source' },
+        { key: 'topics',   label: 'Topics' },
+        { key: 'keywords', label: 'Keywords' },
+        { key: 'message',  label: 'Message' },
+    ],
 };
 
 let _exportTab = null;
@@ -6214,12 +6307,13 @@ function openExportModal(tabName) {
     const cols = _EXPORT_COLS[tabName] || [];
 
     const tabLabels = {
-        summaries:    'Summaries',
-        schedules_24h:'Schedules (next 24h)',
-        mon_summaries:'Monitor Summaries',
-        history:      'Schedule History',
-        messages:     'Messages',
-        unclassified: 'Unclassified',
+        summaries:        'Summaries',
+        schedules_24h:    'Schedules (next 24h)',
+        mon_summaries:    'Monitor Summaries',
+        history:          'Schedule History',
+        messages:         'Messages',
+        unclassified:     'Unclassified',
+        history_messages: 'History Source Messages',
     };
     document.getElementById('export-col-title').textContent =
         `Export ${tabLabels[tabName] || tabName} — Select Columns`;
@@ -6439,6 +6533,22 @@ function _doExport(tabName, selectedKeys) {
                 default: return '';
             }
         }));
+    } else if (tabName === 'history_messages') {
+        const search = (document.getElementById('hmsg-search')?.value || '').toLowerCase();
+        const source = document.getElementById('hmsg-filter-source')?.value || '';
+        let d = _histMsgData;
+        if (search) d = d.filter(m => (m.preview || '').toLowerCase().includes(search));
+        if (source) d = d.filter(m => m.channel_username === source);
+        rows = d.map(m => colDefs.map(c => {
+            switch (c.key) {
+                case 'time':     return m.timestamp ? _fmtLBN(m.timestamp) : '';
+                case 'source':   return m.channel_username ? `@${m.channel_username}` : '';
+                case 'topics':   return m.topics || '';
+                case 'keywords': return m.keywords_found || '';
+                case 'message':  return m.preview || '';
+                default: return '';
+            }
+        }));
     }
 
     if (!rows.length) {
@@ -6454,7 +6564,7 @@ function _doExport(tabName, selectedKeys) {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    const fileLabel = { schedules_24h: 'schedules_24h', mon_summaries: 'monitor_summaries', history: 'schedule_history' }[tabName] || tabName;
+    const fileLabel = { schedules_24h: 'schedules_24h', mon_summaries: 'monitor_summaries', history: 'schedule_history', history_messages: 'history_source_messages' }[tabName] || tabName;
     a.download = `${fileLabel}_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a);
     a.click();
@@ -7101,6 +7211,7 @@ async function showHistoryMessages(summaryId) {
                     <option value="">All Sources</option>
                 </select>
                 <button class="btn btn-secondary btn-sm" onclick="_clearHistMsgFilters()">✕ Clear</button>
+                <button class="btn btn-secondary btn-sm" onclick="openExportModal('history_messages')" title="Export visible messages to CSV">⬇ Export</button>
             </div>
             <div id="hmsg-table-wrap"><p class="mon-empty">Loading…</p></div>
         </div>`;
@@ -7197,6 +7308,266 @@ function _closeHistoryMessages() {
             <div id="mon-history-content"><p class="mon-empty">Loading…</p></div>`;
     }
     loadScheduleHistory();
+}
+
+// ==================== Interims Tab ====================
+let _interimsData      = [];
+let _interimMsgData    = [];
+let _interimBatchLimit = 10;
+
+async function loadInterims() {
+    const wrap = document.getElementById('mon-interims-content');
+    if (!wrap) return;
+    wrap.innerHTML = '<p class="mon-empty">Loading…</p>';
+
+    const [settingsRes, interimsRes] = await Promise.all([
+        api('/api/monitor/interim-settings'),
+        api('/api/monitor/interims?limit=500'),
+    ]);
+
+    _interimBatchLimit = settingsRes.batch_limit || 10;
+    _interimsData = interimsRes.interims || [];
+
+    _renderInterimsPage();
+}
+
+function _renderInterimsPage() {
+    const wrap = document.getElementById('mon-interims-content');
+    if (!wrap) return;
+
+    const bots   = [...new Set(_interimsData.map(r => r.bot_name).filter(Boolean))].sort();
+    const topics = [...new Set(_interimsData.map(r => r.topic_name).filter(Boolean))].sort();
+
+    const botOpts   = ['<option value="">All Bots</option>',   ...bots.map(b   => `<option value="${escapeHtmlSys(b)}">${escapeHtmlSys(b)}</option>`)].join('');
+    const topicOpts = ['<option value="">All Topics</option>', ...topics.map(t => `<option value="${escapeHtmlSys(t)}">${escapeHtmlSys(t)}</option>`)].join('');
+
+    wrap.innerHTML = `
+        <div class="card" style="margin-bottom:12px;padding:12px 16px">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span style="font-weight:500;font-size:13px">Rolling batch size:</span>
+                <input type="number" class="input" id="interim-batch-input"
+                       value="${_interimBatchLimit}" min="1" max="500"
+                       style="width:80px;padding:4px 8px">
+                <span class="text-muted" style="font-size:12px">messages per interim</span>
+                <button class="btn btn-secondary btn-sm" onclick="saveInterimBatchLimit()">Save</button>
+            </div>
+            <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">
+                Once this many unprocessed messages accumulate for a topic, they are pre-summarized into an interim.
+                Pending interims are then combined when the next scheduled run fires.
+            </div>
+        </div>
+
+        <div class="mon-filter-bar" style="flex-wrap:wrap">
+            <select class="select mon-filter-sel" id="interim-filter-bot"    onchange="_renderInterimsTable()">${botOpts}</select>
+            <select class="select mon-filter-sel" id="interim-filter-topic"  onchange="_renderInterimsTable()">${topicOpts}</select>
+            <select class="select mon-filter-sel" id="interim-filter-status" onchange="_renderInterimsTable()">
+                <option value="">All Statuses</option>
+                <option value="pending">⏳ Pending</option>
+                <option value="done">✓ Done</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" onclick="_interimsData=[]; loadInterims()">↻ Refresh</button>
+        </div>
+
+        <div id="interim-table-wrap"></div>`;
+
+    _renderInterimsTable();
+}
+
+function _renderInterimsTable() {
+    const wrap = document.getElementById('interim-table-wrap');
+    if (!wrap) return;
+
+    const bot    = document.getElementById('interim-filter-bot')?.value    || '';
+    const topic  = document.getElementById('interim-filter-topic')?.value  || '';
+    const status = document.getElementById('interim-filter-status')?.value || '';
+
+    let d = _interimsData;
+    if (bot)    d = d.filter(r => r.bot_name   === bot);
+    if (topic)  d = d.filter(r => r.topic_name === topic);
+    if (status) d = d.filter(r => r.status     === status);
+
+    if (!d.length) {
+        wrap.innerHTML = '<p class="mon-empty">No interims found.</p>';
+        return;
+    }
+
+    const pending = d.filter(r => r.status === 'pending').length;
+    const done    = d.filter(r => r.status === 'done').length;
+
+    const rows = d.map(r => {
+        const ts     = _fmtLBN(r.created_at);
+        const sentTs = r.sent_at ? _fmtLBN(r.sent_at) : '—';
+        const badge  = r.status === 'pending'
+            ? `<span style="background:rgba(245,158,11,.15);color:#f59e0b;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">⏳ Pending</span>`
+            : `<span style="background:rgba(16,185,129,.15);color:#10b981;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">✓ Done</span>`;
+        const msgsCell = r.message_count
+            ? `<span class="mon-msgs-link" onclick="showInterimMessages(${r.id},'${escapeHtmlSys(r.bot_name)}','${escapeHtmlSys(r.topic_name)}')">${r.message_count}</span>`
+            : r.message_count;
+        const preview = escapeHtml(r.preview || '');
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px">${ts}</td>
+            <td>${escapeHtml(r.bot_name)}</td>
+            <td>${escapeHtml(r.topic_name)}</td>
+            <td style="text-align:center">${msgsCell}</td>
+            <td>${badge}</td>
+            <td style="white-space:nowrap;font-size:11px">${sentTs}</td>
+            <td class="smp-msg-cell" style="max-width:300px" title="${preview}">${preview}</td>
+            <td>
+                <button class="btn-icon" title="View full output"
+                        onclick="_showInterimOutput(${r.id})">📄</button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+            ${d.length} interim${d.length !== 1 ? 's' : ''} —
+            <span style="color:#f59e0b">⏳ ${pending} pending</span> ·
+            <span style="color:#10b981">✓ ${done} done</span>
+        </div>
+        <div style="overflow-x:auto">
+            <table class="mon-table smp-table">
+                <thead><tr>
+                    <th>Created</th><th>Bot</th><th>Topic</th>
+                    <th>Messages</th><th>Status</th><th>Sent At</th>
+                    <th>Output Preview</th><th></th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+async function showInterimMessages(interimId, botName, topicName) {
+    _interimMsgData = [];
+    const panel = document.getElementById('mon-tab-interims');
+    panel.innerHTML = `
+        <div class="sum-msg-page">
+            <div class="sum-msg-page-header">
+                <button class="btn btn-secondary btn-sm" onclick="_closeInterimMessages()">‹ Back to Interims</button>
+                <h3 style="margin:0;font-size:15px">Interim Source Messages — ${escapeHtml(botName)} / ${escapeHtml(topicName)}</h3>
+            </div>
+            <div class="mon-filter-bar" style="flex-wrap:wrap;gap:8px">
+                <input type="text" class="input mon-filter-search" id="interim-msg-search"
+                       placeholder="🔍 Search message text…" oninput="_renderInterimMsgTable()">
+                <select class="select mon-filter-sel" id="interim-msg-filter-source" onchange="_renderInterimMsgTable()">
+                    <option value="">All Sources</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="_clearInterimMsgFilters()">✕ Clear</button>
+            </div>
+            <div id="interim-msg-output" style="margin:8px 0;padding:10px 14px;background:var(--bg-secondary);border-radius:6px;font-size:12.5px;white-space:pre-wrap;max-height:220px;overflow-y:auto;border:1px solid var(--border-color)">
+                <p class="mon-empty">Loading output…</p>
+            </div>
+            <div id="interim-msg-table-wrap"><p class="mon-empty">Loading messages…</p></div>
+        </div>`;
+
+    const data = await api(`/api/monitor/interim-messages?id=${interimId}`);
+
+    // Show output text
+    const outputEl = document.getElementById('interim-msg-output');
+    const interim = _interimsData.find(r => r.id === interimId);
+    if (outputEl && interim) {
+        outputEl.innerHTML = `<strong style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">INTERIM OUTPUT</strong>${escapeHtml(interim.summary_text || '')}`;
+    }
+
+    const wrap = document.getElementById('interim-msg-table-wrap');
+    if (!wrap) return;
+
+    if (data.status !== 'ok' || !data.messages?.length) {
+        wrap.innerHTML = data.messages?.length === 0
+            ? `<p class="mon-empty">No linked messages found. Messages are linked only for interims created after the migration.</p>`
+            : `<p class="mon-empty">No linked messages found.</p>`;
+        return;
+    }
+
+    _interimMsgData = data.messages;
+    const sources = [...new Set(_interimMsgData.map(m => m.channel_username).filter(Boolean))].sort();
+    const sel = document.getElementById('interim-msg-filter-source');
+    if (sel) sources.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = '@' + s; sel.appendChild(o); });
+
+    _renderInterimMsgTable();
+}
+
+function _renderInterimMsgTable() {
+    const wrap = document.getElementById('interim-msg-table-wrap');
+    if (!wrap) return;
+
+    const search = (document.getElementById('interim-msg-search')?.value || '').toLowerCase();
+    const source = document.getElementById('interim-msg-filter-source')?.value || '';
+
+    let filtered = _interimMsgData;
+    if (search) filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
+    if (source) filtered = filtered.filter(m => m.channel_username === source);
+
+    if (!filtered.length) {
+        wrap.innerHTML = '<p class="mon-empty">No messages match filters.</p>';
+        return;
+    }
+
+    const rows = filtered.map(m => {
+        const ts  = _fmtLBN(m.timestamp);
+        const src = m.channel_username ? `@${m.channel_username}` : '—';
+        const top = m.topics         ? escapeHtml(m.topics)         : '—';
+        const kw  = m.keywords_found ? escapeHtml(m.keywords_found) : '—';
+        const txt = escapeHtml(m.preview || '');
+        return `<tr>
+            <td style="white-space:nowrap;font-size:11px">${ts}</td>
+            <td>${src}</td>
+            <td>${top}</td>
+            <td>${kw}</td>
+            <td class="smp-msg-cell" title="${txt}">${txt}</td>
+        </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${filtered.length} message${filtered.length !== 1 ? 's' : ''}</div>
+        <div style="overflow-x:auto">
+            <table class="mon-table smp-table">
+                <thead><tr>
+                    <th>Date / Time</th><th>Source</th><th>Topics</th><th>Keywords</th><th>Message</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+function _clearInterimMsgFilters() {
+    const s   = document.getElementById('interim-msg-search');
+    const src = document.getElementById('interim-msg-filter-source');
+    if (s) s.value = '';
+    if (src) src.value = '';
+    _renderInterimMsgTable();
+}
+
+function _closeInterimMessages() {
+    _interimMsgData = [];
+    const panel = document.getElementById('mon-tab-interims');
+    if (panel) panel.innerHTML = '<div id="mon-interims-content"></div>';
+    _renderInterimsPage();
+}
+
+function _showInterimOutput(interimId) {
+    const interim = _interimsData.find(r => r.id === interimId);
+    if (!interim) return;
+    const ts = _fmtLBN(interim.created_at);
+    showAlert(`<strong>Interim #${interimId} — ${escapeHtml(interim.bot_name)} / ${escapeHtml(interim.topic_name)}</strong><br>
+               <small style="color:var(--text-muted)">${ts} · ${interim.message_count} messages · ${interim.status}</small>
+               <hr style="border-color:var(--border-color);margin:8px 0">
+               <div style="white-space:pre-wrap;font-size:12.5px;max-height:400px;overflow-y:auto">${escapeHtml(interim.summary_text || '')}</div>`);
+}
+
+async function saveInterimBatchLimit() {
+    const inp = document.getElementById('interim-batch-input');
+    const val = parseInt(inp?.value, 10);
+    if (!val || val < 1 || val > 500) {
+        showAlert('Batch size must be between 1 and 500.'); return;
+    }
+    const result = await api('/api/monitor/interim-settings', { batch_limit: val });
+    if (result.status === 'ok') {
+        _interimBatchLimit = val;
+        showNotification('Batch size saved', 'success');
+    } else {
+        showAlert(result.message || 'Failed to save');
+    }
 }
 
 // ==================== Logs Page ====================

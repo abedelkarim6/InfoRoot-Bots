@@ -1663,7 +1663,68 @@ html[data-theme="dark"] .tag-user-kw {
     cursor: pointer;
 }
 
-/* Pulsing animation for the initial ✨ spinner */
+/* ── AI Suggest button ───────────────────────────────────── */
+.btn-ai-suggest {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
+    box-shadow: 0 2px 10px rgba(99,102,241,0.38);
+    white-space: nowrap;
+}
+.btn-ai-suggest .btn-ai-shine {
+    position: absolute;
+    top: 0; left: -100%; width: 55%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent);
+    transition: left 0.5s ease;
+    pointer-events: none;
+}
+.btn-ai-suggest:hover .btn-ai-shine { left: 160%; }
+.btn-ai-suggest:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 5px 20px rgba(99,102,241,0.55);
+}
+.btn-ai-suggest:active { transform: translateY(0); opacity: 0.9; }
+
+/* ── SEO loading dots ────────────────────────────────────── */
+.seo-loading-dots { display: flex; justify-content: center; gap: 9px; }
+.seo-loading-dots span {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--accent-primary);
+    animation: seoBounce 1.5s ease-in-out infinite;
+}
+.seo-loading-dots span:nth-child(2) { animation-delay: 0.18s; }
+.seo-loading-dots span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes seoBounce {
+    0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
+    40%           { transform: scale(1);   opacity: 1;   }
+}
+
+/* ── SEO progress bar (gradient + shimmer) ───────────────── */
+#seo-progress-bar {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa, #8b5cf6, #6366f1);
+    background-size: 300% 100%;
+    animation: seoBarShimmer 2s linear infinite;
+    transition: width 0.35s ease;
+}
+@keyframes seoBarShimmer {
+    0%   { background-position:  100% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Legacy — kept so old references don't break */
 @keyframes seoPulse {
     0%, 100% { opacity: 1;   transform: scale(1);    }
     50%       { opacity: 0.5; transform: scale(0.88); }

@@ -516,7 +516,10 @@ async def generate_and_send_summary(job_data):
         if header_text:
             if job_data.get('header_datetime'):
                 ar_days = ['الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد']
+                offset_mins = int(job_data.get('header_datetime_offset') or 0)
                 now = datetime.datetime.now(BEIRUT_TZ)
+                if offset_mins:
+                    now = now + datetime.timedelta(minutes=offset_mins)
                 day_name = ar_days[now.weekday()]
                 hour_12 = now.hour % 12 or 12
                 am_pm = 'ص' if now.hour < 12 else 'م'
@@ -865,13 +868,14 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
         return  # another task is already processing this topic — skip
     async with lock:
         try:
+            batch_limit = db.get_interim_batch_limit()
             while True:
                 count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
-                if count < 10:
+                if count < batch_limit:
                     break
 
-                messages = db.get_messages_for_interim(bot_name, topic_name, limit=10)
-                if len(messages) < 10:
+                messages = db.get_messages_for_interim(bot_name, topic_name, limit=batch_limit)
+                if len(messages) < batch_limit:
                     break
 
                 prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
@@ -881,8 +885,8 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
                 summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
 
-                db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
-                db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name)
+                interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
+                db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name, interim_id=interim_id)
                 logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
         except Exception as e:
             logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
@@ -955,6 +959,7 @@ async def schedule_summaries():
                         'header_datetime': header_datetime,
                         'header_date_arabic': schedule.get('header_date_arabic', False),
                         'header_time_arabic': schedule.get('header_time_arabic', False),
+                        'header_datetime_offset': schedule.get('header_datetime_offset', 0) or 0,
                         'telegram_targets': schedule.get('telegram_targets', []),
                         # Schedule anchor fields — used to compute exact previous fire time at runtime
                         'sch_minute':       schedule.get('minute'),

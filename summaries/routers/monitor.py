@@ -314,6 +314,64 @@ def get_schedule_history(
         return {'status': 'error', 'message': str(e)}
 
 
+@router.get("/monitor/interims")
+def get_interims(
+    request: Request,
+    bot: str = Query(default=None),
+    topic: str = Query(default=None),
+    status: str = Query(default=None),
+    limit: int = Query(default=300, ge=1, le=1000),
+):
+    if not is_admin_request(request):
+        from starlette.responses import JSONResponse
+        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
+    db = get_db()
+    try:
+        rows = db.get_interims(bot_name=bot, topic_name=topic, limit=limit)
+        if status == 'pending':
+            rows = [r for r in rows if r['status'] == 'pending']
+        elif status == 'done':
+            rows = [r for r in rows if r['status'] == 'done']
+        return {'status': 'ok', 'interims': rows}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.get("/monitor/interim-messages")
+def get_interim_messages(request: Request, id: int = Query(...)):
+    if not is_admin_request(request):
+        from starlette.responses import JSONResponse
+        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
+    db = get_db()
+    try:
+        messages = db.get_interim_messages(id)
+        return {'status': 'ok', 'messages': messages}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.get("/monitor/interim-settings")
+def get_interim_settings(request: Request):
+    if not is_admin_request(request):
+        from starlette.responses import JSONResponse
+        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
+    db = get_db()
+    return {'status': 'ok', 'batch_limit': db.get_interim_batch_limit()}
+
+
+@router.post("/monitor/interim-settings")
+def set_interim_settings(request: Request, data: dict = Body(...)):
+    if not is_admin_request(request):
+        from starlette.responses import JSONResponse
+        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
+    limit = data.get('batch_limit')
+    if not isinstance(limit, int) or limit < 1 or limit > 500:
+        return {'status': 'error', 'message': 'batch_limit must be an integer between 1 and 500'}
+    db = get_db()
+    db.set_interim_batch_limit(limit)
+    return {'status': 'ok'}
+
+
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
     request: Request,
@@ -333,10 +391,12 @@ def get_dashboard_stats(
             else:
                 allowed_bots = ["__no_access__"]
         channels_list = [c.strip() for c in filter_channels.split(',') if c.strip()] if filter_channels else None
+        sources_list  = [s.strip() for s in filter_source.split(',')   if s.strip()] if filter_source  else None
+        topics_list   = [t.strip() for t in filter_topic.split(',')    if t.strip()] if filter_topic   else None
         data = db.get_dashboard_stats(
             days,
-            filter_source=filter_source,
-            filter_topic=filter_topic,
+            filter_sources=sources_list,
+            filter_topics=topics_list,
             filter_bot_names=allowed_bots,
             filter_channels=channels_list,
         )

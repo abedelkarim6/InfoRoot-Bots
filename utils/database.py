@@ -683,6 +683,12 @@ class Database:
             cursor.execute("UPDATE message_summarizations SET schedule_type = 'interval_hourly' WHERE schedule_type = 'interval'")
             cursor.execute("UPDATE schedule_runs SET schedule_type = 'interval_hourly' WHERE schedule_type = 'interval'")
 
+            # Migrate: add interim_id to message_summarizations for per-interim message linkage
+            cursor.execute("ALTER TABLE message_summarizations ADD COLUMN IF NOT EXISTS interim_id INTEGER")
+
+            # Migrate: add header_datetime_offset to schedules (shift displayed time by N minutes)
+            cursor.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS header_datetime_offset INTEGER DEFAULT 0")
+
         finally:
             self._commit()
 

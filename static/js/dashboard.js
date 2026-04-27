@@ -33,7 +33,9 @@ const TOOLTIP = {
 const GRID  = { color: 'rgba(45,55,72,0.6)', drawBorder: false };
 const TICKS = { color: '#64748b', font: { size: 11 } };
 
-/* ── Channel checkbox-filter state ─────────────────── */
+/* ── Multi-select filter state ──────────────────────── */
+let _dashFilterSources  = new Set();
+let _dashFilterTopics   = new Set();
 let _dashFilterChannels = new Set();
 
 /* ── Chart instance cache ─────────────────────────── */
@@ -62,9 +64,9 @@ function fillDays(perDay, days) {
 
 /* ══ Main loader ══════════════════════════════════ */
 window.loadDashboardData = async function () {
-  const days         = document.getElementById('dash-range')?.value || 14;
-  const filterSource = document.getElementById('dash-filter-source')?.value || '';
-  const filterTopic  = document.getElementById('dash-filter-topic')?.value  || '';
+  const days           = document.getElementById('dash-range')?.value || 14;
+  const filterSources  = [..._dashFilterSources];
+  const filterTopics   = [..._dashFilterTopics];
   const filterChannels = [..._dashFilterChannels];
 
   // Show loading state in stat cards
@@ -74,8 +76,8 @@ window.loadDashboardData = async function () {
   });
 
   let url = `/api/dashboard/stats?days=${days}`;
-  if (filterSource)          url += `&filter_source=${encodeURIComponent(filterSource)}`;
-  if (filterTopic)           url += `&filter_topic=${encodeURIComponent(filterTopic)}`;
+  if (filterSources.length)  url += `&filter_source=${encodeURIComponent(filterSources.join(','))}`;
+  if (filterTopics.length)   url += `&filter_topic=${encodeURIComponent(filterTopics.join(','))}`;
   if (filterChannels.length) url += `&filter_channels=${encodeURIComponent(filterChannels.join(','))}`;
 
   const data = await api(url);
@@ -91,12 +93,12 @@ window.loadDashboardData = async function () {
     return;
   }
 
-  /* ── Populate filter dropdowns (preserve selection) ─ */
-  populateDashboardFilters(data, filterSource, filterTopic);
+  /* ── Populate filter dropdowns (preserves Set state) ─ */
+  populateDashboardFilters(data);
 
   /* ── Show/hide the clear-filters button ─────────── */
   const clearBtn = document.getElementById('dash-filter-clear-btn');
-  if (clearBtn) clearBtn.style.display = (filterSource || filterTopic || _dashFilterChannels.size) ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = (_dashFilterSources.size || _dashFilterTopics.size || _dashFilterChannels.size) ? '' : 'none';
 
   /* ── Stat cards ─────────────────────────────────── */
   document.getElementById('ds-total-msgs').textContent  = fmt(data.total_messages);
@@ -119,10 +121,7 @@ window.loadDashboardData = async function () {
 };
 
 /* ── Populate source, topic, and channel dropdowns ──── */
-function populateDashboardFilters(data, currentSource, currentTopic) {
-  const srcEl   = document.getElementById('dash-filter-source');
-  const topicEl = document.getElementById('dash-filter-topic');
-
+function populateDashboardFilters(data) {
   // Sources: DB list + any configured channels not yet seen in DB
   const dbSources = data.all_sources || [];
   const cfgSources = [];
@@ -150,24 +149,130 @@ function populateDashboardFilters(data, currentSource, currentTopic) {
   }
   const allTopics = [...dbTopics, ...cfgTopics];
 
-  const rebuildSingle = (el, items, current, label) => {
-    if (!el) return;
-    el.innerHTML = `<option value="">${label}</option>`;
-    items.forEach(v => {
-      const opt = document.createElement('option');
-      opt.value = v; opt.textContent = v;
-      if (v === current) opt.selected = true;
-      el.appendChild(opt);
-    });
-  };
-
-  rebuildSingle(srcEl,   allSources, currentSource, 'All Sources');
-  rebuildSingle(topicEl, allTopics,  currentTopic,  'All Topics');
-
-  // Channel checkbox dropdown — rebuild keeping current selections
+  _buildDashSourceDropdown(allSources);
+  _buildDashTopicDropdown(allTopics);
   _buildDashChannelDropdown(allSources);
 }
 
+/* ── Source multi-select ─────────────────────────── */
+function _buildDashSourceDropdown(sources) {
+  const dd = document.getElementById('dash-source-ms-dd');
+  if (!dd) return;
+  dd.innerHTML =
+    `<label class="mon-ms-item all-item">
+       <input type="checkbox" onchange="dashSourceToggleAll(this)" ${_dashFilterSources.size === 0 ? 'checked' : ''}> All Sources
+     </label>` +
+    sources.map(s =>
+      `<label class="mon-ms-item">
+         <input type="checkbox" value="${escapeHtmlSys(s)}" onchange="dashSourceToggle(this)" ${_dashFilterSources.has(s) ? 'checked' : ''}>
+         ${escapeHtml(s)}
+       </label>`
+    ).join('');
+  _updateDashSourceBtnLabel();
+}
+
+function _updateDashSourceBtnLabel() {
+  const btn = document.querySelector('#dash-source-ms-wrap .mon-ms-btn');
+  if (!btn) return;
+  const arrow = '<span class="mon-ms-arrow">▾</span>';
+  if (_dashFilterSources.size === 0) {
+    btn.innerHTML = `All Sources ${arrow}`;
+  } else if (_dashFilterSources.size <= 2) {
+    btn.innerHTML = `${[..._dashFilterSources].join(', ')} ${arrow}`;
+  } else {
+    btn.innerHTML = `${_dashFilterSources.size} sources ${arrow}`;
+  }
+}
+
+window.toggleDashSourcePicker = function () {
+  const wrap = document.getElementById('dash-source-ms-wrap');
+  if (!wrap) return;
+  const opening = !wrap.classList.contains('open');
+  document.querySelectorAll('.mon-multi-select.open').forEach(el => el.classList.remove('open'));
+  if (opening) wrap.classList.add('open');
+};
+
+window.dashSourceToggleAll = function (cb) {
+  _dashFilterSources.clear();
+  const dd = document.getElementById('dash-source-ms-dd');
+  if (dd) dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
+  cb.checked = true;
+  _updateDashSourceBtnLabel();
+  loadDashboardData();
+};
+
+window.dashSourceToggle = function (cb) {
+  if (cb.checked) _dashFilterSources.add(cb.value);
+  else _dashFilterSources.delete(cb.value);
+  const dd = document.getElementById('dash-source-ms-dd');
+  if (dd) {
+    const allCb = dd.querySelector('.all-item input');
+    if (allCb) allCb.checked = _dashFilterSources.size === 0;
+  }
+  _updateDashSourceBtnLabel();
+  loadDashboardData();
+};
+
+/* ── Topic multi-select ──────────────────────────── */
+function _buildDashTopicDropdown(topics) {
+  const dd = document.getElementById('dash-topic-ms-dd');
+  if (!dd) return;
+  dd.innerHTML =
+    `<label class="mon-ms-item all-item">
+       <input type="checkbox" onchange="dashTopicToggleAll(this)" ${_dashFilterTopics.size === 0 ? 'checked' : ''}> All Topics
+     </label>` +
+    topics.map(t =>
+      `<label class="mon-ms-item">
+         <input type="checkbox" value="${escapeHtmlSys(t)}" onchange="dashTopicToggle(this)" ${_dashFilterTopics.has(t) ? 'checked' : ''}>
+         ${escapeHtml(t)}
+       </label>`
+    ).join('');
+  _updateDashTopicBtnLabel();
+}
+
+function _updateDashTopicBtnLabel() {
+  const btn = document.querySelector('#dash-topic-ms-wrap .mon-ms-btn');
+  if (!btn) return;
+  const arrow = '<span class="mon-ms-arrow">▾</span>';
+  if (_dashFilterTopics.size === 0) {
+    btn.innerHTML = `All Topics ${arrow}`;
+  } else if (_dashFilterTopics.size <= 2) {
+    btn.innerHTML = `${[..._dashFilterTopics].join(', ')} ${arrow}`;
+  } else {
+    btn.innerHTML = `${_dashFilterTopics.size} topics ${arrow}`;
+  }
+}
+
+window.toggleDashTopicPicker = function () {
+  const wrap = document.getElementById('dash-topic-ms-wrap');
+  if (!wrap) return;
+  const opening = !wrap.classList.contains('open');
+  document.querySelectorAll('.mon-multi-select.open').forEach(el => el.classList.remove('open'));
+  if (opening) wrap.classList.add('open');
+};
+
+window.dashTopicToggleAll = function (cb) {
+  _dashFilterTopics.clear();
+  const dd = document.getElementById('dash-topic-ms-dd');
+  if (dd) dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
+  cb.checked = true;
+  _updateDashTopicBtnLabel();
+  loadDashboardData();
+};
+
+window.dashTopicToggle = function (cb) {
+  if (cb.checked) _dashFilterTopics.add(cb.value);
+  else _dashFilterTopics.delete(cb.value);
+  const dd = document.getElementById('dash-topic-ms-dd');
+  if (dd) {
+    const allCb = dd.querySelector('.all-item input');
+    if (allCb) allCb.checked = _dashFilterTopics.size === 0;
+  }
+  _updateDashTopicBtnLabel();
+  loadDashboardData();
+};
+
+/* ── Channel multi-select ────────────────────────── */
 function _buildDashChannelDropdown(channels) {
   const dd = document.getElementById('dash-channel-ms-dd');
   if (!dd) return;
@@ -199,15 +304,17 @@ function _updateDashChannelBtnLabel() {
 
 window.toggleDashChannelPicker = function () {
   const wrap = document.getElementById('dash-channel-ms-wrap');
-  if (wrap) wrap.classList.toggle('open');
+  if (!wrap) return;
+  const opening = !wrap.classList.contains('open');
+  document.querySelectorAll('.mon-multi-select.open').forEach(el => el.classList.remove('open'));
+  if (opening) wrap.classList.add('open');
 };
 
 window.dashChannelToggleAll = function (cb) {
   _dashFilterChannels.clear();
-  // Uncheck all individual checkboxes
   const dd = document.getElementById('dash-channel-ms-dd');
   if (dd) dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
-  cb.checked = true; // keep "All" checked
+  cb.checked = true;
   _updateDashChannelBtnLabel();
   loadDashboardData();
 };
@@ -215,7 +322,6 @@ window.dashChannelToggleAll = function (cb) {
 window.dashChannelToggle = function (cb) {
   if (cb.checked) _dashFilterChannels.add(cb.value);
   else _dashFilterChannels.delete(cb.value);
-  // Keep "All" checkbox in sync
   const dd = document.getElementById('dash-channel-ms-dd');
   if (dd) {
     const allCb = dd.querySelector('.all-item input');
@@ -227,18 +333,18 @@ window.dashChannelToggle = function (cb) {
 
 /* ── Clear all dashboard filters ─────────────────── */
 window.clearDashboardFilters = function () {
-  const s = document.getElementById('dash-filter-source');
-  const t = document.getElementById('dash-filter-topic');
-  if (s) s.value = '';
-  if (t) t.value = '';
+  _dashFilterSources.clear();
+  _dashFilterTopics.clear();
   _dashFilterChannels.clear();
-  // Reset checkboxes
-  const dd = document.getElementById('dash-channel-ms-dd');
-  if (dd) {
+  ['dash-source-ms-dd', 'dash-topic-ms-dd', 'dash-channel-ms-dd'].forEach(id => {
+    const dd = document.getElementById(id);
+    if (!dd) return;
     dd.querySelectorAll('input[value]').forEach(el => { el.checked = false; });
     const allCb = dd.querySelector('.all-item input');
     if (allCb) allCb.checked = true;
-  }
+  });
+  _updateDashSourceBtnLabel();
+  _updateDashTopicBtnLabel();
   _updateDashChannelBtnLabel();
   loadDashboardData();
 };

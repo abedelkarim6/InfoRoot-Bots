@@ -206,15 +206,19 @@
             <div class="dash-filter-bar">
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">📡 Source</span>
-                    <select class="select dash-filter-select" id="dash-filter-source" onchange="loadDashboardData()">
-                        <option value="">All Sources</option>
-                    </select>
+                    <div class="mon-multi-select" id="dash-source-ms-wrap">
+                        <button class="select mon-filter-sel mon-ms-btn" type="button"
+                                onclick="toggleDashSourcePicker()">All Sources <span class="mon-ms-arrow">▾</span></button>
+                        <div class="mon-ms-dropdown" id="dash-source-ms-dd"></div>
+                    </div>
                 </div>
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">🏷️ Topic</span>
-                    <select class="select dash-filter-select" id="dash-filter-topic" onchange="loadDashboardData()">
-                        <option value="">All Topics</option>
-                    </select>
+                    <div class="mon-multi-select" id="dash-topic-ms-wrap">
+                        <button class="select mon-filter-sel mon-ms-btn" type="button"
+                                onclick="toggleDashTopicPicker()">All Topics <span class="mon-ms-arrow">▾</span></button>
+                        <div class="mon-ms-dropdown" id="dash-topic-ms-dd"></div>
+                    </div>
                 </div>
                 <div class="dash-filter-group">
                     <span class="dash-filter-label">📅 Period</span>
@@ -486,6 +490,7 @@
                     <button class="mon-tab"         data-tab="messages"    onclick="switchMonTab('messages')">📥 Messages</button>
                     <button class="mon-tab"         data-tab="unclassified" onclick="switchMonTab('unclassified')">❓ Unclassified <span id="mon-uncl-badge" class="mon-uncl-badge" style="display:none;"></span></button>
                     <button class="mon-tab"         data-tab="history"     onclick="switchMonTab('history')">📜 History</button>
+                    <button class="mon-tab"         data-tab="interims"    onclick="switchMonTab('interims')">⏳ Interims</button>
                 </div>
 
                 <!-- Schedules tab -->
@@ -577,6 +582,11 @@
                     <div id="mon-uncl-content"><p class="mon-empty">Loading…</p></div>
                 </div>
 
+
+                <!-- Interims tab -->
+                <div id="mon-tab-interims" class="mon-tab-panel" style="display:none;">
+                    <div id="mon-interims-content"><p class="mon-empty">Loading…</p></div>
+                </div>
 
                 <!-- History tab -->
                 <div id="mon-tab-history" class="mon-tab-panel" style="display:none;">
@@ -1315,19 +1325,22 @@
             </div>
             <div class="modal-body" id="seo-suggest-body" style="padding:16px 22px;min-height:140px;max-height:62vh;overflow-y:auto;">
                 <!-- Progress bar (visible during generation) -->
-                <div id="seo-progress-wrap" style="display:none;margin-bottom:14px;">
-                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:5px;">
+                <div id="seo-progress-wrap" style="display:none;margin-bottom:16px;">
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:7px;">
                         <span id="seo-progress-label">Starting…</span>
                         <span id="seo-progress-count">0 generated</span>
                     </div>
-                    <div style="background:var(--bg-secondary);border-radius:4px;height:6px;overflow:hidden;">
-                        <div id="seo-progress-bar" style="height:100%;background:var(--accent-primary);width:0%;transition:width 0.45s ease;"></div>
+                    <div style="background:var(--bg-tertiary,#2a2a3e);border-radius:6px;height:8px;overflow:hidden;">
+                        <div id="seo-progress-bar" style="width:0%"></div>
                     </div>
+                    <div id="seo-progress-subtext" style="margin-top:8px;font-size:12px;color:var(--text-muted);text-align:center"></div>
                 </div>
                 <!-- Initial spinner (shown before first batch arrives) -->
-                <div id="seo-suggest-loading" style="text-align:center;padding:28px 0;color:var(--text-muted);">
-                    <div style="font-size:26px;margin-bottom:8px;animation:seoPulse 1.4s ease-in-out infinite;">✨</div>
-                    <div>Asking AI…</div>
+                <div id="seo-suggest-loading" style="text-align:center;padding:36px 16px;">
+                    <div class="seo-loading-dots" style="margin-bottom:16px">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <div id="seo-loading-text" style="font-size:13px;color:var(--text-muted)">Analyzing topic…</div>
                 </div>
                 <!-- Chips (fills up live as batches arrive) -->
                 <div id="seo-suggest-chips"></div>
