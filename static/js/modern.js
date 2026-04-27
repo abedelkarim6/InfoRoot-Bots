@@ -116,6 +116,34 @@ const _dApplyMonMissedFilters     = debounce(() => typeof applyMonMissedFilters 
 const _dApplyLogFilters           = debounce(() => typeof applyLogFilters === 'function'           && applyLogFilters(), 220);
 const _dFilterSourceMatrix        = debounce(() => typeof filterSourceMatrix === 'function'        && filterSourceMatrix(), 220);
 
+// Format an ISO/UTC timestamp for display in Lebanon time (Asia/Beirut).
+// Accepts ISO strings (with or without Z/offset) or ms-since-epoch numbers.
+// Naive strings (no tz specifier) are treated as UTC.
+function _fmtLBN(iso) {
+    if (!iso && iso !== 0) return '—';
+    let d;
+    if (typeof iso === 'number') {
+        d = new Date(iso);
+    } else {
+        const s = String(iso).replace(' ', 'T');
+        const norm = (s.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(s)) ? s : s + 'Z';
+        d = new Date(norm);
+    }
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleString('en-GB', {
+        timeZone: 'Asia/Beirut',
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+}
+
+// Build comma-separated tag chips for monitor tables. cls is the extra CSS class (e.g. 'topic', 'cat').
+function _monTagsHtml(str, cls) {
+    const tags = (str || '').split(',').map(t => t.trim()).filter(Boolean)
+        .map(t => `<span class="mon-tag${cls ? ' ' + cls : ''}">${escapeHtml(t)}</span>`).join(' ');
+    return tags || '<span style="color:var(--text-muted)">—</span>';
+}
+
 // ==================== Global State ====================
 let globalConfig = null;
 let globalPrompts = null;
@@ -1072,7 +1100,7 @@ async function validateChannels(e) {
     const summaryClass = totalJoined < totalConfigured ? 'ch-val-sum-warn' : 'ch-val-sum-ok';
     const extraCount   = (data.channels || []).filter(c => c.username && !allConfiguredKeys.has(c.username.toLowerCase())).length;
     const updatedAt    = data.updated_at
-        ? new Date(data.updated_at).toLocaleString()
+        ? _fmtLBN(data.updated_at)
         : null;
 
     body.innerHTML = `
@@ -1605,12 +1633,6 @@ function _renderBotDetailView(name, bot, keepOpen = null) {
                     }
                 }
             });
-        }
-        // If the prompts tab is already active on render, load fixed prompts
-        const savedTab = 'categories';
-        if (savedTab === 'prompts') {
-            const isAdmin = !currentUser || currentUser.role === 'admin';
-            if (isAdmin) loadSummariesFixedPrompts();
         }
     }, 50);
 }
@@ -5106,7 +5128,7 @@ function _renderSumMsgTable() {
     }
 
     const rows = filtered.map(m => {
-        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const ts  = _fmtLBN(m.timestamp);
         const src = m.channel_username ? `@${m.channel_username}` : '—';
         const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
         const bot = m.bot_name         ? escapeHtml(m.bot_name)         : '—';
@@ -5205,7 +5227,7 @@ async function showPendingMessages(botName, topicName, schedType, sch) {
     _pendingMsgData = data.messages;
 
     const rows = _pendingMsgData.map(m => {
-        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const ts  = _fmtLBN(m.timestamp);
         const src = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '—';
         const col = m.collection_name  ? escapeHtml(m.collection_name)  : '—';
         const txt = escapeHtml(m.preview || '');
@@ -5327,15 +5349,12 @@ function applyMonMessageFilters() {
         // Flat view: all messages sorted latest first, no grouping
         const sorted = [...filtered].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
         const rowsHtml = sorted.map(m => {
-            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ts = _fmtLBN(m.timestamp);
             const ch = m.channel_username ? `@${m.channel_username}` : `id:${m.channel_id}`;
             const cname = m.collection || '—';
-            const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
-                .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-            const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
-                .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-            const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
-                .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+            const topicTags = _monTagsHtml(m.topics, 'topic');
+            const catTags   = _monTagsHtml(m.categories, 'cat');
+            const kwTags    = _monTagsHtml(m.keywords_found, '');
             return `<tr>
                 <td style="white-space:nowrap;font-size:11px;">${ts}</td>
                 <td>${escapeHtml(ch)}</td>
@@ -5366,13 +5385,10 @@ function applyMonMessageFilters() {
         html = Object.entries(grouped).map(([collName, channels]) => {
             const chHtml = Object.entries(channels).map(([chName, msgs]) => {
                 const rowsHtml = msgs.map(m => {
-                    const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
-                    const topicTags = (m.topics || '').split(',').map(t => t.trim()).filter(Boolean)
-                        .map(t => `<span class="mon-tag topic">${escapeHtml(t)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-                    const catTags = (m.categories || '').split(',').map(c => c.trim()).filter(Boolean)
-                        .map(c => `<span class="mon-tag cat">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
-                    const kwTags = (m.keywords_found || '').split(',').map(k => k.trim()).filter(Boolean)
-                        .map(k => `<span class="mon-tag">${escapeHtml(k)}</span>`).join(' ') || '<span style="color:var(--text-muted)">—</span>';
+                    const ts = _fmtLBN(m.timestamp);
+                    const topicTags = _monTagsHtml(m.topics, 'topic');
+                    const catTags   = _monTagsHtml(m.categories, 'cat');
+                    const kwTags    = _monTagsHtml(m.keywords_found, '');
                     return `<tr>
                         <td style="white-space:nowrap;font-size:11px;">${ts}</td>
                         <td>${topicTags}</td>
@@ -5538,7 +5554,7 @@ function _renderUnclassified(messages) {
 function _renderUnclFlat(messages, content) {
     const sorted = [...messages].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
     const rowsHtml = sorted.map(m => {
-        const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const ts = _fmtLBN(m.timestamp);
         const ch = m.channel_username ? `@${m.channel_username}` : `id:${m.channel_id}`;
         const cname = m.collection_name || '—';
         const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '—';
@@ -5571,7 +5587,7 @@ function _renderUnclByChannel(messages, content) {
     content.innerHTML = Object.entries(grouped).map(([collName, channels]) => {
         const chHtml = Object.entries(channels).map(([chName, msgs]) => {
             const rowsHtml = msgs.map(m => {
-                const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+                const ts = _fmtLBN(m.timestamp);
                 const botTag = m.bot_name ? `<span class="mon-tag cat">${escapeHtml(m.bot_name)}</span>` : '—';
                 return `<tr>
                     <td style="white-space:nowrap;font-size:11px;">${ts}</td>
@@ -5630,7 +5646,7 @@ function _renderUnclGroupedByWords(messages, content) {
 
     for (const [word, msgs] of sortedGroups) {
         const rowsHtml = msgs.map(m => {
-            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ts = _fmtLBN(m.timestamp);
             const ch = m.channel_username ? `@${m.channel_username}` : '';
             // Highlight the word in preview
             const preview = escapeHtml(m.preview || '');
@@ -5659,7 +5675,7 @@ function _renderUnclGroupedByWords(messages, content) {
 
     if (unassigned.length) {
         const rowsHtml = unassigned.map(m => {
-            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ts = _fmtLBN(m.timestamp);
             const ch = m.channel_username ? `@${m.channel_username}` : '';
             return `<tr>
                 <td style="white-space:nowrap;font-size:11px;">${ts}</td>
@@ -5896,7 +5912,7 @@ function _renderMissed(messages) {
         // Flat view: all messages sorted latest first
         const sorted = [...visible].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
         const rows = sorted.map(m => {
-            const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+            const ts = _fmtLBN(m.timestamp);
             const ch = m.channel_username ? `@${m.channel_username}` : String(m.channel_id || '?');
             return `<tr>
                 <td style="white-space:nowrap;font-size:11px;">${ts}</td>
@@ -5924,7 +5940,7 @@ function _renderMissed(messages) {
         for (const [key, msgs] of Object.entries(groups)) {
             const rows = msgs.map(m => `
                 <tr>
-                    <td style="white-space:nowrap;font-size:11px;">${m.timestamp ? m.timestamp.replace('T',' ').slice(0,16) : '—'}</td>
+                    <td style="white-space:nowrap;font-size:11px;">${_fmtLBN(m.timestamp)}</td>
                     <td><span class="mon-tag">${escapeHtml(m.channel_username || String(m.channel_id || '?'))}</span></td>
                     <td><span class="mon-tag cat">${escapeHtml(m.schedule_type || '—')}</span></td>
                     <td class="mon-ellipsis">${escapeHtml(m.preview || '—')}</td>
@@ -6137,7 +6153,7 @@ function _doExport(tabName, selectedKeys) {
     if (tabName === 'summaries') {
         rows = _getExportSummaries().map(s => colDefs.map(c => {
             switch (c.key) {
-                case 'time':    return s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+                case 'time':    return s.timestamp ? _fmtLBN(s.timestamp) : '';
                 case 'bot':     return s.bot_name    || '';
                 case 'topic':   return s.topic_name  || '';
                 case 'type':    return s.summary_type || '';
@@ -6163,7 +6179,7 @@ function _doExport(tabName, selectedKeys) {
         fires.sort((a, b) => a.fireAt - b.fireAt);
         rows = fires.map(({ fireAt, botName, topicName, sch, pending }) => colDefs.map(c => {
             switch (c.key) {
-                case 'time':    return new Date(fireAt).toLocaleString();
+                case 'time':    return _fmtLBN(fireAt);
                 case 'bot':     return botName   || '';
                 case 'topic':   return topicName || '';
                 case 'type':    return sch.type  || '';
@@ -6226,7 +6242,7 @@ function _doExport(tabName, selectedKeys) {
         if (selStatus.size > 0) runs = runs.filter(r => selStatus.has(r.status    || ''));
         rows = runs.map(r => colDefs.map(c => {
             switch (c.key) {
-                case 'time':   return r.fired_at ? r.fired_at.replace('T', ' ').slice(0, 19) : '';
+                case 'time':   return r.fired_at ? _fmtLBN(r.fired_at) : '';
                 case 'bot':    return r.bot_name    || '';
                 case 'topic':  return r.topic_name  || '';
                 case 'type':   return r.schedule_type || '';
@@ -6240,7 +6256,7 @@ function _doExport(tabName, selectedKeys) {
     } else if (tabName === 'messages') {
         rows = _getExportMessages().map(m => colDefs.map(c => {
             switch (c.key) {
-                case 'time':       return m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+                case 'time':       return m.timestamp ? _fmtLBN(m.timestamp) : '';
                 case 'collection': return m.collection || '';
                 case 'channel':    return m.channel_username ? `@${m.channel_username}` : '';
                 case 'topics':     return m.topics || '';
@@ -6253,7 +6269,7 @@ function _doExport(tabName, selectedKeys) {
     } else if (tabName === 'unclassified') {
         rows = _getExportUnclassified().map(m => colDefs.map(c => {
             switch (c.key) {
-                case 'time':       return m.timestamp ? new Date(m.timestamp).toLocaleString() : '';
+                case 'time':       return m.timestamp ? _fmtLBN(m.timestamp) : '';
                 case 'collection': return m.collection_name || '';
                 case 'channel':    return m.channel_username ? `@${m.channel_username}` : '';
                 case 'bot':        return m.bot_name || '';
@@ -6811,13 +6827,13 @@ function _renderScheduleHistory(runs) {
         const statusEl = isOk
             ? '<span class="hist-badge-ok">✓ Success</span>'
             : '<span class="hist-badge-fail">✗ Failed</span>';
-        const typeCls  = { hourly: 'hourly', daily: 'daily', minute: 'minute', interval_hourly: 'interval_hourly' }[r.schedule_type] || '';
+        const typeCls  = r.schedule_type || '';
         const errorBtn = (!isOk && r.error_text)
             ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;"
                   onclick="showHistError(this)"
                   data-err="${escapeHtmlSys(r.error_text)}">View Error</button>`
             : '—';
-        const timeStr = r.fired_at ? r.fired_at.replace('T', ' ').slice(0, 19) : '—';
+        const timeStr = _fmtLBN(r.fired_at);
         const msgsCell = r.summary_id
             ? `<span class="mon-msgs-link" onclick="showHistoryMessages(${r.summary_id})">${r.message_count || 0}</span>`
             : (r.message_count || 0);
@@ -6968,7 +6984,7 @@ function _renderHistMsgTable() {
     }
 
     const rows = filtered.map(m => {
-        const ts  = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+        const ts  = _fmtLBN(m.timestamp);
         const src = m.channel_username ? `@${m.channel_username}` : '—';
         const top = m.topics           ? escapeHtml(m.topics)           : '—';
         const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
@@ -7211,9 +7227,7 @@ function _fmtRateVal(v) {
 }
 
 function _fmtFailTime(iso) {
-    if (!iso) return '—';
-    const norm = iso.endsWith('Z') ? iso : iso + 'Z';
-    return new Date(norm).toLocaleString();
+    return _fmtLBN(iso);
 }
 
 async function loadSummaryFailures() {
