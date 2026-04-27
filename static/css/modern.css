@@ -1633,6 +1633,67 @@ html[data-theme="dark"] .tag-user-kw {
     gap: 12px;
 }
 
+/* ── AI SEO Suggestion Chips ─────────────────────────── */
+#seo-suggest-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Language toggle pills in config modal */
+.seo-lang-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s;
+}
+.seo-lang-pill:has(.seo-lang-cb:checked) {
+    border-color: var(--accent-primary);
+    background: rgba(99,102,241,0.14);
+}
+.seo-lang-pill .seo-lang-cb {
+    accent-color: var(--accent-primary);
+    cursor: pointer;
+}
+
+/* Pulsing animation for the initial ✨ spinner */
+@keyframes seoPulse {
+    0%, 100% { opacity: 1;   transform: scale(1);    }
+    50%       { opacity: 0.5; transform: scale(0.88); }
+}
+.seo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
+}
+.seo-chip:has(.seo-chip-cb:checked) {
+    border-color: var(--accent-primary);
+    background: rgba(99,102,241,0.12);
+}
+.seo-chip input[type="checkbox"] {
+    accent-color: var(--accent-primary);
+    cursor: pointer;
+}
+#seo-suggest-footer {
+    justify-content: space-between;
+    align-items: center;
+}
+
 /* ── Summary source messages ─────────────────────────── */
 .mon-msgs-link {
     color: var(--accent);

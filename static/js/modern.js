@@ -2171,11 +2171,14 @@ function _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEn
                     <div class="form-group" ${catchAll ? 'style="opacity:0.4;pointer-events:none;"' : ''}>
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                             <label class="form-label" style="margin:0;">SEOs (${seoCount})</label>
-                            ${!seoHidden && keywords.length > 0 ? `<div class="kw-bulk-actions" style="display:flex;gap:6px;align-items:center;">
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                ${!seoHidden && keywords.length > 0 ? `
                                 <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwToggleSelectAll('${b}','${c}','${t}')">Select All</button>
                                 <button class="btn btn-danger btn-sm kw-del-sel-btn" style="font-size:10px;padding:2px 8px;display:none;" data-topic="${b}|${c}|${t}" onclick="kwDeleteSelected('${b}','${c}','${t}')">Delete Selected</button>
                                 <button class="btn btn-danger btn-sm" style="font-size:10px;padding:2px 8px;" onclick="kwDeleteAll('${b}','${c}','${t}')">Delete All</button>
-                            </div>` : ''}
+                                ` : ''}
+                                <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;" onclick="suggestSEOs('${b}','${c}','${t}')">✨ Suggest with AI</button>
+                            </div>
                         </div>
                         <div class="tags-container tags-scrollable" id="kw-tags-${b}-${c}-${t}">
                             ${seoHidden ? `
@@ -3474,6 +3477,165 @@ async function removeKeyword(botName, categoryName, topicName, index) {
         renderBotsPage([topicId, categoryId]);
         showNotification('Keyword removed', 'success');
     }
+}
+
+// ==================== AI SEO Suggestions ====================
+let _seoSuggestContext = null; // { b, c, t }
+let _seoGenerating    = false; // prevent double-submit
+
+// Step 1 — open config modal
+function suggestSEOs(b, c, t) {
+    _seoSuggestContext = { b, c, t };
+    document.getElementById('seo-cfg-subtitle').textContent = t;
+    document.getElementById('seo-cfg-count').value = 50;
+    document.getElementById('seo-cfg-note').value = '';
+    document.querySelectorAll('.seo-lang-cb').forEach(cb => { cb.checked = cb.value === 'Arabic'; });
+    document.getElementById('seo-config-modal').style.display = 'flex';
+}
+
+function closeSeoConfigModal() {
+    document.getElementById('seo-config-modal').style.display = 'none';
+}
+
+// Step 2 — "Generate" clicked in config modal; run batches
+async function startSeoSuggest() {
+    if (!_seoSuggestContext || _seoGenerating) return;
+
+    const total     = Math.max(10, Math.min(500, parseInt(document.getElementById('seo-cfg-count').value) || 50));
+    const languages = [...document.querySelectorAll('.seo-lang-cb:checked')].map(cb => cb.value);
+    const note      = document.getElementById('seo-cfg-note').value.trim();
+    const { b, c, t } = _seoSuggestContext;
+
+    if (!languages.length) { showNotification('Select at least one language', 'error'); return; }
+
+    closeSeoConfigModal();
+    _seoGenerating = true;
+
+    // Reset results modal
+    document.getElementById('seo-suggest-subtitle').textContent =
+        `${t} — ${total} suggestion${total !== 1 ? 's' : ''}`;
+    document.getElementById('seo-suggest-loading').style.display = 'block';
+    document.getElementById('seo-suggest-chips').innerHTML = '';
+    document.getElementById('seo-progress-wrap').style.display = 'none';
+    document.getElementById('seo-progress-bar').style.width = '0%';
+    document.getElementById('seo-approve-btn').disabled = true;
+    document.getElementById('seo-approve-btn').innerHTML =
+        'Approve Selected (<span id="seo-sel-count">0</span>)';
+    document.getElementById('seo-suggest-modal').style.display = 'flex';
+
+    const batches  = Math.ceil(total / 50);
+    let allSuggested = [];
+
+    for (let i = 0; i < batches; i++) {
+        const batchSize = Math.min(50, total - i * 50);
+
+        // Show / update progress bar
+        document.getElementById('seo-suggest-loading').style.display = 'none';
+        document.getElementById('seo-progress-wrap').style.display = 'block';
+        document.getElementById('seo-progress-label').textContent =
+            batches === 1 ? 'Asking AI…' : `Pass ${i + 1} of ${batches}…`;
+        document.getElementById('seo-progress-count').textContent =
+            `${allSuggested.length} / ${total}`;
+        document.getElementById('seo-progress-bar').style.width =
+            Math.round((i / batches) * 100) + '%';
+
+        const result = await api('/api/topic/suggest-seos', {
+            bot_name: b, category_name: c, topic_name: t,
+            count: batchSize, languages, note,
+            exclude: allSuggested,
+        });
+
+        if (result.status !== 'ok') {
+            _seoAppendError(result.message || 'AI error');
+            break;
+        }
+
+        allSuggested.push(...result.suggestions);
+        _seoAppendChips(result.suggestions);
+        document.getElementById('seo-progress-bar').style.width =
+            Math.round(((i + 1) / batches) * 100) + '%';
+        document.getElementById('seo-progress-count').textContent =
+            `${allSuggested.length} / ${total}`;
+
+        if (allSuggested.length > 0) document.getElementById('seo-approve-btn').disabled = false;
+    }
+
+    document.getElementById('seo-progress-label').textContent =
+        allSuggested.length ? `Done — ${allSuggested.length} suggestions generated` : 'Done';
+    document.getElementById('seo-select-all-cb').checked = true;
+    _seoUpdateCount();
+    _seoGenerating = false;
+}
+
+function _seoAppendChips(suggestions) {
+    const chips = document.getElementById('seo-suggest-chips');
+    suggestions.forEach(s => {
+        const lbl = document.createElement('label');
+        lbl.className = 'seo-chip';
+        lbl.innerHTML = `<input type="checkbox" class="seo-chip-cb" checked onchange="_seoUpdateCount()"><span>${escapeHtml(s)}</span>`;
+        chips.appendChild(lbl);
+    });
+    _seoUpdateCount();
+}
+
+function _seoAppendError(msg) {
+    const chips = document.getElementById('seo-suggest-chips');
+    const div = document.createElement('div');
+    div.style.cssText = 'color:var(--danger);font-size:13px;padding:8px 0;width:100%;';
+    div.textContent = msg;
+    chips.appendChild(div);
+}
+
+function _seoUpdateCount() {
+    const checked = document.querySelectorAll('#seo-suggest-chips .seo-chip-cb:checked').length;
+    const total   = document.querySelectorAll('#seo-suggest-chips .seo-chip-cb').length;
+    const el = document.getElementById('seo-sel-count');
+    if (el) el.textContent = checked;
+    const allCb = document.getElementById('seo-select-all-cb');
+    if (allCb) allCb.checked = total > 0 && checked === total;
+}
+
+function seoToggleAll(checked) {
+    document.querySelectorAll('#seo-suggest-chips .seo-chip-cb').forEach(cb => { cb.checked = checked; });
+    _seoUpdateCount();
+}
+
+async function _approveSuggestedSEOs() {
+    if (!_seoSuggestContext) return;
+    const { b, c, t } = _seoSuggestContext;
+
+    const selected = [...document.querySelectorAll('#seo-suggest-chips .seo-chip-cb:checked')]
+        .map(cb => cb.closest('.seo-chip').querySelector('span').textContent.trim())
+        .filter(Boolean);
+
+    if (!selected.length) { showNotification('No keywords selected', 'error'); return; }
+
+    const btn = document.getElementById('seo-approve-btn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    const result = await api('/api/topic/keyword/add-bulk', {
+        bot_name: b, category_name: c, topic_name: t, keywords: selected,
+    });
+
+    btn.disabled = false;
+
+    if (result.status === 'ok') {
+        closeSeoSuggestModal();
+        await loadAllData();
+        renderBotsPage([`topic-${b}-${c}-${t}`, `categories-${b}`]);
+        showNotification(`${result.inserted} SEO${result.inserted !== 1 ? 's' : ''} added`, 'success');
+    } else {
+        showNotification(result.message || 'Failed to save keywords', 'error');
+        const n = document.querySelectorAll('#seo-suggest-chips .seo-chip-cb:checked').length;
+        btn.innerHTML = `Approve Selected (<span id="seo-sel-count">${n}</span>)`;
+    }
+}
+
+function closeSeoSuggestModal() {
+    if (_seoGenerating) _seoGenerating = false;
+    document.getElementById('seo-suggest-modal').style.display = 'none';
+    _seoSuggestContext = null;
 }
 
 // ==================== Topic Schedule Management ====================
@@ -6837,11 +6999,12 @@ function _renderScheduleHistory(runs) {
         const msgsCell = r.summary_id
             ? `<span class="mon-msgs-link" onclick="showHistoryMessages(${r.summary_id})">${r.message_count || 0}</span>`
             : (r.message_count || 0);
-        const promptCell = r.prompt_key
-            ? `<span class="hist-prompt-link"
-                   data-bot="${escapeHtmlSys(r.bot_name)}"
-                   data-key="${escapeHtmlSys(r.prompt_key)}"
-                   onclick="showHistPrompt(this.dataset.bot, this.dataset.key)">${escapeHtml(r.prompt_key)}</span>`
+        const summaryCell = r.summary_text
+            ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;"
+                   onclick="showHistSummary(this)" data-text="${escapeHtmlSys(r.summary_text)}">View</button>`
+            : '<span style="color:var(--text-muted)">—</span>';
+        const targetCell = r.target_entities
+            ? escapeHtml(r.target_entities)
             : '<span style="color:var(--text-muted)">—</span>';
         return `<tr class="${rowCls}">
             <td class="hist-time">${escapeHtml(timeStr)}</td>
@@ -6850,7 +7013,8 @@ function _renderScheduleHistory(runs) {
             <td><span class="mon-type-badge ${typeCls}">${escapeHtml(r.schedule_type || '—')}</span></td>
             <td>${statusEl}</td>
             <td style="text-align:center">${msgsCell}</td>
-            <td>${promptCell}</td>
+            <td>${summaryCell}</td>
+            <td style="font-size:11px;max-width:160px;word-break:break-all;">${targetCell}</td>
             <td>${errorBtn}</td>
         </tr>`;
     }).join('');
@@ -6858,12 +7022,22 @@ function _renderScheduleHistory(runs) {
         <table class="hist-table">
             <thead><tr>
                 <th>Time</th><th>Bot</th><th>Topic</th><th>Type</th>
-                <th>Status</th><th>Msgs</th><th>Prompt</th><th>Error</th>
+                <th>Status</th><th>Msgs</th><th>Summary</th><th>Target</th><th>Error</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
     </div>`;
 }
+
+window.showHistSummary = function (btn) {
+    const text = btn.getAttribute('data-text') || '';
+    showAlert(
+        `<div style="direction:rtl;text-align:right;white-space:pre-wrap;
+                     max-height:420px;overflow-y:auto;font-size:13px;
+                     line-height:1.7;padding:4px 2px;">${escapeHtml(text)}</div>`,
+        { title: 'Summary Output', icon: '📄' }
+    );
+};
 
 window.showHistError = function (btn) {
     const err = btn.getAttribute('data-err') || '(no error text)';
@@ -6907,25 +7081,6 @@ window.showHistError = function (btn) {
     showAlert(html, { title: 'Schedule Run Error', icon: '⚠️' });
 };
 
-window.showHistPrompt = async function (botName, promptKey) {
-    const data = await api(`/api/monitor/prompt-preview?bot_name=${encodeURIComponent(botName)}&prompt_key=${encodeURIComponent(promptKey)}`);
-    if (data.status !== 'ok') {
-        showAlert(`Failed to load prompt: ${escapeHtml(data.message || '')}`, { title: 'Error', icon: '⚠️' });
-        return;
-    }
-
-    const combined = [data.system_prompt, data.fixed_prefix, data.user_prompt]
-        .filter(Boolean).join('\n\n');
-
-    const html = `
-        <div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--text-primary);">
-            Prompt: <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">${escapeHtml(promptKey)}</code>
-            &nbsp;·&nbsp; Bot: <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">${escapeHtml(botName)}</code>
-        </div>
-        <pre style="margin:0;font-size:12px;background:var(--bg-secondary,#f5f5f5);padding:10px 12px;border-radius:6px;white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;border:1px solid var(--border-color,#e0e0e0);">${escapeHtml(combined || '(empty)')}</pre>`;
-
-    showAlert(html, { title: 'Prompt Preview', icon: '📋' });
-};
 
 // ---------- History Source Messages — inline view ----------
 let _histMsgData = [];

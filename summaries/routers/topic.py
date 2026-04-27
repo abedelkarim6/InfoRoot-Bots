@@ -393,3 +393,122 @@ def delete_topic_keyword(request: Request, data: dict = Body(...)):
     deleted = db.delete_keyword(bot_name, category_name, topic_name, keyword, owner_id=owner_id)
     invalidate_categorizer_cache()
     return {"status": "ok", "deleted": deleted, "keyword": keyword}
+
+
+@router.post("/topic/keyword/add-bulk")
+def add_topic_keywords_bulk(request: Request, data: dict = Body(...)):
+    bot_name = data.get('bot_name')
+    category_name = data.get('category_name')
+    topic_name = data.get('topic_name')
+    keywords = data.get('keywords', [])
+
+    if not bot_name or not category_name or not topic_name or not keywords:
+        return {"status": "error", "message": "Missing required fields"}
+
+    allowed, owner_id = _resolve_bot_access(request, bot_name)
+    if not allowed:
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+    db = get_db()
+    inserted = 0
+    for kw in keywords:
+        kw = str(kw).strip()
+        if kw and db.add_keyword(bot_name, category_name, topic_name, kw, owner_id=owner_id):
+            inserted += 1
+    invalidate_categorizer_cache()
+    return {"status": "ok", "inserted": inserted}
+
+
+@router.post("/topic/suggest-seos")
+async def suggest_seos(request: Request, data: dict = Body(...)):
+    import json, re, asyncio, logging as _log
+    _logger = _log.getLogger("suggest_seos")
+
+    bot_name      = data.get('bot_name')
+    category_name = data.get('category_name')
+    topic_name    = data.get('topic_name')
+
+    if not bot_name or not category_name or not topic_name:
+        return {"status": "error", "message": "Missing required fields"}
+
+    allowed, _ = _resolve_bot_access(request, bot_name)
+    if not allowed:
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+    # Per-batch config (frontend splits total into ≤50 batches)
+    count     = max(1, min(50, int(data.get('count') or 50)))
+    languages = data.get('languages') or ['Arabic']
+    note      = (data.get('note') or '').strip()
+    exclude   = data.get('exclude') or []   # already-suggested from previous batches
+
+    db = get_db()
+    existing_keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
+
+    from utils.helpers import load_config
+    cfg = load_config()
+    try:
+        if cfg.get("gemini"):
+            from utils.gemini_client import GeminiClient
+            llm = GeminiClient(
+                project=cfg["gemini"]["project"],
+                location=cfg["gemini"].get("location", "us-central1"),
+                model=cfg["gemini"].get("model", "gemini-2.5-flash"),
+            )
+        else:
+            from utils.openai_client import OpenAIClient
+            oa = cfg["openai"]
+            llm = OpenAIClient(
+                api_key=oa["api_key"], model=oa["model"],
+                max_tokens=oa["max_tokens"], temperature=oa["temperature"],
+            )
+    except Exception as e:
+        return {"status": "error", "message": f"LLM not configured: {e}"}
+
+    # Build exclusion list: DB keywords + already-suggested from previous batches
+    all_excluded = list(existing_keywords) + [str(e).strip() for e in exclude if e]
+    excluded_str = ", ".join(all_excluded[:200]) if all_excluded else "none"
+
+    lang_str  = ", ".join(languages) if languages else "Arabic"
+    note_part = f"\n\nAdditional instructions: {note}" if note else ""
+
+    prompt = f"""You are an SEO keyword expert for news monitoring.
+
+Topic: {topic_name}
+
+Keywords to EXCLUDE — already exist or were already suggested (do NOT return any of these):
+{excluded_str}
+
+Task: Suggest exactly {count} new, unique keywords for the topic "{topic_name}".
+Rules:
+- Keywords are used to match news messages to this topic
+- Use ONLY these languages: {lang_str}
+- Include relevant variations, synonyms, related terms, and hashtag formats where appropriate
+- Do NOT repeat any excluded keyword{note_part}
+- Return ONLY a valid JSON array of strings — no explanation, no markdown, no extra text
+
+Example: ["keyword1", "keyword2", ...]"""
+
+    try:
+        loop = asyncio.get_event_loop()
+        response, _ = await loop.run_in_executor(None, llm.generate_summary, prompt)
+
+        match = re.search(r'\[[\s\S]*\]', response)
+        if not match:
+            return {"status": "error", "message": "AI returned unexpected format — no JSON array found"}
+        suggestions = json.loads(match.group(0))
+        if not isinstance(suggestions, list):
+            return {"status": "error", "message": "AI returned unexpected format"}
+
+        excluded_lower = {kw.lower() for kw in all_excluded}
+        seen: set = set()
+        clean = []
+        for s in suggestions:
+            s = str(s).strip()
+            if s and s.lower() not in excluded_lower and s.lower() not in seen:
+                seen.add(s.lower())
+                clean.append(s)
+
+        return {"status": "ok", "suggestions": clean[:count]}
+    except Exception as e:
+        _logger.error(f"[SUGGEST-SEOS] Error: {e}", exc_info=True)
+        return {"status": "error", "message": f"AI error: {str(e)}"}

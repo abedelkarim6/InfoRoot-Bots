@@ -519,22 +519,27 @@ class SummariesDB(Database):
                 f"""SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
                            r.message_count, r.error_text, r.fired_at,
                            r.rpm_at_failure, r.tpm_at_failure, r.rpd_at_failure,
-                           (SELECT s.id FROM summaries s
-                            WHERE s.bot_name = r.bot_name
-                              AND s.topic_name = r.topic_name
-                              AND s.message_ids IS NOT NULL
-                              AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
-                            ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
-                            LIMIT 1) AS summary_id,
-                           (SELECT sc.prompt_key
-                            FROM schedules sc
-                            JOIN topics t ON sc.topic_id = t.id
-                            JOIN categories cat ON t.category_id = cat.id
-                            JOIN bots b ON cat.bot_id = b.id
-                            WHERE b.name = r.bot_name AND t.name = r.topic_name
-                              AND sc.prompt_key IS NOT NULL
-                            LIMIT 1) AS prompt_key
-                    FROM schedule_runs r {where}
+                           matched.id           AS summary_id,
+                           matched.summary_text AS summary_text,
+                           (SELECT string_agg(DISTINCT s2.target_entity, ', ')
+                            FROM summaries s2
+                            WHERE s2.bot_name = r.bot_name
+                              AND s2.topic_name = r.topic_name
+                              AND s2.message_ids IS NOT NULL
+                              AND ABS(EXTRACT(EPOCH FROM (s2.timestamp - r.fired_at))) < 300
+                           ) AS target_entities
+                    FROM schedule_runs r
+                    LEFT JOIN LATERAL (
+                        SELECT s.id, s.summary_text
+                        FROM summaries s
+                        WHERE s.bot_name = r.bot_name
+                          AND s.topic_name = r.topic_name
+                          AND s.message_ids IS NOT NULL
+                          AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
+                        ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
+                        LIMIT 1
+                    ) matched ON true
+                    {where}
                     ORDER BY r.fired_at DESC LIMIT %s""",
                 params or None
             )

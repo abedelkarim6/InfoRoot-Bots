@@ -310,7 +310,7 @@ async def read_channel_messages(event):
             )
             logger.info(f"[SAVED] msg#{message_id} | Bot={bot_name} | @{channel_id} | topics={topics}")
 
-            # Trigger rolling 25-message interim summarization (fire-and-forget)
+            # Trigger rolling 10-message interim summarization (fire-and-forget)
             if topics:
                 for t in topics:
                     asyncio.create_task(check_and_run_interim_summary(bot_name, t))
@@ -391,10 +391,10 @@ async def _run_with_retry(fn, *args, max_attempts=3, base_delay=5):
 async def generate_and_send_summary(job_data):
     """
     Two-tier summary handler:
-      Tier 1 (rolling): messages are batched into interim summaries every 25 msgs (see check_and_run_interim_summary).
+      Tier 1 (rolling): messages are batched into interim summaries every 10 msgs (see check_and_run_interim_summary).
       Tier 2 (this function): on schedule fire, merge all unsent interim summaries within the
       time window into one final summary and send it. If there are leftover raw messages
-      (< 25, not yet interim-summarized), summarize them directly as well.
+      (< 10, not yet interim-summarized), summarize them directly as well.
     """
     schedule_type = job_data.get('schedule_type')
     bot_name = job_data.get('bot_name')
@@ -856,8 +856,8 @@ def _get_interim_lock(bot_name: str, topic_name: str) -> asyncio.Lock:
 async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     """
     Called after every message save.
-    If ≥ 25 unsummarized messages exist for (bot, topic), summarize exactly 25
-    and store the result as an interim summary. Loops until count drops below 25.
+    If ≥ 10 unsummarized messages exist for (bot, topic), summarize exactly 10
+    and store the result as an interim summary. Loops until count drops below 10.
     A per-topic lock prevents concurrent tasks from firing duplicate API calls.
     """
     lock = _get_interim_lock(bot_name, topic_name)
@@ -867,11 +867,11 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
         try:
             while True:
                 count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
-                if count < 25:
+                if count < 10:
                     break
 
-                messages = db.get_messages_for_interim(bot_name, topic_name, limit=25)
-                if len(messages) < 25:
+                messages = db.get_messages_for_interim(bot_name, topic_name, limit=10)
+                if len(messages) < 10:
                     break
 
                 prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
