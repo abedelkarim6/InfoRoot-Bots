@@ -274,16 +274,17 @@ class SummariesDB(Database):
             self._commit()
 
     def save_interim_summary(self, bot_name: str, topic_name: str,
-                             summary_text: str, message_count: int) -> int:
+                             summary_text: str, message_count: int,
+                             schedule_name: str = None) -> int:
         """Insert a new interim summary and return its id."""
         try:
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO topic_interim_summaries
-                       (bot_name, topic_name, summary_text, message_count)
-                   VALUES (%s, %s, %s, %s)
+                       (bot_name, topic_name, summary_text, message_count, schedule_name)
+                   VALUES (%s, %s, %s, %s, %s)
                    RETURNING id""",
-                (bot_name, topic_name, summary_text, message_count)
+                (bot_name, topic_name, summary_text, message_count, schedule_name)
             )
             row = cursor.fetchone()
             return row['id']
@@ -322,7 +323,8 @@ class SummariesDB(Database):
             self._commit()
 
     def get_interims(self, bot_name: str = None, topic_name: str = None, limit: int = 300) -> list:
-        """Return recent interim summaries, newest first, with optional filters."""
+        """Return recent interim summaries, newest first, with optional filters.
+        interim_number is the sequential index per (bot_name, topic_name) ordered oldest-first."""
         try:
             cursor = self._get_cursor()
             clauses, params = [], []
@@ -334,7 +336,11 @@ class SummariesDB(Database):
             params.append(limit)
             cursor.execute(
                 f"""SELECT id, bot_name, topic_name, summary_text, message_count,
-                           created_at, sent_at
+                           schedule_name, created_at, sent_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY bot_name, topic_name
+                               ORDER BY id ASC
+                           ) AS interim_number
                     FROM topic_interim_summaries
                     {where}
                     ORDER BY created_at DESC LIMIT %s""",
@@ -343,10 +349,8 @@ class SummariesDB(Database):
             rows = []
             for row in cursor.fetchall():
                 d = dict(row)
-                d['status'] = 'pending' if d['sent_at'] is None else 'done'
-                d['created_at'] = d['created_at'].isoformat() if d['created_at'] else None
-                d['sent_at']    = d['sent_at'].isoformat()    if d['sent_at']    else None
-                d['preview']    = (d.get('summary_text') or '')[:250]
+                d['status']   = 'pending' if d['sent_at'] is None else 'done'
+                d['preview']  = (d.get('summary_text') or '')[:250]
                 rows.append(d)
             return rows
         finally:
@@ -1942,6 +1946,156 @@ class SummariesDB(Database):
                 cursor.execute("UPDATE message_summarizations SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
                 self._bump_config_version()
             return updated
+        finally:
+            self._commit()
+
+    def duplicate_bot(self, source_name: str, new_name: str, owner_id: int = None, options: dict = None) -> bool:
+        """Copy a bot to a new independent bot.  The new bot starts disabled.
+        options keys (all default True):
+          include_basic      – min_messages, collections, default_schedules
+          include_rules      – rules (remove/replace)
+          include_prompts    – prompt templates
+          include_categories – categories + topics
+          include_seos       – topic keywords (requires include_categories)
+          include_schedules  – topic schedules (requires include_categories)
+        Raises ValueError on name collision or missing source."""
+        opts = {
+            'include_basic': True,
+            'include_rules': True,
+            'include_prompts': True,
+            'include_categories': True,
+            'include_seos': True,
+            'include_schedules': True,
+        }
+        if options:
+            opts.update(options)
+
+        def _jsonify(val, default=None):
+            """Ensure a value read from a JSONB column is re-serialised to a JSON string for INSERT."""
+            if val is None:
+                return json.dumps(default if default is not None else [])
+            if isinstance(val, (dict, list)):
+                return json.dumps(val)
+            return val  # already a JSON string
+
+        try:
+            cursor = self._get_cursor()
+
+            # ── Fetch source bot ────────────────────────────────────────────
+            if owner_id is None:
+                cursor.execute("SELECT * FROM bots WHERE name = %s AND owner_id IS NULL", (source_name,))
+            else:
+                cursor.execute("SELECT * FROM bots WHERE name = %s AND owner_id = %s", (source_name, owner_id))
+            src_bot = cursor.fetchone()
+            if not src_bot:
+                raise ValueError(f"Source bot '{source_name}' not found")
+
+            # ── Guard: new name must not already exist ──────────────────────
+            if owner_id is None:
+                cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id IS NULL", (new_name,))
+            else:
+                cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id = %s", (new_name, owner_id))
+            if cursor.fetchone():
+                raise ValueError(f"A bot named '{new_name}' already exists")
+
+            # ── Insert new bot (disabled so it doesn't fire immediately) ────
+            collection_names = _jsonify(src_bot['collection_names']) if opts['include_basic'] else json.dumps([])
+            default_schedules = _jsonify(src_bot['default_schedules']) if opts['include_basic'] else json.dumps([])
+            min_messages = src_bot['minimum_messages'] if opts['include_basic'] else 5
+            rules = _jsonify(src_bot['rules'], default={'remove': [], 'replace': []}) if opts['include_rules'] else json.dumps({'remove': [], 'replace': []})
+
+            cursor.execute("""
+                INSERT INTO bots (name, enabled, minimum_messages, collection_names, rules, default_schedules, owner_id)
+                VALUES (%s, FALSE, %s, %s, %s, %s, %s) RETURNING id
+            """, (new_name, min_messages, collection_names, rules, default_schedules, owner_id))
+            new_bot_id = cursor.fetchone()['id']
+
+            # ── Copy categories ─────────────────────────────────────────────
+            if opts['include_categories']:
+                cursor.execute("SELECT * FROM categories WHERE bot_id = %s ORDER BY id", (src_bot['id'],))
+                categories = cursor.fetchall()
+
+                for cat in categories:
+                    cursor.execute("""
+                        INSERT INTO categories (bot_id, name, enabled) VALUES (%s, %s, %s) RETURNING id
+                    """, (new_bot_id, cat['name'], cat['enabled']))
+                    new_cat_id = cursor.fetchone()['id']
+
+                    cursor.execute("SELECT * FROM topics WHERE category_id = %s ORDER BY id", (cat['id'],))
+                    topics = cursor.fetchall()
+
+                    for topic in topics:
+                        cursor.execute("""
+                            INSERT INTO topics (category_id, name, enabled, catch_all, linked_topics)
+                            VALUES (%s, %s, %s, %s, %s) RETURNING id
+                        """, (new_cat_id, topic['name'], topic['enabled'],
+                              topic.get('catch_all') or False,
+                              json.dumps(_parse_jsonb_list(topic.get('linked_topics')))))
+                        new_topic_id = cursor.fetchone()['id']
+
+                        # ── Copy schedules ──────────────────────────────────
+                        if opts['include_schedules']:
+                            cursor.execute("SELECT * FROM schedules WHERE topic_id = %s ORDER BY id", (topic['id'],))
+                            for sch in cursor.fetchall():
+                                cursor.execute("""
+                                    INSERT INTO schedules (
+                                        topic_id, name, type, enabled, prompt_key, header,
+                                        header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset,
+                                        minute, hour, hours, minutes, start_hour, start_minute,
+                                        end_hour, end_minute, telegram_targets, wait_time
+                                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                """, (
+                                    new_topic_id, sch.get('name'), sch.get('type'), sch.get('enabled', True),
+                                    sch.get('prompt_key'), sch.get('header'),
+                                    sch.get('header_datetime') or False,
+                                    sch.get('header_date_arabic') or False,
+                                    sch.get('header_time_arabic') or False,
+                                    sch.get('header_datetime_offset') or 0,
+                                    sch.get('minute'), sch.get('hour'), sch.get('hours'), sch.get('minutes'),
+                                    sch.get('start_hour'), sch.get('start_minute'),
+                                    sch.get('end_hour'), sch.get('end_minute'),
+                                    json.dumps(_parse_jsonb_list(sch.get('telegram_targets'))),
+                                    sch.get('wait_time'),
+                                ))
+
+                        # ── Copy keywords (SEOs) ────────────────────────────
+                        if opts['include_seos']:
+                            if owner_id is None:
+                                cursor.execute("""
+                                    SELECT keyword FROM topic_keywords
+                                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL
+                                    ORDER BY id
+                                """, (source_name, cat['name'], topic['name']))
+                            else:
+                                cursor.execute("""
+                                    SELECT keyword FROM topic_keywords
+                                    WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s
+                                    ORDER BY id
+                                """, (source_name, cat['name'], topic['name'], owner_id))
+                            for kw_row in cursor.fetchall():
+                                cursor.execute("""
+                                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                                """, (new_name, cat['name'], topic['name'], kw_row['keyword'], owner_id))
+
+            # ── Copy prompts ────────────────────────────────────────────────
+            if opts['include_prompts']:
+                if owner_id is None:
+                    cursor.execute("""
+                        SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id IS NULL ORDER BY id
+                    """, (source_name,))
+                else:
+                    cursor.execute("""
+                        SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id = %s ORDER BY id
+                    """, (source_name, owner_id))
+                for pr in cursor.fetchall():
+                    cursor.execute("""
+                        INSERT INTO prompts (bot_name, key, text, owner_id) VALUES (%s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (new_name, pr['key'], pr['text'], owner_id))
+
+            self._bump_config_version()
+            return True
         finally:
             self._commit()
 

@@ -1560,6 +1560,8 @@ function _createBotListCard(name, bot) {
                 </div>
             </div>
             <div class="bot-list-right" onclick="event.stopPropagation()">
+                <button class="btn btn-secondary btn-xs" title="Duplicate bot"
+                        onclick="duplicateBot('${jsAttr(name)}')">⧉</button>
                 <label class="toggle-switch toggle-sm">
                     <input type="checkbox" ${bot.enabled ? 'checked' : ''}
                            onchange="toggleBotEnabled('${jsAttr(name)}', this.checked)">
@@ -2457,6 +2459,107 @@ async function deleteBot(botName) {
     }, { title: 'Delete Bot' });
 }
 
+function duplicateBot(sourceName) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'duplicate-bot-modal';
+    modal.innerHTML = `
+        <div class="modal-dialog" style="max-width:480px">
+            <div class="modal-header">
+                <h3>Duplicate Bot</h3>
+                <button class="btn-icon" onclick="closeModal('duplicate-bot-modal')">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted" style="font-size:13px;margin-bottom:14px;">
+                    Creates an independent copy of <strong>${escapeHtml(sourceName)}</strong>. The duplicate starts <strong>disabled</strong>. Choose what to include:
+                </p>
+                <div class="form-group" style="margin-bottom:14px;">
+                    <label class="form-label">New Bot Name</label>
+                    <input type="text" class="input" id="duplicate-bot-input"
+                           value="Copy_of_${escapeHtml(sourceName)}" placeholder="Enter new bot name">
+                </div>
+                <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+                        <input type="checkbox" id="dup-opt-basic" checked>
+                        <span><strong>Basic settings</strong> <span class="text-muted" style="font-size:12px;">(min messages, collections, default schedules)</span></span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+                        <input type="checkbox" id="dup-opt-rules" checked>
+                        <span><strong>Rules</strong> <span class="text-muted" style="font-size:12px;">(remove / replace patterns)</span></span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+                        <input type="checkbox" id="dup-opt-prompts" checked>
+                        <span><strong>Prompts</strong></span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+                        <input type="checkbox" id="dup-opt-cats" checked onchange="_dupToggleCatSubs(this.checked)">
+                        <span><strong>Categories &amp; Topics</strong></span>
+                    </label>
+                    <div id="dup-cat-subs" style="margin-left:24px;display:flex;flex-direction:column;gap:6px;">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+                            <input type="checkbox" id="dup-opt-seos" checked>
+                            <span>Include SEOs (keywords)</span>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+                            <input type="checkbox" id="dup-opt-schedules" checked>
+                            <span>Include Schedules</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('duplicate-bot-modal')">Cancel</button>
+                <button class="btn btn-primary" id="duplicate-bot-submit-btn"
+                        onclick="submitDuplicateBot('${jsAttr(sourceName)}')">⧉ Duplicate</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const inp = document.getElementById('duplicate-bot-input');
+    inp.focus();
+    inp.select();
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') submitDuplicateBot(sourceName); });
+}
+
+function _dupToggleCatSubs(checked) {
+    const subs = document.getElementById('dup-cat-subs');
+    if (subs) subs.style.opacity = checked ? '1' : '0.4';
+    ['dup-opt-seos', 'dup-opt-schedules'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !checked;
+    });
+}
+
+async function submitDuplicateBot(sourceName) {
+    const newName = document.getElementById('duplicate-bot-input')?.value.trim();
+    if (!newName) return;
+
+    const btn = document.getElementById('duplicate-bot-submit-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Duplicating…'; }
+
+    const includeCats = document.getElementById('dup-opt-cats')?.checked ?? true;
+    const options = {
+        include_basic:      document.getElementById('dup-opt-basic')?.checked ?? true,
+        include_rules:      document.getElementById('dup-opt-rules')?.checked ?? true,
+        include_prompts:    document.getElementById('dup-opt-prompts')?.checked ?? true,
+        include_categories: includeCats,
+        include_seos:       includeCats && (document.getElementById('dup-opt-seos')?.checked ?? true),
+        include_schedules:  includeCats && (document.getElementById('dup-opt-schedules')?.checked ?? true),
+    };
+
+    const result = await api('/api/bot/duplicate', { source_name: sourceName, new_name: newName, options });
+
+    if (result.status === 'ok') {
+        closeModal('duplicate-bot-modal');
+        await loadAllData();
+        renderBotsPage();
+        showNotification(`Bot duplicated as "${newName}"`, 'success');
+    } else {
+        if (btn) { btn.disabled = false; btn.textContent = '⧉ Duplicate'; }
+        showNotification('Failed to duplicate: ' + (result.message || 'Unknown error'), 'error');
+    }
+}
+
 // ==================== Default Schedule Management ====================
 function openDefaultScheduleModal(botName) {
     const botPrompts = globalPrompts[botName] || {};
@@ -3267,29 +3370,37 @@ async function saveLinkTopic(botName, categoryName, topicName) {
         return;
     }
 
-    topic.linked_topics.push(linkedTopicName);
-
-    const result = await api('/api/bot/save', { name: botName, ...bot });
-    if (result.status === 'updated') {
+    const updated = [...topic.linked_topics, linkedTopicName];
+    const result = await api('/api/topic/update', {
+        bot_name: botName,
+        category_name: categoryName,
+        topic_name: topicName,
+        linked_topics: updated,
+    });
+    if (result.status === 'ok') {
         await loadAllData();
-        renderBotsPage();
+        const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+        renderBotsPage([topicId, `categories-${botName}`]);
         closeModal('link-topic-modal');
         showNotification('Topic linked', 'success');
     }
 }
 
 async function removeLinkedTopic(botName, categoryName, topicName, index) {
-    const bot = globalConfig.bots[botName];
-    const topic = bot.categories[categoryName].topics[topicName];
+    const topic = globalConfig.bots[botName]?.categories[categoryName]?.topics[topicName];
+    if (!topic?.linked_topics) return;
 
-    if (!topic.linked_topics) return;
-
-    topic.linked_topics.splice(index, 1);
-
-    const result = await api('/api/bot/save', { name: botName, ...bot });
-    if (result.status === 'updated') {
+    const updated = topic.linked_topics.filter((_, i) => i !== index);
+    const result = await api('/api/topic/update', {
+        bot_name: botName,
+        category_name: categoryName,
+        topic_name: topicName,
+        linked_topics: updated,
+    });
+    if (result.status === 'ok') {
         await loadAllData();
-        renderBotsPage();
+        const topicId = `topic-${botName}-${categoryName}-${topicName}`;
+        renderBotsPage([topicId, `categories-${botName}`]);
         showNotification('Topic unlinked', 'success');
     }
 }
@@ -3893,14 +4004,14 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
         const ehM = document.getElementById('topic-schedule-end-hour').value;
         const emM = document.getElementById('topic-schedule-end-minute').value;
-        if (ehM !== '' && emM !== '') { schedule.end_hour = Number(ehM); schedule.end_minute = Number(emM); }
+        if (ehM !== '') { schedule.end_hour = Number(ehM); schedule.end_minute = emM !== '' ? Number(emM) : 0; }
     } else if (type === 'interval_hourly') {
         schedule.hours        = Number(document.getElementById('topic-schedule-hours').value);
         schedule.start_hour   = Number(document.getElementById('topic-schedule-start-hour').value);
         schedule.start_minute = Number(document.getElementById('topic-schedule-start-minute').value);
         const ehI = document.getElementById('topic-schedule-end-hour').value;
         const emI = document.getElementById('topic-schedule-end-minute').value;
-        if (ehI !== '' && emI !== '') { schedule.end_hour = Number(ehI); schedule.end_minute = Number(emI); }
+        if (ehI !== '') { schedule.end_hour = Number(ehI); schedule.end_minute = emI !== '' ? Number(emI) : 0; }
     } else if (type === 'daily') {
         schedule.hour   = Number(document.getElementById('topic-schedule-hour').value);
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
@@ -4241,16 +4352,16 @@ async function saveEditedSchedule(scheduleId) {
         schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
         const ehM = document.getElementById('edit-sch-end-hour').value;
         const emM = document.getElementById('edit-sch-end-minute').value;
-        schedule.end_hour   = (ehM !== '' && emM !== '') ? Number(ehM) : null;
-        schedule.end_minute = (ehM !== '' && emM !== '') ? Number(emM) : null;
+        schedule.end_hour   = ehM !== '' ? Number(ehM) : null;
+        schedule.end_minute = ehM !== '' ? (emM !== '' ? Number(emM) : 0) : null;
     } else if (type === 'interval_hourly') {
         schedule.hours        = Number(document.getElementById('edit-sch-hours').value);
         schedule.start_hour   = Number(document.getElementById('edit-sch-start-hour').value);
         schedule.start_minute = Number(document.getElementById('edit-sch-start-minute').value);
         const ehI = document.getElementById('edit-sch-end-hour').value;
         const emI = document.getElementById('edit-sch-end-minute').value;
-        schedule.end_hour   = (ehI !== '' && emI !== '') ? Number(ehI) : null;
-        schedule.end_minute = (ehI !== '' && emI !== '') ? Number(emI) : null;
+        schedule.end_hour   = ehI !== '' ? Number(ehI) : null;
+        schedule.end_minute = ehI !== '' ? (emI !== '' ? Number(emI) : 0) : null;
     } else if (type === 'daily') {
         schedule.hour   = Number(document.getElementById('edit-sch-hour').value);
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
@@ -7395,22 +7506,22 @@ function _renderInterimsTable() {
     const done    = d.filter(r => r.status === 'done').length;
 
     const rows = d.map(r => {
-        const ts     = _fmtLBN(r.created_at);
-        const sentTs = r.sent_at ? _fmtLBN(r.sent_at) : '—';
         const badge  = r.status === 'pending'
             ? `<span style="background:rgba(245,158,11,.15);color:#f59e0b;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">⏳ Pending</span>`
             : `<span style="background:rgba(16,185,129,.15);color:#10b981;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">✓ Done</span>`;
         const msgsCell = r.message_count
             ? `<span class="mon-msgs-link" onclick="showInterimMessages(${r.id},'${escapeHtmlSys(r.bot_name)}','${escapeHtmlSys(r.topic_name)}')">${r.message_count}</span>`
-            : r.message_count;
+            : (r.message_count ?? '—');
         const preview = escapeHtml(r.preview || '');
+        const schedName = r.schedule_name ? escapeHtml(r.schedule_name) : '<span class="text-muted">—</span>';
+        const numLabel  = `<span style="font-weight:600;color:var(--accent-primary)">#${r.interim_number ?? '?'}</span>`;
         return `<tr>
-            <td style="white-space:nowrap;font-size:11px">${ts}</td>
+            <td style="text-align:center">${numLabel}</td>
             <td>${escapeHtml(r.bot_name)}</td>
             <td>${escapeHtml(r.topic_name)}</td>
+            <td>${schedName}</td>
             <td style="text-align:center">${msgsCell}</td>
             <td>${badge}</td>
-            <td style="white-space:nowrap;font-size:11px">${sentTs}</td>
             <td class="smp-msg-cell" style="max-width:300px" title="${preview}">${preview}</td>
             <td>
                 <button class="btn-icon" title="View full output"
@@ -7428,8 +7539,8 @@ function _renderInterimsTable() {
         <div style="overflow-x:auto">
             <table class="mon-table smp-table">
                 <thead><tr>
-                    <th>Created</th><th>Bot</th><th>Topic</th>
-                    <th>Messages</th><th>Status</th><th>Sent At</th>
+                    <th>#</th><th>Bot</th><th>Topic</th><th>Schedule</th>
+                    <th>Messages</th><th>Status</th>
                     <th>Output Preview</th><th></th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
@@ -7548,9 +7659,10 @@ function _closeInterimMessages() {
 function _showInterimOutput(interimId) {
     const interim = _interimsData.find(r => r.id === interimId);
     if (!interim) return;
-    const ts = _fmtLBN(interim.created_at);
-    showAlert(`<strong>Interim #${interimId} — ${escapeHtml(interim.bot_name)} / ${escapeHtml(interim.topic_name)}</strong><br>
-               <small style="color:var(--text-muted)">${ts} · ${interim.message_count} messages · ${interim.status}</small>
+    const schedPart = interim.schedule_name ? ` · ${escapeHtml(interim.schedule_name)}` : '';
+    const numLabel  = interim.interim_number != null ? `Interim #${interim.interim_number}` : `ID ${interimId}`;
+    showAlert(`<strong>${numLabel} — ${escapeHtml(interim.bot_name)} / ${escapeHtml(interim.topic_name)}${schedPart}</strong><br>
+               <small style="color:var(--text-muted)">${interim.message_count} messages · ${interim.status}</small>
                <hr style="border-color:var(--border-color);margin:8px 0">
                <div style="white-space:pre-wrap;font-size:12.5px;max-height:400px;overflow-y:auto">${escapeHtml(interim.summary_text || '')}</div>`);
 }

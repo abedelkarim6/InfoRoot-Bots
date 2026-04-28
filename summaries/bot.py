@@ -418,10 +418,10 @@ async def generate_and_send_summary(job_data):
         _end_mins   = _end_h_i * 60 + _end_m_i
         _start_mins = _start_h * 60 + _start_m
         if _end_mins >= _start_mins:
-            # Normal window (e.g. 08:00–20:00): dead period is after end time
-            _in_dead = _now_mins > _end_mins
+            # Normal window (e.g. 08:00–20:00): dead if before start OR after end
+            _in_dead = _now_mins > _end_mins or _now_mins < _start_mins
         else:
-            # Overnight window (e.g. 08:00–02:00): dead period is between end and start
+            # Overnight window (e.g. 20:00–02:00): dead period is between end and start
             _in_dead = _end_mins < _now_mins < _start_mins
         if _in_dead:
             logger.info(f"[SKIP] Outside active window {_start_h:02d}:{_start_m:02d}–{_end_h_i:02d}:{_end_m_i:02d} | Bot={bot_name} | Topic={topic_name}")
@@ -430,6 +430,22 @@ async def generate_and_send_summary(job_data):
     try:
         bots_cfg = db.get_all_bots_config()
         bot_cfg = bots_cfg.get(bot_name, {})
+
+        # ── Runtime enabled guard — scheduler rebuild takes ~2s; this closes the race window ──
+        if not bot_cfg.get('enabled', True):
+            logger.info(f"[SKIP] Bot '{bot_name}' is disabled")
+            return
+        category_name = job_data.get('category_name')
+        if category_name:
+            cat_cfg = bot_cfg.get('categories', {}).get(category_name, {})
+            if not cat_cfg.get('enabled', True):
+                logger.info(f"[SKIP] Category '{category_name}' in bot '{bot_name}' is disabled")
+                return
+            topic_cfg = cat_cfg.get('topics', {}).get(topic_name, {})
+            if not topic_cfg.get('enabled', True):
+                logger.info(f"[SKIP] Topic '{topic_name}' in bot '{bot_name}' is disabled")
+                return
+
         min_messages = int(bot_cfg.get('minimum_messages') or 1)
 
         # ── Compute time window ──────────────────────────────────────────────
@@ -846,6 +862,23 @@ def _get_prompt_key_for_topic(bot_name: str, topic_name: str) -> str:
     return 'default'
 
 
+def _get_schedule_name_for_topic(bot_name: str, topic_name: str) -> str | None:
+    """Return the name of the first schedule configured for (bot, topic), or None."""
+    try:
+        bots_cfg = db.get_all_bots_config()
+        bot_cfg = bots_cfg.get(bot_name, {})
+        for cat_data in bot_cfg.get('categories', {}).values():
+            topic_data = cat_data.get('topics', {}).get(topic_name)
+            if topic_data:
+                schedules = topic_data.get('schedules', [])
+                for sch in schedules:
+                    if sch.get('name'):
+                        return sch['name']
+    except Exception:
+        pass
+    return None
+
+
 # One lock per (bot, topic) — prevents concurrent interim runs for the same topic
 _interim_locks: dict = {}
 
@@ -878,14 +911,15 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 if len(messages) < batch_limit:
                     break
 
-                prompt_key = _get_prompt_key_for_topic(bot_name, topic_name)
-                texts = [m['text'] for m in messages]
+                prompt_key    = _get_prompt_key_for_topic(bot_name, topic_name)
+                schedule_name = _get_schedule_name_for_topic(bot_name, topic_name)
+                texts   = [m['text'] for m in messages]
                 msg_ids = [m['id'] for m in messages]
 
                 prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
                 summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
 
-                interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages))
+                interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages), schedule_name=schedule_name)
                 db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name, interim_id=interim_id)
                 logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
         except Exception as e:

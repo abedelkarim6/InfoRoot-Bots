@@ -129,6 +129,34 @@ def delete_bot(request: Request, data: dict = Body(...)):
     return {"status": "error", "message": "Bot not found"}
 
 
+@router.post("/bot/duplicate")
+def duplicate_bot(request: Request, data: dict = Body(...)):
+    source_name = data.get('source_name')
+    new_name    = data.get('new_name')
+    options     = data.get('options')  # optional granular include dict
+
+    if not source_name or not new_name:
+        return {"status": "error", "message": "Missing source_name or new_name"}
+
+    if not new_name.replace('_', '').replace(' ', '').isalnum():
+        return {"status": "error", "message": "Invalid bot name format"}
+
+    if not _can_modify_bot(request, source_name):
+        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+    db = get_db()
+    owner_id = _get_request_owner_id(request)
+
+    try:
+        db.duplicate_bot(source_name, new_name, owner_id=owner_id, options=options)
+        return {"status": "ok", "new_name": new_name}
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=409)
+    except Exception as e:
+        logger.error(f"duplicate_bot failed: {e}", exc_info=True)
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
 @router.post("/bot/rename")
 def rename_bot(request: Request, data: dict = Body(...)):
     old_name = data.get('old_name')
