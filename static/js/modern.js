@@ -7622,7 +7622,7 @@ function _renderInterimsPage() {
     const wrap = document.getElementById('mon-interims-content');
     if (!wrap) return;
 
-    const bots   = [...new Set(_interimsData.map(r => r.bot_name).filter(Boolean))].sort();
+    const bots   = Object.keys(globalConfig.bots || {}).sort();
     const topics = [...new Set(_interimsData.map(r => r.topic_name).filter(Boolean))].sort();
 
     const botOpts   = ['<option value="">All Bots</option>',   ...bots.map(b   => `<option value="${escapeHtmlSys(b)}">${escapeHtmlSys(b)}</option>`)].join('');
@@ -8077,7 +8077,7 @@ async function loadSummaryFailures() {
     // Refresh bot filter dropdown on every load to pick up renamed/new bots
     const botSel = document.getElementById('fail-filter-bot');
     if (botSel) {
-        const bots = [...new Set((data.runs || []).map(r => r.bot_name).filter(Boolean))].sort();
+        const bots = Object.keys(globalConfig.bots || {}).sort();
         _failuresKnownBots = bots;
         // Preserve selection and rebuild options
         const prevVal = botSel.value;
