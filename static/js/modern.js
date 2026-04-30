@@ -5059,28 +5059,18 @@ function getUpcomingFires24h(sch, nowMs) {
         const startMn = sch.start_minute ?? 0;
         const endH    = sch.end_hour;
         const endMn   = sch.end_minute;
-        // If end time is set and now is past today's end time, show no fires
-        const hasEnd = endH != null && endMn != null;
-        if (hasEnd) {
-            const todayEnd = new Date(nowMs);
-            todayEnd.setHours(endH, endMn, 0, 0);
-            if (nowMs >= todayEnd.getTime()) return fires; // window closed for today
-        }
+        const hasEnd  = endH != null && endMn != null;
+        // Use Beirut-timezone-correct end time so comparison is right regardless of browser timezone
+        const todayEndMs = hasEnd ? _beirutDayAt(nowMs, endH, endMn) : null;
+        if (hasEnd && nowMs >= todayEndMs) return fires; // window closed for today
         const maxOffset = hasEnd ? 0 : 1;
         for (let dayOffset = 0; dayOffset <= maxOffset; dayOffset++) {
-            const anchor = new Date(nowMs);
-            anchor.setDate(anchor.getDate() + dayOffset);
-            anchor.setHours(startH, startMn, 0, 0);
-            const anchorMs = anchor.getTime();
+            const anchorMs = _beirutDayAt(nowMs + dayOffset * 86400000, startH, startMn);
             let t = anchorMs <= nowMs
                 ? anchorMs + Math.ceil((nowMs - anchorMs + 1) / intervalMs) * intervalMs
                 : anchorMs;
             while (t < toMs) {
-                if (hasEnd) {
-                    const endDate = new Date(t);
-                    endDate.setHours(endH, endMn, 0, 0);
-                    if (t > endDate.getTime()) break;
-                }
+                if (hasEnd && t > todayEndMs) break;
                 fires.push(t);
                 t += intervalMs;
             }
@@ -5264,16 +5254,41 @@ function startMonitorCountdowns() {
 
 const _BEIRUT_TZ = 'Asia/Beirut';
 
+// Returns UTC ms for the Beirut calendar day of `ms`, at Beirut hour h:minute m.
+// Works correctly regardless of the browser's local timezone.
+function _beirutDayAt(ms, h, m) {
+    const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: _BEIRUT_TZ }).format(new Date(ms));
+    const [year, month, day] = dateStr.split('-').map(Number);
+    // Place h:m directly in UTC on the same calendar date as the Beirut day
+    const roughMs = Date.UTC(year, month - 1, day, h, m, 0);
+    // Find what Beirut time roughMs actually represents
+    const beirutStr = new Intl.DateTimeFormat('en-US', {
+        timeZone: _BEIRUT_TZ, hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(new Date(roughMs));
+    const [bh, bm] = beirutStr.split(':').map(Number);
+    // Compute adjustment; wrap if > 12h to avoid going the wrong direction
+    // (e.g. h=23, bh=2 gives +21h raw but the correct answer is -3h)
+    let diffMs = ((h - bh) * 60 + (m - bm)) * 60000;
+    if (diffMs >  43200000) diffMs -= 86400000; // +12h → subtract day
+    if (diffMs < -43200000) diffMs += 86400000; // -12h → add day
+    return roughMs + diffMs;
+}
+
 function tickCountdowns() {
     // Tick the 24h timeline "In" cells
     const nowMs = Date.now();
+    let needRebuild = false;
     const fireRows = document.querySelectorAll('tr[data-fire-at]');
     for (let i = 0; i < fireRows.length; i++) {
         const row = fireRows[i];
         const cdEl = row.querySelector('.sch-in-cell');
         if (!cdEl) continue;
         const diff = Number(row.dataset.fireAt) - nowMs;
-        if (diff <= 0) {
+        if (diff <= -60000) {
+            // Fire time is more than 60s in the past — remove this row and trigger rebuild
+            row.remove();
+            needRebuild = true;
+        } else if (diff <= 0) {
             cdEl.textContent = 'now';
             cdEl.style.color = 'var(--success,#22c55e)';
         } else {
@@ -5281,6 +5296,7 @@ function tickCountdowns() {
             cdEl.style.color = diff < 300000 ? 'var(--danger)' : 'var(--text-muted)';
         }
     }
+    if (needRebuild) applySchFilters();
 
     // Legacy: tick mon-sch-row countdowns (used by pending-messages detail view)
     const schRows = document.querySelectorAll('[data-schedule]');
