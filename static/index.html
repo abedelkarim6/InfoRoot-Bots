@@ -496,6 +496,10 @@
                 <!-- Schedules tab -->
                 <div id="mon-tab-schedules" class="mon-tab-panel">
                     <div class="mon-filter-bar">
+                        <div class="mon-multi-select" id="sch-filter-bot-wrap" data-onchange="applySchFilters" data-label="All Bots">
+                            <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-bot-wrap')">All Bots <span class="mon-ms-arrow">▾</span></button>
+                            <div class="mon-ms-dropdown" id="sch-filter-bot-dd"></div>
+                        </div>
                         <div class="mon-multi-select" id="sch-filter-topic-wrap" data-onchange="applySchFilters" data-label="All Topics">
                             <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
                             <div class="mon-ms-dropdown" id="sch-filter-topic-dd"></div>

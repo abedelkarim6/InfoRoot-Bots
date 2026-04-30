@@ -979,7 +979,7 @@ async def schedule_summaries():
                         # logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
                         continue
 
-                    schedule_header = schedule.get('header', f"*{schedule_name}*")
+                    schedule_header = schedule.get('header') or f"*{schedule_name}*"
                     header_datetime = schedule.get('header_datetime', False)
 
                     job_id = f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"

@@ -1712,6 +1712,14 @@ function createBasicSettingsSection(botName, bot) {
                 <div class="collapsible-body">
                     ${noCollectionsWarning}
                     <div class="form-group">
+                        <label class="form-label">Bot Name</label>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input type="text" class="input" id="bot-name-input-${botName}" value="${escapeHtml(botName)}" style="flex:1;">
+                            <button class="btn btn-secondary btn-sm" onclick="submitRenameBotInline('${jsAttr(botName)}')">✏️ Rename</button>
+                        </div>
+                        <small class="text-muted">Renaming preserves all settings, categories, topics and schedules.</small>
+                    </div>
+                    <div class="form-group">
                         <label class="form-label">Collections</label>
                         <select class="select" id="collections-select-${botName}"
                                 onchange="addCollectionToBot('${botName}', this.value); this.value='';">
@@ -2447,6 +2455,20 @@ async function submitRenameBot(oldName) {
     }
 }
 
+async function submitRenameBotInline(oldName) {
+    const newName = document.getElementById(`bot-name-input-${oldName}`)?.value.trim();
+    if (!newName || newName === oldName) return;
+    const result = await api('/api/bot/rename', { old_name: oldName, new_name: newName });
+    if (result.status === 'ok') {
+        await loadAllData();
+        renderBotsPage();
+        renderSystemPage();
+        showNotification('Bot renamed', 'success');
+    } else {
+        showNotification('Failed to rename bot: ' + (result.message || ''), 'error');
+    }
+}
+
 async function deleteBot(botName) {
     showConfirm(`Delete bot "${botName}"? This cannot be undone.`, async () => {
         const result = await api('/api/bot/delete', { name: botName });
@@ -2624,6 +2646,14 @@ function openDefaultScheduleModal(botName) {
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals</span>
                     </div>
+                    <div class="form-group" style="margin-top:8px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <label class="form-label" style="margin:0;width:110px;flex-shrink:0;">Time offset</label>
+                            <input type="number" class="input" id="ds-datetime-offset" value="0" style="width:90px;">
+                            <span class="text-muted" style="font-size:12px;">min (+ = later, − = earlier)</span>
+                        </div>
+                        <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Telegram Targets (optional)</label>
@@ -2662,7 +2692,13 @@ function updateDsInputs() {
                 <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at this time, then every X minutes</small>
+            </div>
+            <div class="form-group"><label class="form-label">Ends at (HH : MM) — leave blank for indefinite</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="ds-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="ds-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at start time, then every X minutes within the window</small>
         </div>`;
     } else if (type === 'interval_hourly') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Every X Hours</label>
@@ -2672,7 +2708,13 @@ function updateDsInputs() {
                 <input type="number" class="input" id="ds-start-hour" min="0" max="23" value="0" placeholder="HH" style="width:80px;">
                 <input type="number" class="input" id="ds-start-minute" min="0" max="59" value="0" placeholder="MM" style="width:80px;">
             </div>
-            <small class="text-muted">First run at this time, then every X hours</small>
+            </div>
+            <div class="form-group"><label class="form-label">Ends at (HH : MM) — leave blank for indefinite</label>
+            <div style="display:flex;gap:8px;">
+                <input type="number" class="input" id="ds-end-hour" min="0" max="23" placeholder="HH" style="width:80px;">
+                <input type="number" class="input" id="ds-end-minute" min="0" max="59" placeholder="MM" style="width:80px;">
+            </div>
+            <small class="text-muted">First run at start time, then every X hours within the window</small>
         </div>`;
     } else if (type === 'daily') {
         container.innerHTML = `<div class="form-group"><label class="form-label">Hour</label>
@@ -2701,6 +2743,7 @@ async function saveDefaultSchedule(botName) {
         header_datetime: document.getElementById('ds-header-datetime')?.checked || false,
         header_date_arabic: document.getElementById('ds-date-arabic')?.checked || false,
         header_time_arabic: document.getElementById('ds-time-arabic')?.checked || false,
+        header_datetime_offset: Number(document.getElementById('ds-datetime-offset')?.value || 0),
         telegram_targets: getSchTgTargets('ds'),
     };
 
@@ -2709,11 +2752,17 @@ async function saveDefaultSchedule(botName) {
         ds.minutes = Number(document.getElementById('ds-minutes')?.value || 30);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+        const eh = document.getElementById('ds-end-hour')?.value;
+        const em = document.getElementById('ds-end-minute')?.value;
+        if (eh !== '') { ds.end_hour = Number(eh); ds.end_minute = em !== '' ? Number(em) : 0; }
     }
     if (type === 'interval_hourly') {
         ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+        const eh = document.getElementById('ds-end-hour')?.value;
+        const em = document.getElementById('ds-end-minute')?.value;
+        if (eh !== '') { ds.end_hour = Number(eh); ds.end_minute = em !== '' ? Number(em) : 0; }
     }
     if (type === 'daily') {
         ds.hour = Number(document.getElementById('ds-hour')?.value || 0);
@@ -2814,6 +2863,14 @@ function editDefaultSchedule(botName, idx) {
                         </label>
                         <span class="form-label" style="margin:0;">Time in Arabic numerals</span>
                     </div>
+                    <div class="form-group" style="margin-top:8px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <label class="form-label" style="margin:0;width:110px;flex-shrink:0;">Time offset</label>
+                            <input type="number" class="input" id="ds-datetime-offset" value="0" style="width:90px;">
+                            <span class="text-muted" style="font-size:12px;">min (+ = later, − = earlier)</span>
+                        </div>
+                        <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Telegram Targets (optional)</label>
@@ -2848,6 +2905,10 @@ function editDefaultSchedule(botName, idx) {
         if (sh) sh.value = ds.start_hour ?? 0;
         const sm = document.getElementById('ds-start-minute');
         if (sm) sm.value = ds.start_minute ?? 0;
+        const eh = document.getElementById('ds-end-hour');
+        if (eh && ds.end_hour != null) eh.value = ds.end_hour;
+        const em = document.getElementById('ds-end-minute');
+        if (em && ds.end_minute != null) em.value = ds.end_minute;
     } else if (ds.type === 'interval_hourly') {
         const el = document.getElementById('ds-hours');
         if (el) el.value = ds.hours ?? 3;
@@ -2855,6 +2916,10 @@ function editDefaultSchedule(botName, idx) {
         if (sh) sh.value = ds.start_hour ?? 0;
         const sm = document.getElementById('ds-start-minute');
         if (sm) sm.value = ds.start_minute ?? 0;
+        const eh = document.getElementById('ds-end-hour');
+        if (eh && ds.end_hour != null) eh.value = ds.end_hour;
+        const em = document.getElementById('ds-end-minute');
+        if (em && ds.end_minute != null) em.value = ds.end_minute;
     } else if (ds.type === 'daily') {
         const h = document.getElementById('ds-hour');
         if (h) h.value = ds.hour ?? 18;
@@ -2883,6 +2948,8 @@ function editDefaultSchedule(botName, idx) {
         if (dateAr) dateAr.checked = !!ds.header_date_arabic;
         const timeAr = document.getElementById('ds-time-arabic');
         if (timeAr) timeAr.checked = !!ds.header_time_arabic;
+        const offsetEl = document.getElementById('ds-datetime-offset');
+        if (offsetEl) offsetEl.value = ds.header_datetime_offset ?? 0;
     }
 
     // Pre-fill telegram targets
@@ -2904,6 +2971,7 @@ async function saveEditedDefaultSchedule(botName, idx) {
         header_datetime: document.getElementById('ds-header-datetime')?.checked || false,
         header_date_arabic: document.getElementById('ds-date-arabic')?.checked || false,
         header_time_arabic: document.getElementById('ds-time-arabic')?.checked || false,
+        header_datetime_offset: Number(document.getElementById('ds-datetime-offset')?.value || 0),
         telegram_targets: getSchTgTargets('ds'),
     };
 
@@ -2912,11 +2980,19 @@ async function saveEditedDefaultSchedule(botName, idx) {
         ds.minutes = Number(document.getElementById('ds-minutes')?.value || 30);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+        const eh = document.getElementById('ds-end-hour')?.value;
+        const em = document.getElementById('ds-end-minute')?.value;
+        ds.end_hour   = eh !== '' && eh != null ? Number(eh) : null;
+        ds.end_minute = eh !== '' && eh != null ? (em !== '' ? Number(em) : 0) : null;
     }
     if (type === 'interval_hourly') {
         ds.hours = Number(document.getElementById('ds-hours')?.value || 3);
         ds.start_hour = Number(document.getElementById('ds-start-hour')?.value || 0);
         ds.start_minute = Number(document.getElementById('ds-start-minute')?.value || 0);
+        const eh = document.getElementById('ds-end-hour')?.value;
+        const em = document.getElementById('ds-end-minute')?.value;
+        ds.end_hour   = eh !== '' && eh != null ? Number(eh) : null;
+        ds.end_minute = eh !== '' && eh != null ? (em !== '' ? Number(em) : 0) : null;
     }
     if (type === 'daily') {
         ds.hour = Number(document.getElementById('ds-hour')?.value || 0);
@@ -2956,9 +3032,8 @@ async function updateBotSetting(botName, key, value) {
 
     const result = await api('/api/bot/save', fullBotData);
     if (result.status === 'updated') {
-        // Reload data and update system stats (backend now properly saves all fields)
         await loadAllData();
-        renderSystemPage();
+        renderBotsPage();
         showNotification('Setting updated', 'success');
     } else {
         showNotification('Failed to update setting', 'error');
@@ -3825,6 +3900,20 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
     // Get bot-specific prompts
     const botPrompts = (globalPrompts && globalPrompts[botName]) || {};
 
+    // Build "Load from defaults" picker
+    const defaultSchedules = (globalConfig.bots?.[botName]?.default_schedules || []);
+    const defaultsHtml = defaultSchedules.length ? `
+        <div class="form-group" style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px 14px;">
+            <label class="form-label" style="margin-bottom:6px;">Load from default schedule</label>
+            <div style="display:flex;gap:8px;">
+                <select class="select" id="topic-sch-from-default" style="flex:1;">
+                    <option value="">— pick a default —</option>
+                    ${defaultSchedules.map((ds, i) => `<option value="${i}">${escapeHtml(ds.name || ds.type)}</option>`).join('')}
+                </select>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="applyDefaultScheduleToForm('${jsAttr(botName)}')">Apply</button>
+            </div>
+        </div>` : '';
+
     modal.innerHTML = `
         <div class="modal-dialog">
             <div class="modal-header">
@@ -3832,6 +3921,7 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                 <button class="btn-icon" onclick="closeModal('topic-schedule-modal')">×</button>
             </div>
             <div class="modal-body">
+                ${defaultsHtml}
                 <div class="form-group">
                     <label class="form-label">Schedule Name</label>
                     <input type="text" class="input" id="topic-schedule-name" placeholder="e.g., Hourly Updates">
@@ -3913,6 +4003,61 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
     `;
     
     document.body.appendChild(modal);
+}
+
+function applyDefaultScheduleToForm(botName) {
+    const sel = document.getElementById('topic-sch-from-default');
+    if (!sel || sel.value === '') return;
+    const ds = globalConfig.bots?.[botName]?.default_schedules?.[Number(sel.value)];
+    if (!ds) return;
+
+    // Fill name (replace {topic_name} placeholder with empty for now)
+    const nameEl = document.getElementById('topic-schedule-name');
+    if (nameEl) nameEl.value = (ds.name || '').replace(/\{topic_name\}/g, '');
+
+    // Set type and re-render type inputs
+    const typeEl = document.getElementById('topic-schedule-type');
+    if (typeEl) { typeEl.value = ds.type || 'hourly'; updateTopicScheduleInputs(); }
+
+    // Fill type-specific fields
+    if (ds.type === 'minute' || ds.type === 'hourly') {
+        const m = document.getElementById('topic-schedule-minute'); if (m) m.value = ds.minute ?? 0;
+    } else if (ds.type === 'interval_minutes') {
+        const em = document.getElementById('topic-schedule-minutes'); if (em) em.value = ds.minutes ?? 30;
+        const sh = document.getElementById('topic-schedule-start-hour'); if (sh) sh.value = ds.start_hour ?? 0;
+        const sm = document.getElementById('topic-schedule-start-minute'); if (sm) sm.value = ds.start_minute ?? 0;
+        const eh = document.getElementById('topic-schedule-end-hour'); if (eh && ds.end_hour != null) eh.value = ds.end_hour;
+        const emin = document.getElementById('topic-schedule-end-minute'); if (emin && ds.end_minute != null) emin.value = ds.end_minute;
+    } else if (ds.type === 'interval_hourly') {
+        const hrs = document.getElementById('topic-schedule-hours'); if (hrs) hrs.value = ds.hours ?? 3;
+        const sh = document.getElementById('topic-schedule-start-hour'); if (sh) sh.value = ds.start_hour ?? 0;
+        const sm = document.getElementById('topic-schedule-start-minute'); if (sm) sm.value = ds.start_minute ?? 0;
+        const eh = document.getElementById('topic-schedule-end-hour'); if (eh && ds.end_hour != null) eh.value = ds.end_hour;
+        const emin = document.getElementById('topic-schedule-end-minute'); if (emin && ds.end_minute != null) emin.value = ds.end_minute;
+    } else if (ds.type === 'daily') {
+        const h = document.getElementById('topic-schedule-hour'); if (h) h.value = ds.hour ?? 18;
+        const m = document.getElementById('topic-schedule-minute'); if (m) m.value = ds.minute ?? 0;
+    } else if (ds.type === 'speeches_interval') {
+        const w = document.getElementById('topic-schedule-wait-time'); if (w) w.value = ds.wait_time ?? 5;
+    }
+
+    // Fill header
+    const headerEl = document.getElementById('topic-schedule-header');
+    if (headerEl) headerEl.value = (ds.header || '').replace(/\{topic_name\}/g, '');
+
+    // Fill prompt
+    const promptEl = document.getElementById('topic-schedule-prompt');
+    if (promptEl && ds.prompt_key) promptEl.value = ds.prompt_key;
+
+    // Fill datetime options
+    const dtCheck = document.getElementById('topic-schedule-header-datetime');
+    if (dtCheck) {
+        dtCheck.checked = !!ds.header_datetime;
+        toggleSchDatetimeOptions('topic-schedule');
+        const dateAr = document.getElementById('topic-schedule-date-arabic'); if (dateAr) dateAr.checked = !!ds.header_date_arabic;
+        const timeAr = document.getElementById('topic-schedule-time-arabic'); if (timeAr) timeAr.checked = !!ds.header_time_arabic;
+        const offset = document.getElementById('topic-schedule-datetime-offset'); if (offset) offset.value = ds.header_datetime_offset ?? 0;
+    }
 }
 
 function updateTopicScheduleInputs() {
@@ -4771,10 +4916,12 @@ let _monSchFlat = []; // flat list of {botName, catName, topicName, topicEnabled
 function renderMonitorBots(bots) {
     // Build flat schedule list for filtering/sorting
     _monSchFlat = [];
+    const allBots   = new Set();
     const allTopics = new Set();
     const allPrompts = new Set();
     for (const botName in bots) {
         const botData = bots[botName];
+        allBots.add(botName);
         const cats = botData.categories || {};
         for (const catName in cats) {
             const catData = cats[catName];
@@ -4799,6 +4946,7 @@ function renderMonitorBots(bots) {
         }
     }
 
+    populateMonMultiSelect('sch-filter-bot-wrap',    [...allBots].sort());
     populateMonMultiSelect('sch-filter-topic-wrap',  [...allTopics].sort());
     populateMonMultiSelect('sch-filter-prompt-wrap', [...allPrompts].sort());
     applySchFilters();
@@ -4911,7 +5059,15 @@ function getUpcomingFires24h(sch, nowMs) {
         const startMn = sch.start_minute ?? 0;
         const endH    = sch.end_hour;
         const endMn   = sch.end_minute;
-        for (let dayOffset = 0; dayOffset <= 1; dayOffset++) {
+        // If end time is set and now is past today's end time, show no fires
+        const hasEnd = endH != null && endMn != null;
+        if (hasEnd) {
+            const todayEnd = new Date(nowMs);
+            todayEnd.setHours(endH, endMn, 0, 0);
+            if (nowMs >= todayEnd.getTime()) return fires; // window closed for today
+        }
+        const maxOffset = hasEnd ? 0 : 1;
+        for (let dayOffset = 0; dayOffset <= maxOffset; dayOffset++) {
             const anchor = new Date(nowMs);
             anchor.setDate(anchor.getDate() + dayOffset);
             anchor.setHours(startH, startMn, 0, 0);
@@ -4920,7 +5076,7 @@ function getUpcomingFires24h(sch, nowMs) {
                 ? anchorMs + Math.ceil((nowMs - anchorMs + 1) / intervalMs) * intervalMs
                 : anchorMs;
             while (t < toMs) {
-                if (endH != null && endMn != null) {
+                if (hasEnd) {
                     const endDate = new Date(t);
                     endDate.setHours(endH, endMn, 0, 0);
                     if (t > endDate.getTime()) break;
@@ -4943,7 +5099,9 @@ function applySchFilters() {
     const selTopics  = getMonMsValues('sch-filter-topic-wrap');
     const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
 
-    let items = _monSchFlat.filter(r => r.sch.enabled !== false);
+    const selBots = getMonMsValues('sch-filter-bot-wrap');
+    let items = _monSchFlat.filter(r => r.botEnabled !== false && r.topicEnabled !== false && r.sch.enabled !== false);
+    if (selBots.size   > 0) items = items.filter(r => selBots.has(r.botName));
     if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
     if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
 
@@ -6532,9 +6690,11 @@ function _doExport(tabName, selectedKeys) {
         }));
     } else if (tabName === 'schedules_24h') {
         const nowMs = Date.now();
+        const selBots2   = getMonMsValues('sch-filter-bot-wrap');
         const selTopics  = getMonMsValues('sch-filter-topic-wrap');
         const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
-        let items = _monSchFlat.filter(r => r.sch.enabled !== false);
+        let items = _monSchFlat.filter(r => r.botEnabled !== false && r.topicEnabled !== false && r.sch.enabled !== false);
+        if (selBots2.size  > 0) items = items.filter(r => selBots2.has(r.botName));
         if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
         if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
         const fires = [];
@@ -7898,17 +8058,20 @@ async function loadSummaryFailures() {
         });
     }
 
-    // Populate bot filter dropdown (once per page load)
+    // Refresh bot filter dropdown on every load to pick up renamed/new bots
     const botSel = document.getElementById('fail-filter-bot');
-    if (botSel && _failuresKnownBots.length === 0) {
+    if (botSel) {
         const bots = [...new Set((data.runs || []).map(r => r.bot_name).filter(Boolean))].sort();
         _failuresKnownBots = bots;
+        // Preserve selection and rebuild options
+        const prevVal = botSel.value;
+        while (botSel.options.length > 1) botSel.remove(1);
         bots.forEach(b => {
             const opt = document.createElement('option');
             opt.value = b; opt.textContent = b;
             botSel.appendChild(opt);
         });
-        if (botFilter) botSel.value = botFilter;
+        botSel.value = botFilter || prevVal;
     }
 
     // Update badge

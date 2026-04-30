@@ -720,7 +720,7 @@ class SummariesDB(Database):
             """Returns messages that were not classified into any topic."""
             cursor = self._get_cursor()
             clauses = ["collection_name IS NOT NULL AND collection_name != ''",
-                       "(topics IS NULL OR topics = '')"]
+                       "(keywords_found IS NULL OR keywords_found = '')"]
             params = []
             if allowed_bot_names is not None:
                 clauses.append("bot_name = ANY(%s)")
@@ -760,7 +760,7 @@ class SummariesDB(Database):
         try:
             """Return counts for unclassified messages grouped by bot and collection."""
             cursor = self._get_cursor()
-            where = "collection_name IS NOT NULL AND collection_name != '' AND (topics IS NULL OR topics = '')"
+            where = "collection_name IS NOT NULL AND collection_name != '' AND (keywords_found IS NULL OR keywords_found = '')"
             params = []
             if allowed_bot_names is not None:
                 where += " AND bot_name = ANY(%s)"
