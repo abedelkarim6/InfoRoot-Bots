@@ -60,24 +60,36 @@ def get_fixed_prefix() -> str:
         return _DEFAULT_FIXED_PREFIX
 
 
-def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_name: str = '') -> str:
+_DEFAULT_BULLET_POINTS_SUFFIX = (
+    "---\n"
+    "يجب أن يحتوي الملخص النهائي على {b} نقاط رئيسية حصراً، لا أكثر ولا أقل.\n"
+    "اكتب كل نقطة في سطر مستقل مبدوءًا بـ •"
+)
+
+
+def get_bullet_points_suffix(b: int) -> str:
+    """Returns the admin-enforced bullet points instruction appended after the user prompt."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        tmpl = cfg.get("system_prompts", {}).get("bullet_points_suffix", "") or _DEFAULT_BULLET_POINTS_SUFFIX
+    except Exception:
+        tmpl = _DEFAULT_BULLET_POINTS_SUFFIX
+    return tmpl.replace('{b}', str(b))
+
+
+def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str,
+                       topic_name: str = '', final_interim: str = '',
+                       b: int = 0) -> str:
     """
     Injects news messages into bot-specific prompt templates.
 
-    The final prompt is:
-      [fixed Arabic scope prefix with topic_name + messages injected]
-      ---
-      User Prompt:
-      [user-defined template rendered with topic_name]
+    Supported placeholders (usable in the fixed prefix and/or user prompt template):
+      {messages}      — the joined raw message texts
+      {topic_name}    — the topic being summarized
+      {final_interim} — the most recent rolling interim summary (empty string if none)
 
-    Args:
-        texts: List of message texts to summarize
-        bot_name: Name of the bot (e.g., 'news_bot')
-        prompt_key: Prompt template key (e.g., 'bullet_points', 'brief')
-        topic_name: Name of the topic being summarized
-
-    Returns:
-        Final prompt with messages injected
+    If {final_interim} is not present in a template it is simply ignored.
     """
     combined_news = "\n---\n".join(texts)
 
@@ -104,16 +116,16 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str, topic_n
 
     fmt = string.Formatter()
 
+    subs = _SafeDict(
+        messages=combined_news,
+        topic_name=topic_name,
+        final_interim=final_interim,
+        b=str(b) if b else '',
+    )
+
     active_prefix = get_fixed_prefix()
 
-    # Render fixed prefix (injects {topic_name} and {messages})
-    prefix = fmt.vformat(
-        active_prefix, (), _SafeDict(messages=combined_news, topic_name=topic_name)
-    )
-
-    # Render user prompt (only {topic_name} is meaningful here; {messages} already in prefix)
-    user_part = fmt.vformat(
-        template, (), _SafeDict(messages=combined_news, topic_name=topic_name)
-    )
+    prefix    = fmt.vformat(active_prefix, (), subs)
+    user_part = fmt.vformat(template, (), subs)
 
     return prefix + user_part

@@ -18,7 +18,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 from utils.database import get_db
 from utils.openai_client import OpenAIClient
 from utils.gemini_client import GeminiClient
-from summaries.prompts import get_summary_prompt
+from summaries.prompts import get_summary_prompt, get_bullet_points_suffix
 from utils.helpers import load_config, setup_logging, categorizer
 
 import datetime
@@ -400,6 +400,8 @@ async def generate_and_send_summary(job_data):
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
     prompt_key = job_data.get('prompt_key')
+    bullet_points = bool(job_data.get('bullet_points', False))
+    b = int(job_data.get('bullet_points_count') or 0) if bullet_points else 0
 
     if not all([schedule_type, bot_name, topic_name, prompt_key]):
         logger.error(f"Missing required job data: {job_data}")
@@ -472,36 +474,88 @@ async def generate_and_send_summary(job_data):
             logger.info(f"[SKIP] Not enough messages ({total_msg_count}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
             return
 
-        # ── Build final summary — batch in groups of 25 if needed ────────────
-        all_ids   = [m['id']   for m in all_msgs]
-        all_texts = [m['text'] for m in all_msgs]
+        # ── Split messages: interim-covered vs. remaining raw ───────────────
+        all_ids = [m['id'] for m in all_msgs]
+        interim_id_map = db.get_interim_ids_for_messages(all_ids)  # {msg_id: interim_id}
+
+        # Collect interim IDs in the order their first message appears
+        seen_interim_ids: set = set()
+        ordered_interim_ids: list = []
+        for mid in all_ids:
+            if mid in interim_id_map:
+                iid = interim_id_map[mid]
+                if iid not in seen_interim_ids:
+                    seen_interim_ids.add(iid)
+                    ordered_interim_ids.append(iid)
+
+        remaining_msgs = [m for m in all_msgs if m['id'] not in interim_id_map]
 
         BATCH = 25
         total_tokens = 0
-        if len(all_texts) <= BATCH:
-            prompt = get_summary_prompt(all_texts, bot_name, prompt_key, topic_name=topic_name)
-            summary_text, tk = await _run_with_retry(llm_client.generate_summary, prompt)
-            total_tokens += tk
-        else:
-            # Summarize each 25-message chunk, then merge
-            partial_summaries = []
-            for i in range(0, len(all_texts), BATCH):
-                chunk = all_texts[i:i + BATCH]
-                p = get_summary_prompt(chunk, bot_name, prompt_key, topic_name=topic_name)
-                s, tk = await _run_with_retry(llm_client.generate_summary, p)
-                total_tokens += tk
-                partial_summaries.append(s)
+        parts = []  # summary texts to merge into the final output
 
-            if len(partial_summaries) == 1:
-                summary_text = partial_summaries[0]
+        # Use only the LAST interim — it already contains all previous interims rolled up
+        last_interim_text = ''
+        if ordered_interim_ids:
+            last_interims = db.get_interims_by_ids([ordered_interim_ids[-1]])
+            if last_interims:
+                last_interim_text = (last_interims[0].get('summary_text') or '').strip()
+                if last_interim_text:
+                    parts.append(last_interim_text)
+
+        # Directly summarize any remaining (not yet interim-covered) messages
+        if remaining_msgs:
+            rem_texts = [m['text'] for m in remaining_msgs]
+            if len(rem_texts) <= BATCH:
+                rem_prompt = get_summary_prompt(rem_texts, bot_name, prompt_key,
+                                                topic_name=topic_name, final_interim=last_interim_text,
+                                                b=b)
+                if bullet_points and b:
+                    rem_prompt += '\n\n' + get_bullet_points_suffix(b)
+                rem_text, tk = await _run_with_retry(llm_client.generate_summary, rem_prompt)
+                total_tokens += tk
+                if rem_text.strip():
+                    parts.append(rem_text.strip())
             else:
-                merge_prompt = (
-                    "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
-                    "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                    + "\n---\n".join(partial_summaries)
-                )
-                summary_text, merge_tk = await _run_with_retry(llm_client.generate_summary, merge_prompt)
-                total_tokens += merge_tk
+                partials = []
+                for i in range(0, len(rem_texts), BATCH):
+                    chunk = rem_texts[i:i + BATCH]
+                    p = get_summary_prompt(chunk, bot_name, prompt_key,
+                                          topic_name=topic_name, final_interim=last_interim_text,
+                                          b=b)
+                    if bullet_points and b:
+                        p += '\n\n' + get_bullet_points_suffix(b)
+                    s, tk = await _run_with_retry(llm_client.generate_summary, p)
+                    total_tokens += tk
+                    if s.strip():
+                        partials.append(s.strip())
+                if len(partials) == 1:
+                    parts.append(partials[0])
+                elif len(partials) > 1:
+                    merge_rem = (
+                        "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
+                        "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+                        + "\n---\n".join(partials)
+                    )
+                    rem_merged, mk = await _run_with_retry(llm_client.generate_summary, merge_rem)
+                    total_tokens += mk
+                    if rem_merged.strip():
+                        parts.append(rem_merged.strip())
+
+        # Merge all parts into one final summary
+        if not parts:
+            logger.warning(f"[SKIP] All summary parts empty | Bot={bot_name} | Topic={topic_name}")
+            return
+        elif len(parts) == 1:
+            summary_text = parts[0]
+        else:
+            merge_prompt = (
+                "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
+                "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+                + "\n---\n".join(parts)
+            )
+            summary_text, merge_tk = await _run_with_retry(llm_client.generate_summary, merge_prompt)
+            total_tokens += merge_tk
 
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)} | tokens={total_tokens}")
 
@@ -571,6 +625,8 @@ async def generate_and_send_summary(job_data):
 
         # ── Mark all messages as consumed for this schedule type ─────────────
         db.mark_as_summarized(all_ids, schedule_type, bot_name, topic_name)
+        if ordered_interim_ids:
+            db.mark_interim_summaries_sent(ordered_interim_ids)
         db.log_schedule_run(bot_name=bot_name, topic_name=topic_name,
                             schedule_type=schedule_type, status='success',
                             message_count=total_msg_count)
@@ -892,16 +948,23 @@ def _get_interim_lock(bot_name: str, topic_name: str) -> asyncio.Lock:
 async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     """
     Called after every message save.
-    If ≥ 10 unsummarized messages exist for (bot, topic), summarize exactly 10
-    and store the result as an interim summary. Loops until count drops below 10.
-    A per-topic lock prevents concurrent tasks from firing duplicate API calls.
+    Batch size is auto-derived from the topic's schedule: 26 − B for bullet-points schedules,
+    20 for non-bullet-points schedules. A per-topic lock prevents concurrent duplicate calls.
     """
     lock = _get_interim_lock(bot_name, topic_name)
     if lock.locked():
         return  # another task is already processing this topic — skip
     async with lock:
         try:
-            batch_limit = db.get_interim_batch_limit()
+            schedules = db.get_schedules_for_topic(bot_name, topic_name)
+            bp_sch = next((s for s in schedules if s.get('bullet_points')), None)
+            if bp_sch:
+                b_count = int(bp_sch.get('bullet_points_count') or 10)
+                batch_limit = max(1, 26 - b_count)
+            elif schedules:
+                batch_limit = 20
+            else:
+                batch_limit = 20
             while True:
                 count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
                 if count < batch_limit:
@@ -916,7 +979,22 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 texts   = [m['text'] for m in messages]
                 msg_ids = [m['id'] for m in messages]
 
-                prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+                # Rolling cumulative: merge previous interim output + new messages
+                prev_interim = db.get_latest_interim(bot_name, topic_name)
+                prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
+
+                if prev_text:
+                    prompt = (
+                        "فيما يلي ملخص سابق يغطي الأخبار السابقة:\n\n"
+                        + prev_text
+                        + "\n\n---\n\n"
+                        "يرجى تحديث هذا الملخص بإضافة الأخبار الجديدة التالية وإنتاج ملخص واحد متكامل "
+                        "ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
+                        + "\n---\n".join(texts)
+                    )
+                else:
+                    prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+
                 summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
 
                 interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages), schedule_name=schedule_name)
@@ -1007,6 +1085,8 @@ async def schedule_summaries():
                         # speeches_interval specific
                         'sch_wait_time':    schedule.get('wait_time', 5),
                         'job_id':           job_id,
+                        'bullet_points':       schedule.get('bullet_points', False),
+                        'bullet_points_count': schedule.get('bullet_points_count', 0),
                     }
 
                     try:

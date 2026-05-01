@@ -59,6 +59,32 @@ def _resolve_allowed_bots(db, user_id) -> list | None:
         return []  # fail safe — no access rather than full access
 
 
+def _summarize_tool_result(result_str: str) -> str:
+    """Return a short human-readable summary of a tool's JSON result, or '' to skip."""
+    if not result_str:
+        return ''
+    try:
+        import json
+        data = json.loads(result_str)
+        # search_*_by_text → {search_terms_used, results}
+        if isinstance(data, dict) and 'results' in data:
+            n = len(data['results'])
+            terms = data.get('search_terms_used', [])
+            if terms:
+                return f"searched {len(terms)} terms → {n} result{'s' if n != 1 else ''}"
+            return f"{n} result{'s' if n != 1 else ''} found"
+        # list result (get_recent_summaries, get_recent_messages, etc.)
+        if isinstance(data, list):
+            n = len(data)
+            return f"{n} item{'s' if n != 1 else ''} returned"
+        # dict with error
+        if isinstance(data, dict) and 'error' in data:
+            return f"error: {str(data['error'])[:60]}"
+    except Exception:
+        pass
+    return ''
+
+
 def _build_team(db, yt_db, allowed_bot_names=None):
     """Construct an Agno Team with specialized agents."""
     project, location, model_id = _load_gemini_config()
@@ -239,16 +265,25 @@ async def stream_message(session_id: str, message: str, context: dict = None):
                 tool_args = (getattr(tool, 'tool_args', {}) or {}) if tool else {}
                 target = tool_args.get('agent_name') or tool_args.get('member_name') or ''
                 label = f"→ {target}" if target else "→ Routing to agent"
+                yield _sse('step', {'kind': 'routing', 'icon': '→', 'label': label})
             elif agent_name:
                 label = f"{agent_name}: {tool_name.replace('_', ' ')}"
+                yield _sse('step', {'kind': 'tool', 'icon': '🔧', 'label': label})
             else:
                 label = tool_name.replace('_', ' ') or evt_str
-            yield _sse('step', {'icon': '🔧', 'label': label})
+                yield _sse('step', {'kind': 'tool', 'icon': '🔧', 'label': label})
+
+        elif 'ToolCallCompleted' in evt_str:
+            tool = getattr(item, 'tool', None)
+            result_str = (getattr(tool, 'result', '') or '') if tool else ''
+            summary = _summarize_tool_result(result_str)
+            if summary:
+                yield _sse('step', {'kind': 'tool_result', 'icon': '✓', 'label': summary})
 
         elif 'ReasoningStep' in evt_str:
             rc = getattr(item, 'reasoning_content', '') or ''
             if rc:
-                yield _sse('step', {'icon': '💭', 'label': rc[:120]})
+                yield _sse('step', {'kind': 'reasoning', 'icon': '💭', 'label': rc[:400]})
 
         elif evt_str.endswith('RunContent') and 'Intermediate' not in evt_str:
             chunk = getattr(item, 'content', '') or ''

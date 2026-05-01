@@ -322,6 +322,71 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    def get_latest_interim(self, bot_name: str, topic_name: str):
+        """Return the most recent interim summary for (bot, topic), or None."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT * FROM topic_interim_summaries
+                   WHERE bot_name = %s AND topic_name = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (bot_name, topic_name)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            self._commit()
+
+    def get_interim_ids_for_messages(self, message_ids: list) -> dict:
+        """Return {message_id: interim_id} for messages that have an interim record."""
+        if not message_ids:
+            return {}
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT message_id, interim_id
+                   FROM message_summarizations
+                   WHERE schedule_type = 'interim'
+                     AND interim_id IS NOT NULL
+                     AND message_id = ANY(%s)""",
+                (message_ids,)
+            )
+            return {row['message_id']: row['interim_id'] for row in cursor.fetchall()}
+        finally:
+            self._commit()
+
+    def get_interims_by_ids(self, interim_ids: list) -> list:
+        """Return interim summaries for the given IDs, ordered by id ASC."""
+        if not interim_ids:
+            return []
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT id, bot_name, topic_name, summary_text, message_count,
+                          schedule_name, created_at, sent_at,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY bot_name, topic_name
+                              ORDER BY id ASC
+                          ) AS interim_number
+                   FROM topic_interim_summaries
+                   WHERE id = ANY(%s)
+                   ORDER BY id ASC""",
+                (interim_ids,)
+            )
+            rows = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['status']  = 'pending' if d['sent_at'] is None else 'done'
+                d['preview'] = (d.get('summary_text') or '')[:250]
+                if d['created_at']:
+                    d['created_at'] = d['created_at'].isoformat()
+                if d['sent_at']:
+                    d['sent_at'] = d['sent_at'].isoformat()
+                rows.append(d)
+            return rows
+        finally:
+            self._commit()
+
     def get_interims(self, bot_name: str = None, topic_name: str = None, limit: int = 300) -> list:
         """Return recent interim summaries, newest first, with optional filters.
         interim_number is the sequential index per (bot_name, topic_name) ordered oldest-first."""
@@ -381,18 +446,6 @@ class SummariesDB(Database):
             return result
         finally:
             self._commit()
-
-    def get_interim_batch_limit(self) -> int:
-        """Return the configured messages-per-interim batch size (default 10)."""
-        val = self.get_setting('interim_batch_limit')
-        try:
-            return int(val) if val is not None else 10
-        except (TypeError, ValueError):
-            return 10
-
-    def set_interim_batch_limit(self, limit: int):
-        """Persist the messages-per-interim batch size."""
-        self.set_setting('interim_batch_limit', limit)
 
     def get_old_unsummarized_messages(self, before_dt) -> list:
         """Return all messages older than before_dt that have no interim tracking record."""
@@ -1656,6 +1709,8 @@ class SummariesDB(Database):
                         'header_time_arabic': s.get('header_time_arabic') or False,
                         'header_datetime_offset': s.get('header_datetime_offset') or 0,
                         'telegram_targets': _parse_jsonb_list(s.get('telegram_targets')),
+                        'bullet_points': bool(s.get('bullet_points')),
+                        'bullet_points_count': int(s.get('bullet_points_count') or 0),
                     }
                     if s['minute'] is not None:
                         sch['minute'] = s['minute']
@@ -2381,8 +2436,9 @@ class SummariesDB(Database):
                 INSERT INTO schedules (topic_id, name, type, enabled, prompt_key, header, header_datetime,
                                        header_date_arabic, header_time_arabic, header_datetime_offset,
                                        minute, hour, hours, minutes, start_hour, start_minute,
-                                       telegram_targets, wait_time, end_hour, end_minute)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                       telegram_targets, wait_time, end_hour, end_minute,
+                                       bullet_points, bullet_points_count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 topic_id,
@@ -2405,6 +2461,8 @@ class SummariesDB(Database):
                 schedule.get('wait_time'),
                 schedule.get('end_hour'),
                 schedule.get('end_minute'),
+                bool(schedule.get('bullet_points', False)),
+                int(schedule.get('bullet_points_count') or 0),
             ))
             row = cursor.fetchone()
             self._bump_config_version()
@@ -2419,7 +2477,8 @@ class SummariesDB(Database):
                        'header_datetime_offset',
                        'minute', 'hour', 'hours', 'minutes',
                        'start_hour', 'start_minute', 'telegram_targets', 'wait_time',
-                       'end_hour', 'end_minute'}
+                       'end_hour', 'end_minute',
+                       'bullet_points', 'bullet_points_count'}
             fields = {k: v for k, v in schedule.items() if k in allowed}
             if not fields:
                 return False
@@ -2433,6 +2492,22 @@ class SummariesDB(Database):
             if updated:
                 self._bump_config_version()
             return updated
+        finally:
+            self._commit()
+
+    def get_schedules_for_topic(self, bot_name: str, topic_name: str) -> list:
+        """Return all enabled schedules for a (bot, topic) pair, ordered by id."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT s.* FROM schedules s
+                JOIN topics t ON s.topic_id = t.id
+                JOIN categories c ON t.category_id = c.id
+                JOIN bots b ON c.bot_id = b.id
+                WHERE b.name = %s AND t.name = %s AND s.enabled = TRUE
+                ORDER BY s.id ASC
+            """, (bot_name, topic_name))
+            return [dict(r) for r in cursor.fetchall()]
         finally:
             self._commit()
 
@@ -2659,6 +2734,82 @@ class SummariesDB(Database):
                     })
 
             return warnings
+        finally:
+            self._commit()
+
+    def search_messages_by_text(self, query: str, days: int = 7, limit: int = 50,
+                                allowed_bot_names: list = None):
+        try:
+            """ILIKE search on raw message text content within a date range."""
+            cursor = self._get_cursor()
+            clauses = [
+                "collection_name IS NOT NULL AND collection_name != ''",
+                "text ILIKE %s",
+            ]
+            params = [f"%{query}%"]
+            if allowed_bot_names is not None:
+                clauses.append("bot_name = ANY(%s)")
+                params.append(allowed_bot_names)
+            if days:
+                clauses.append("timestamp >= NOW() - (%s * INTERVAL '1 day')")
+                params.append(days)
+            limit = min(limit, 100)
+            params.append(limit)
+            where = " AND ".join(clauses)
+            cursor.execute(f"""
+                SELECT id, channel_id, channel_username, collection_name, bot_name,
+                       topics, categories, keywords_found, timestamp, text
+                FROM messages
+                WHERE {where}
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, tuple(params))
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                txt = d.pop('text', '') or ''
+                d['preview'] = txt[:300]
+                if d['timestamp']:
+                    d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
+        finally:
+            self._commit()
+
+    def search_summaries_by_text(self, query: str, days: int = 7, limit: int = 20,
+                                  allowed_bot_names: list = None):
+        try:
+            """ILIKE search on summary_text content within a date range."""
+            from datetime import datetime, timedelta
+            cursor = self._get_cursor()
+            conditions = ["summary_text ILIKE %s"]
+            params = [f"%{query}%"]
+            if allowed_bot_names is not None:
+                conditions.append("bot_name = ANY(%s)")
+                params.append(allowed_bot_names)
+            if days:
+                conditions.append("timestamp >= %s")
+                params.append(datetime.now() - timedelta(days=days))
+            limit = min(limit, 50)
+            params.append(limit)
+            where = "WHERE " + " AND ".join(conditions)
+            cursor.execute(f"""
+                SELECT id, bot_name, topic_name, summary_type, target_entity,
+                       message_count, timestamp, summary_text
+                FROM summaries
+                {where}
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, tuple(params))
+            result = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                txt = d.pop('summary_text', '') or ''
+                d['preview'] = txt[:400]
+                if d['timestamp']:
+                    d['timestamp'] = d['timestamp'].isoformat()
+                result.append(d)
+            return result
         finally:
             self._commit()
 

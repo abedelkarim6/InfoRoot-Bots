@@ -130,6 +130,61 @@ def get_summary_messages(request: Request, id: int = Query(...)):
         db._commit()
 
 
+@router.get("/monitor/summary-composition")
+def get_summary_composition(request: Request, id: int = Query(...)):
+    """Return the interims and remaining messages that make up a summary."""
+    db = get_db()
+    try:
+        cursor = db._get_cursor()
+        allowed_bots = _get_allowed_bots(request)
+        if allowed_bots is not None:
+            cursor.execute("SELECT message_ids, bot_name FROM summaries WHERE id = %s", (id,))
+            row = cursor.fetchone()
+            if not row:
+                return {'status': 'ok', 'interims': [], 'remaining_messages': []}
+            if row['bot_name'] not in allowed_bots:
+                return {'status': 'error', 'message': 'Access denied'}, 403
+        else:
+            cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
+            row = cursor.fetchone()
+            if not row:
+                return {'status': 'ok', 'interims': [], 'remaining_messages': []}
+        if not row['message_ids']:
+            return {'status': 'ok', 'interims': [], 'remaining_messages': []}
+        ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+    finally:
+        db._commit()
+
+    try:
+        interim_id_map = db.get_interim_ids_for_messages(ids)
+
+        seen: set = set()
+        ordered_interim_ids: list = []
+        for mid in ids:
+            if mid in interim_id_map:
+                iid = interim_id_map[mid]
+                if iid not in seen:
+                    seen.add(iid)
+                    ordered_interim_ids.append(iid)
+
+        interims = db.get_interims_by_ids(ordered_interim_ids)
+        for interim in interims:
+            interim['messages'] = db.get_interim_messages(interim['id'])
+
+        remaining_ids = [mid for mid in ids if mid not in interim_id_map]
+        remaining_messages = db.get_messages_by_ids(remaining_ids) if remaining_ids else []
+
+        return {
+            'status': 'ok',
+            'interims': interims,
+            'remaining_messages': remaining_messages,
+        }
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get("/monitor/messages")
 def get_monitor_messages(
     request: Request,
@@ -348,28 +403,6 @@ def get_interim_messages(request: Request, id: int = Query(...)):
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
-
-
-@router.get("/monitor/interim-settings")
-def get_interim_settings(request: Request):
-    if not is_admin_request(request):
-        from starlette.responses import JSONResponse
-        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
-    db = get_db()
-    return {'status': 'ok', 'batch_limit': db.get_interim_batch_limit()}
-
-
-@router.post("/monitor/interim-settings")
-def set_interim_settings(request: Request, data: dict = Body(...)):
-    if not is_admin_request(request):
-        from starlette.responses import JSONResponse
-        return JSONResponse({'status': 'error', 'message': 'Access denied'}, status_code=403)
-    limit = data.get('batch_limit')
-    if not isinstance(limit, int) or limit < 1 or limit > 500:
-        return {'status': 'error', 'message': 'batch_limit must be an integer between 1 and 500'}
-    db = get_db()
-    db.set_interim_batch_limit(limit)
-    return {'status': 'ok'}
 
 
 @router.get("/dashboard/stats")

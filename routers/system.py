@@ -74,13 +74,19 @@ def get_summaries_fixed_prefix(request: Request):
     """Return the active summaries system prompt and fixed prefix (admin only)."""
     if not is_admin_request(request):
         return {"status": "error", "message": "Admin only"}
-    from summaries.prompts import get_system_prompt, get_fixed_prefix, _DEFAULT_SYSTEM_PROMPT, _DEFAULT_FIXED_PREFIX
+    from summaries.prompts import (get_system_prompt, get_fixed_prefix, get_bullet_points_suffix,
+                                    _DEFAULT_SYSTEM_PROMPT, _DEFAULT_FIXED_PREFIX, _DEFAULT_BULLET_POINTS_SUFFIX)
+    from utils.helpers import load_config
+    cfg = load_config()
+    active_bp_suffix = cfg.get("system_prompts", {}).get("bullet_points_suffix", "") or _DEFAULT_BULLET_POINTS_SUFFIX
     return {
         "status": "ok",
         "system_prompt": get_system_prompt(),
         "fixed_prefix": get_fixed_prefix(),
+        "bullet_points_suffix": active_bp_suffix,
         "default_system_prompt": _DEFAULT_SYSTEM_PROMPT,
         "default_fixed_prefix": _DEFAULT_FIXED_PREFIX,
+        "default_bullet_points_suffix": _DEFAULT_BULLET_POINTS_SUFFIX,
     }
 
 
@@ -99,6 +105,8 @@ async def save_summaries_fixed_prefix(request: Request):
         cfg["system_prompts"]["summaries_system"] = data["system_prompt"]
     if "fixed_prefix" in data:
         cfg["system_prompts"]["summaries_prefix"] = data["fixed_prefix"]
+    if "bullet_points_suffix" in data:
+        cfg["system_prompts"]["bullet_points_suffix"] = data["bullet_points_suffix"]
     with open("config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     return {"status": "ok"}

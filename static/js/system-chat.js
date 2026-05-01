@@ -301,7 +301,8 @@ function _sysChatSkeletonHTML() {
 
 function _sysChatFormatText(text) {
     if (!text) return '';
-    return marked.parse(text, { gfm: true, breaks: true });
+    const normalized = text.replace(/\n{3,}/g, '\n\n');
+    return marked.parse(normalized, { gfm: true, breaks: false });
 }
 
 

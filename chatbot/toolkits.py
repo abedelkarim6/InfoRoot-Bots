@@ -12,6 +12,47 @@ from agno.tools import Toolkit
 logger = logging.getLogger(__name__)
 
 
+def _expand_search_terms(question: str) -> list[str]:
+    """Call Gemini flash-lite to expand a question into Arabic/English search keywords.
+
+    Returns a list of 4-5 short terms. Falls back to [question] on any error so
+    the caller always gets at least one term to search with.
+    """
+    try:
+        import google.genai as genai
+        from google.genai import types as gtypes
+        from utils.helpers import load_config
+
+        cfg = load_config()
+        gemini_cfg = cfg.get("gemini", {})
+        project = gemini_cfg.get("project", "")
+        location = gemini_cfg.get("location", "us-central1")
+        if not project:
+            return [question]
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        prompt = (
+            "You are a search-term expander for an Arabic news monitoring database.\n"
+            "Given the question or phrase below, return 4-5 short Arabic keywords or phrases "
+            "that would literally appear inside news texts that answer it.\n"
+            "Include synonyms, alternate spellings, and closely related terms.\n"
+            "Return ONLY the keywords, one per line, no numbering, no explanations.\n\n"
+            f"Question: {question}"
+        )
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            config=gtypes.GenerateContentConfig(labels={"service": "agents"}),
+        )
+        terms = [t.strip() for t in response.text.strip().split("\n") if t.strip()]
+        result = terms[:5] if terms else [question]
+        logger.info(f"[CHATBOT] Query expansion: {question!r} → {result}")
+        return result
+    except Exception as exc:
+        logger.warning(f"[CHATBOT] Query expansion failed ({exc}), falling back to raw query")
+        return [question]
+
+
 # ---------------------------------------------------------------------------
 # SummaryToolkit — summaries of processed topic groups
 # ---------------------------------------------------------------------------
@@ -27,6 +68,7 @@ class SummaryToolkit(Toolkit):
             tools=[
                 self.get_recent_summaries,
                 self.search_summaries,
+                self.search_summaries_by_text,
                 self.get_summary_by_id,
                 self.get_system_stats,
                 self.get_pending_summary_counts,
@@ -84,6 +126,48 @@ class SummaryToolkit(Toolkit):
             allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
+
+    def search_summaries_by_text(self, query: str, days: int = 7, limit: int = 20) -> str:
+        """Search the full text content of AI-generated summaries for a keyword, phrase, or question.
+
+        Use this for factual/statistical questions about events or entities — e.g.
+        'how many Israeli soldiers were injured', 'ceasefire', 'specific person name'.
+        Summaries are already processed and often contain aggregated stats, so try this first.
+
+        The tool automatically expands your query into multiple Arabic/English keyword variants
+        using AI, runs a search for each, and returns a merged, deduplicated result set.
+        You do NOT need to retry with different spellings — the tool handles that.
+
+        Args:
+            query: The user's question or key phrase (Arabic or English). Pass it as-is.
+            days: Look back N days (default 7).
+            limit: Max total results to return after merging all term searches (max 50).
+
+        Returns:
+            JSON object with 'search_terms_used' (list of expanded terms) and 'results'
+            (merged list of matching summaries). Use get_summary_by_id for full text of a hit.
+        """
+        limit = min(max(1, limit), 50)
+        terms = _expand_search_terms(query)
+        seen_ids: set = set()
+        merged: list = []
+        per_term = max(limit, 15)
+        for term in terms:
+            rows = self.db.search_summaries_by_text(
+                query=term,
+                days=days,
+                limit=per_term,
+                allowed_bot_names=self.allowed_bot_names,
+            )
+            for row in rows:
+                if row["id"] not in seen_ids:
+                    seen_ids.add(row["id"])
+                    merged.append(row)
+        merged.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return json.dumps(
+            {"search_terms_used": terms, "results": merged[:limit]},
+            ensure_ascii=False,
+        )
 
     def get_summary_by_id(self, summary_id: int) -> str:
         """Get the full text of a specific generated summary by its ID.
@@ -149,6 +233,7 @@ class MessageToolkit(Toolkit):
                 self.get_recent_messages,
                 self.get_messages_by_topic,
                 self.search_messages,
+                self.search_messages_by_text,
                 self.get_missed_messages,
                 self.get_missed_messages_stats,
             ],
@@ -225,6 +310,48 @@ class MessageToolkit(Toolkit):
             allowed_bot_names=self.allowed_bot_names,
         )
         return json.dumps(rows, ensure_ascii=False)
+
+    def search_messages_by_text(self, query: str, days: int = 7, limit: int = 50) -> str:
+        """Search the raw text content of Telegram messages for a keyword, phrase, or question.
+
+        Use this when a factual question cannot be answered from summaries alone, or when
+        you need to find specific mentions in raw posts — e.g. casualty numbers, names,
+        place names, quotes. Works on all classified AND unclassified messages.
+
+        The tool automatically expands your query into multiple Arabic/English keyword variants
+        using AI, runs a search for each, and returns a merged, deduplicated result set.
+        You do NOT need to retry with different spellings — the tool handles that.
+
+        Args:
+            query: The user's question or key phrase (Arabic or English). Pass it as-is.
+            days: Look back N days (default 7).
+            limit: Max total results to return after merging all term searches (max 100).
+
+        Returns:
+            JSON object with 'search_terms_used' (list of expanded terms) and 'results'
+            (merged list of matching messages). Newest first.
+        """
+        limit = min(max(1, limit), 100)
+        terms = _expand_search_terms(query)
+        seen_ids: set = set()
+        merged: list = []
+        per_term = max(limit, 20)
+        for term in terms:
+            rows = self.db.search_messages_by_text(
+                query=term,
+                days=days,
+                limit=per_term,
+                allowed_bot_names=self.allowed_bot_names,
+            )
+            for row in rows:
+                if row["id"] not in seen_ids:
+                    seen_ids.add(row["id"])
+                    merged.append(row)
+        merged.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return json.dumps(
+            {"search_terms_used": terms, "results": merged[:limit]},
+            ensure_ascii=False,
+        )
 
     def get_missed_messages(self, bot_name: str = "", collection: str = "",
                             search: str = "", limit: int = 30) -> str:

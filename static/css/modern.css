@@ -3906,6 +3906,46 @@ html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color
 .ac-content a,      .sc-msg-bubble-ai a,      .yt-chat-msg-content a      { color: var(--accent-primary); text-decoration: underline; }
 .ac-content a:hover,.sc-msg-bubble-ai a:hover,.yt-chat-msg-content a:hover{ opacity: .8; }
 
+/* ── Agent option chips (clickable list items) ── */
+.ac-option-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.ac-option-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    text-align: left;
+}
+
+.ac-option-chip:hover {
+    background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-secondary));
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.ac-option-chip-custom {
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.ac-option-chip-custom:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+    background: var(--bg-tertiary);
+}
+
 /* Plan limit alert banner above input */
 .ai-limit-alert {
     display: flex;
@@ -4772,6 +4812,99 @@ html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color
 }
 
 
+/* ==================== Agent Chat Thinking Block ==================== */
+
+.ac-thinking-block {
+    border-left: 2px solid var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 4%, transparent);
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 10px;
+    overflow: hidden;
+    animation: ac-step-in 0.2s ease;
+}
+
+.ac-thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    text-align: left;
+    transition: background 0.15s;
+}
+
+.ac-thinking-header:hover {
+    background: color-mix(in srgb, var(--accent-primary) 7%, transparent);
+}
+
+.ac-thinking-icon { font-size: 13px; line-height: 1; }
+
+.ac-thinking-title { font-weight: 500; flex: 1; }
+
+.ac-thinking-count { opacity: 0.55; font-size: 10.5px; }
+
+.ac-thinking-chevron {
+    font-size: 9px;
+    opacity: 0.6;
+    transition: transform 0.2s ease;
+}
+
+.ac-thinking-block.ac-thinking-open .ac-thinking-chevron {
+    transform: rotate(180deg);
+}
+
+.ac-thinking-content {
+    padding: 0 12px 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 280px;
+    overflow-y: auto;
+    transition: max-height 0.25s ease, opacity 0.2s ease;
+}
+
+.ac-thinking-content.ac-thinking-collapsed {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    overflow: hidden;
+    opacity: 0;
+}
+
+.ac-thought {
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.78;
+    font-style: italic;
+    line-height: 1.55;
+    padding: 3px 0;
+    border-bottom: 1px solid var(--border-color);
+    animation: ac-step-in 0.2s ease;
+}
+
+.ac-thought:last-child { border-bottom: none; }
+
+/* Pulsing dot — shown while actively thinking */
+.ac-thinking-pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    flex-shrink: 0;
+    animation: ac-thinking-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes ac-thinking-pulse {
+    0%, 100% { opacity: 0.25; transform: scale(0.75); }
+    50%       { opacity: 1;    transform: scale(1.15); }
+}
+
+
 /* ==================== Agent Chat Streaming Steps ==================== */
 
 .ac-steps {
@@ -4793,6 +4926,21 @@ html[data-theme="light"] .tag-green { background: rgba(16, 185, 129, .12); color
     padding: 3px 10px;
     width: fit-content;
     animation: ac-step-in 0.2s ease;
+}
+
+/* Routing steps get a subtle accent tint */
+.ac-step-routing {
+    border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--border-color));
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--bg-tertiary));
+}
+
+/* Tool result steps — dimmer, smaller, indented */
+.ac-step-tool_result {
+    opacity: 0.65;
+    font-size: 10.5px;
+    padding: 2px 8px;
+    margin-left: 14px;
+    border-style: dashed;
 }
 
 .ac-step-icon {

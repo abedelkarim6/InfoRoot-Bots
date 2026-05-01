@@ -1812,10 +1812,25 @@ function createPromptsSection(botName) {
                     <button class="btn btn-primary btn-sm" onclick="saveSummariesFixedPrompt('fixed_prefix', 'fixed-prefix-${botName}')">Save</button>
                 </div>
             </div>
-            <p class="text-muted" style="margin:0 0 4px;font-size:11px">Injected before every user prompt. Supports: {topic_name}, {messages}.</p>
+            <p class="text-muted" style="margin:0 0 4px;font-size:11px">Injected before every user prompt. Supports: {topic_name}, {messages}, {final_interim}, {b}.</p>
             <textarea class="textarea"
                       id="fixed-prefix-${botName}"
                       rows="5"
+                      style="font-family:monospace;font-size:12px"
+                      placeholder="Loading…"></textarea>
+        </div>
+        <div class="prompt-card prompt-card-fixed" id="fixed-bp-suffix-card-${botName}">
+            <div class="prompt-card-header">
+                <h4 class="prompt-card-title">🔒 Bullet Points Suffix <span class="admin-badge">Admin</span></h4>
+                <div class="prompt-card-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="resetSummariesFixedPrompt('bullet_points_suffix', 'fixed-bp-suffix-${botName}')" title="Reset to default">Reset</button>
+                    <button class="btn btn-primary btn-sm" onclick="saveSummariesFixedPrompt('bullet_points_suffix', 'fixed-bp-suffix-${botName}')">Save</button>
+                </div>
+            </div>
+            <p class="text-muted" style="margin:0 0 4px;font-size:11px">Appended after the user prompt when a schedule has Bullet Points enabled. Use {b} for the count.</p>
+            <textarea class="textarea"
+                      id="fixed-bp-suffix-${botName}"
+                      rows="3"
                       style="font-family:monospace;font-size:12px"
                       placeholder="Loading…"></textarea>
         </div>` : '';
@@ -1863,15 +1878,16 @@ function createPromptsSection(botName) {
 
 // ==================== Summaries Fixed Prompts (Admin Only) ====================
 
-let _summariesFixedDefaults = { system_prompt: '', fixed_prefix: '' };
+let _summariesFixedDefaults = { system_prompt: '', fixed_prefix: '', bullet_points_suffix: '' };
 let _summariesFixedLoaded = false;
 
 async function loadSummariesFixedPrompts() {
     if (_summariesFixedLoaded) return;
     const res = await api('/api/system/fixed-prefix');
     if (res.status !== 'ok') return;
-    _summariesFixedDefaults.system_prompt = res.default_system_prompt || '';
-    _summariesFixedDefaults.fixed_prefix  = res.default_fixed_prefix  || '';
+    _summariesFixedDefaults.system_prompt       = res.default_system_prompt       || '';
+    _summariesFixedDefaults.fixed_prefix        = res.default_fixed_prefix        || '';
+    _summariesFixedDefaults.bullet_points_suffix = res.default_bullet_points_suffix || '';
     _summariesFixedLoaded = true;
     // Populate all visible fixed prompt textareas
     document.querySelectorAll('[id^="fixed-sysprompt-"]').forEach(el => {
@@ -1879,6 +1895,9 @@ async function loadSummariesFixedPrompts() {
     });
     document.querySelectorAll('[id^="fixed-prefix-"]').forEach(el => {
         if (!el.value) el.value = res.fixed_prefix || res.default_fixed_prefix || '';
+    });
+    document.querySelectorAll('[id^="fixed-bp-suffix-"]').forEach(el => {
+        if (!el.value) el.value = res.bullet_points_suffix || res.default_bullet_points_suffix || '';
     });
 }
 
@@ -2255,7 +2274,7 @@ function _buildTopicBodyHtml(botName, categoryName, topicName, topic, categoryEn
                                 </div>
                                 <div class="summary-details">
                                     <span>📅 ${formatSchedule(schedule)}</span>
-                                    <span>📝 ${escapeHtmlSys(schedule.prompt_key)}</span>
+                                    <span>📝 ${escapeHtmlSys(schedule.prompt_key)}${schedule.bullet_points ? ` <span style="background:var(--accent-primary,#6366f1);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:500;">🔹 ${schedule.bullet_points_count}pt</span>` : ''}</span>
                                     <span>📨 ${escapeHtmlSys(schedule.header || `*${schedule.name}*`)}${schedule.header_datetime ? ' 🕐' : ''}${schedule.header_datetime && schedule.header_datetime_offset ? ` <span class="text-muted" style="font-size:11px;">(${schedule.header_datetime_offset > 0 ? '+' : ''}${schedule.header_datetime_offset}min)</span>` : ''}${schedule.telegram_targets?.length ? ` 📡 ${schedule.telegram_targets.length}` : ''}</span>
                                 </div>
                             </div>
@@ -3892,6 +3911,11 @@ function closeSeoSuggestModal() {
 }
 
 // ==================== Topic Schedule Management ====================
+function _toggleBulletPtsField(cb, wrapId) {
+    const wrap = document.getElementById(wrapId);
+    if (wrap) wrap.style.display = cb.checked ? 'flex' : 'none';
+}
+
 function openAddTopicScheduleModal(botName, categoryName, topicName) {
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -3984,6 +4008,17 @@ function openAddTopicScheduleModal(botName, categoryName, topicName) {
                         </div>
                         <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
                     </div>
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:500;">
+                        <input type="checkbox" id="topic-schedule-bullet-pts"
+                               onchange="_toggleBulletPtsField(this,'topic-schedule-bullet-count-wrap')">
+                        Bullet Points
+                    </label>
+                    <span id="topic-schedule-bullet-count-wrap" style="display:none;align-items:center;gap:6px">
+                        <input type="number" class="input" id="topic-schedule-bullet-count" value="10" min="1" max="25" style="width:64px;padding:4px 8px">
+                        <span style="font-size:12px;color:var(--text-muted)">points (interim batch auto-set to 26 − N)</span>
+                    </span>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Telegram Targets (optional)</label>
@@ -4137,7 +4172,9 @@ async function saveTopicSchedule(botName, categoryName, topicName) {
     const header_time_arabic = document.getElementById('topic-schedule-time-arabic').checked;
     const header_datetime_offset = Number(document.getElementById('topic-schedule-datetime-offset')?.value || 0);
     const telegram_targets = getSchTgTargets('topic-schedule');
-    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets };
+    const bullet_points = document.getElementById('topic-schedule-bullet-pts')?.checked || false;
+    const bullet_points_count = parseInt(document.getElementById('topic-schedule-bullet-count')?.value || '10', 10) || 10;
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets, bullet_points, bullet_points_count };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('topic-schedule-minute').value);
@@ -4384,6 +4421,18 @@ function openEditTopicScheduleModal(botName, categoryName, topicName, scheduleId
                         <small class="text-muted">Shift the displayed time in the header by this many minutes.</small>
                     </div>
                 </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:500;">
+                        <input type="checkbox" id="edit-sch-bullet-pts"
+                               ${schedule.bullet_points ? 'checked' : ''}
+                               onchange="_toggleBulletPtsField(this,'edit-sch-bullet-count-wrap')">
+                        Bullet Points
+                    </label>
+                    <span id="edit-sch-bullet-count-wrap" style="display:${schedule.bullet_points ? 'flex' : 'none'};align-items:center;gap:6px">
+                        <input type="number" class="input" id="edit-sch-bullet-count" value="${schedule.bullet_points_count || 10}" min="1" max="25" style="width:64px;padding:4px 8px">
+                        <span style="font-size:12px;color:var(--text-muted)">points (interim batch auto-set to 26 − N)</span>
+                    </span>
+                </div>
                 <div class="form-group">
                     <label class="form-label">Telegram Targets (optional)</label>
                     <div class="tags-container" id="edit-sch-tg-targets">
@@ -4485,7 +4534,9 @@ async function saveEditedSchedule(scheduleId) {
     const header_time_arabic = document.getElementById('edit-sch-time-arabic').checked;
     const header_datetime_offset = Number(document.getElementById('edit-sch-datetime-offset')?.value || 0);
     const telegram_targets = getSchTgTargets('edit-sch');
-    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets };
+    const bullet_points = document.getElementById('edit-sch-bullet-pts')?.checked || false;
+    const bullet_points_count = parseInt(document.getElementById('edit-sch-bullet-count')?.value || '10', 10) || 10;
+    const schedule = { name, type, prompt_key, header, header_datetime, header_date_arabic, header_time_arabic, header_datetime_offset, telegram_targets, bullet_points, bullet_points_count };
 
     if (type === 'minute') {
         schedule.minute = Number(document.getElementById('edit-sch-minute').value);
@@ -4884,7 +4935,7 @@ function switchMonTab(tab) {
     document.querySelectorAll('.mon-tab').forEach(t =>
         t.classList.toggle('active', t.dataset.tab === tab)
     );
-    ['schedules', 'summaries', 'messages', 'unclassified', 'missed', 'history', 'interims'].forEach(t => {
+    ['schedules', 'summaries', 'messages', 'unclassified', 'missed', 'history'].forEach(t => {
         const el = document.getElementById('mon-tab-' + t);
         if (el) el.style.display = t === tab ? '' : 'none';
     });
@@ -4899,7 +4950,6 @@ function switchMonTab(tab) {
         if (showAllBtn) showAllBtn.style.display  = clearedAt ? '' : 'none';
         if (!_unclMessages.length) loadUnclassifiedMessages();
     }
-    if (tab === 'interims' && !_interimsData.length) loadInterims();
     if (tab === 'missed') {
         const clearedAt = localStorage.getItem('mon-missed-cleared-at');
         const clearBtn   = document.getElementById('missed-clear-btn');
@@ -7479,7 +7529,7 @@ window.showHistError = function (btn) {
 };
 
 
-// ---------- History Source Messages — inline view ----------
+// ---------- History Source Messages — composition view ----------
 let _histMsgData = [];
 
 async function showHistoryMessages(summaryId) {
@@ -7489,87 +7539,114 @@ async function showHistoryMessages(summaryId) {
         <div class="sum-msg-page">
             <div class="sum-msg-page-header">
                 <button class="btn btn-secondary btn-sm" onclick="_closeHistoryMessages()">‹ Back to History</button>
-                <h3 style="margin:0;font-size:15px">Source Messages</h3>
+                <h3 style="margin:0;font-size:15px">Summary Composition</h3>
             </div>
-            <div class="mon-filter-bar" style="flex-wrap:wrap;gap:8px">
-                <input type="text" class="input mon-filter-search" id="hmsg-search"
-                       placeholder="🔍 Search message text…" oninput="_renderHistMsgTable()">
-                <select class="select mon-filter-sel" id="hmsg-filter-source" onchange="_renderHistMsgTable()">
-                    <option value="">All Sources</option>
-                </select>
-                <button class="btn btn-secondary btn-sm" onclick="_clearHistMsgFilters()">✕ Clear</button>
-                <button class="btn btn-secondary btn-sm" onclick="openExportModal('history_messages')" title="Export visible messages to CSV">⬇ Export</button>
-            </div>
-            <div id="hmsg-table-wrap"><p class="mon-empty">Loading…</p></div>
+            <div id="hmsg-comp-wrap"><p class="mon-empty">Loading…</p></div>
         </div>`;
 
-    const data = await api(`/api/monitor/summary-messages?id=${summaryId}`);
-    const wrap = document.getElementById('hmsg-table-wrap');
+    const data = await api(`/api/monitor/summary-composition?id=${summaryId}`);
+    const wrap = document.getElementById('hmsg-comp-wrap');
     if (!wrap) return;
 
-    if (data.status !== 'ok' || !data.messages?.length) {
+    if (data.status !== 'ok') {
+        wrap.innerHTML = `<p class="mon-empty" style="color:var(--danger)">${escapeHtml(data.message || 'Error loading composition.')}</p>`;
+        return;
+    }
+
+    const interims = data.interims || [];
+    const remaining = data.remaining_messages || [];
+
+    if (!interims.length && !remaining.length) {
         wrap.innerHTML = `<p class="mon-empty">No linked messages found.</p>`;
         return;
     }
-    _histMsgData = data.messages;
 
-    const sources = [...new Set(_histMsgData.map(m => m.channel_username).filter(Boolean))].sort();
-    const sel = document.getElementById('hmsg-filter-source');
-    if (sel) sources.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = '@' + s; sel.appendChild(o); });
+    let html = '';
 
-    _renderHistMsgTable();
-}
+    const lastInterimIdx = interims.length - 1;
+    interims.forEach((interim, idx) => {
+        const num      = interim.interim_number ?? (idx + 1);
+        const msgCnt   = interim.message_count ?? (interim.messages?.length ?? 0);
+        const ts       = interim.created_at ? _fmtLBN(interim.created_at) : '—';
+        const output   = escapeHtml(interim.summary_text || '');
+        const msgsHtml = _buildCompMsgsTable(interim.messages || []);
+        const domId    = `hcomp-interim-${summaryId}-${idx}`;
+        const isLast   = idx === lastInterimIdx;
 
-function _renderHistMsgTable() {
-    const wrap = document.getElementById('hmsg-table-wrap');
-    if (!wrap) return;
+        // Last interim is collapsed by default (body is visible); earlier ones start collapsed
+        const bodyDisplay  = isLast ? '' : 'none';
+        const chevRotation = isLast ? '' : 'rotate(-90deg)';
 
-    const search = (document.getElementById('hmsg-search')?.value || '').toLowerCase();
-    const source = document.getElementById('hmsg-filter-source')?.value || '';
+        const usedBadge = isLast
+            ? `<span style="background:rgba(16,185,129,.15);color:#10b981;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap">▶ Used in final</span>`
+            : `<span style="font-size:11px;color:var(--text-muted)">(rolled into #${num + 1})</span>`;
 
-    let filtered = _histMsgData;
-    if (search) filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
-    if (source) filtered = filtered.filter(m => m.channel_username === source);
+        const outputLabel = isLast
+            ? `<div style="font-size:11px;font-weight:600;color:#10b981;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">Rolling Output (cumulative — used in final summary)</div>`
+            : `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">Rolling Output (rolled into next interim)</div>`;
 
-    if (!filtered.length) {
-        wrap.innerHTML = `<p class="mon-empty">No messages match filters.</p>`;
-        return;
+        html += `
+        <div class="sum-comp-card" style="margin-bottom:10px;border:1px solid ${isLast ? '#10b981' : 'var(--border-color)'};border-radius:8px;overflow:hidden">
+            <div class="sum-comp-card-header" style="display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--bg-secondary);cursor:pointer;user-select:none"
+                 onclick="_toggleCompCard('${domId}')">
+                <span style="font-weight:700;font-size:13px;color:var(--accent-primary)">Interim #${num}</span>
+                <span style="font-size:12px;color:var(--text-muted)">${msgCnt} new message${msgCnt !== 1 ? 's' : ''}</span>
+                ${usedBadge}
+                <span style="font-size:11px;color:var(--text-muted);margin-left:auto">${ts}</span>
+                <span class="sum-comp-chevron" id="${domId}-chev" style="font-size:12px;color:var(--text-muted);transition:transform .2s;transform:${chevRotation}">▼</span>
+            </div>
+            <div id="${domId}" style="padding:12px 14px;display:${bodyDisplay}">
+                ${outputLabel}
+                <div style="white-space:pre-wrap;font-size:13px;background:var(--bg-tertiary);border-radius:6px;padding:10px 12px;border:1px solid var(--border-color);margin-bottom:10px;max-height:200px;overflow-y:auto">${output}</div>
+                <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">New Source Messages (${msgCnt})</div>
+                ${msgsHtml}
+            </div>
+        </div>`;
+    });
+
+    if (remaining.length) {
+        const remHtml = _buildCompMsgsTable(remaining);
+        html += `
+        <div style="margin-top:4px">
+            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);padding:6px 0;border-top:1px solid var(--border-color);margin-bottom:8px">
+                Remaining Messages (${remaining.length}) — not yet batched into an interim
+            </div>
+            ${remHtml}
+        </div>`;
     }
 
-    const rows = filtered.map(m => {
+    wrap.innerHTML = html;
+}
+
+function _buildCompMsgsTable(messages) {
+    if (!messages.length) return `<p class="mon-empty" style="padding:4px 0;font-size:12px">No messages.</p>`;
+    const rows = messages.map(m => {
         const ts  = _fmtLBN(m.timestamp);
-        const src = m.channel_username ? `@${m.channel_username}` : '—';
-        const top = m.topics           ? escapeHtml(m.topics)           : '—';
-        const kw  = m.keywords_found   ? escapeHtml(m.keywords_found)   : '—';
+        const src = m.channel_username ? `@${escapeHtml(m.channel_username)}` : '—';
+        const top = m.topics         ? escapeHtml(m.topics)         : '—';
+        const kw  = m.keywords_found ? escapeHtml(m.keywords_found) : '—';
         const txt = escapeHtml(m.preview || '');
         return `<tr>
-            <td style="white-space:nowrap;font-size:11px;">${ts}</td>
+            <td style="white-space:nowrap;font-size:11px">${ts}</td>
             <td>${src}</td>
             <td>${top}</td>
             <td>${kw}</td>
             <td class="smp-msg-cell" title="${txt}">${txt}</td>
         </tr>`;
     }).join('');
-
-    wrap.innerHTML = `
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${filtered.length} message${filtered.length === 1 ? '' : 's'}</div>
-        <div style="overflow-x:auto">
-            <table class="mon-table smp-table">
-                <thead><tr>
-                    <th>Date / Time</th><th>Source</th>
-                    <th>Topics</th><th>Keywords</th><th>Message</th>
-                </tr></thead>
-                <tbody>${rows}</tbody>
-            </table>
-        </div>`;
+    return `<div style="overflow-x:auto"><table class="mon-table smp-table" style="font-size:12px">
+        <thead><tr><th>Date / Time</th><th>Source</th><th>Topics</th><th>Keywords</th><th>Message</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table></div>`;
 }
 
-function _clearHistMsgFilters() {
-    const s = document.getElementById('hmsg-search');
-    const src = document.getElementById('hmsg-filter-source');
-    if (s) s.value = '';
-    if (src) src.value = '';
-    _renderHistMsgTable();
+function _toggleCompCard(id) {
+    const body = document.getElementById(id);
+    const chev = document.getElementById(id + '-chev');
+    if (!body) return;
+    const collapsed = body.style.display === 'none';
+    body.style.display = collapsed ? '' : 'none';
+    if (chev) chev.style.transform = collapsed ? '' : 'rotate(-90deg)';
 }
 
 function _closeHistoryMessages() {
@@ -7597,267 +7674,7 @@ function _closeHistoryMessages() {
     loadScheduleHistory();
 }
 
-// ==================== Interims Tab ====================
-let _interimsData      = [];
-let _interimMsgData    = [];
-let _interimBatchLimit = 10;
-
-async function loadInterims() {
-    const wrap = document.getElementById('mon-interims-content');
-    if (!wrap) return;
-    wrap.innerHTML = '<p class="mon-empty">Loading…</p>';
-
-    const [settingsRes, interimsRes] = await Promise.all([
-        api('/api/monitor/interim-settings'),
-        api('/api/monitor/interims?limit=500'),
-    ]);
-
-    _interimBatchLimit = settingsRes.batch_limit || 10;
-    _interimsData = interimsRes.interims || [];
-
-    _renderInterimsPage();
-}
-
-function _renderInterimsPage() {
-    const wrap = document.getElementById('mon-interims-content');
-    if (!wrap) return;
-
-    const bots   = Object.keys(globalConfig.bots || {}).sort();
-    const topics = [...new Set(_interimsData.map(r => r.topic_name).filter(Boolean))].sort();
-
-    const botOpts   = ['<option value="">All Bots</option>',   ...bots.map(b   => `<option value="${escapeHtmlSys(b)}">${escapeHtmlSys(b)}</option>`)].join('');
-    const topicOpts = ['<option value="">All Topics</option>', ...topics.map(t => `<option value="${escapeHtmlSys(t)}">${escapeHtmlSys(t)}</option>`)].join('');
-
-    wrap.innerHTML = `
-        <div class="card" style="margin-bottom:12px;padding:12px 16px">
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                <span style="font-weight:500;font-size:13px">Rolling batch size:</span>
-                <input type="number" class="input" id="interim-batch-input"
-                       value="${_interimBatchLimit}" min="1" max="500"
-                       style="width:80px;padding:4px 8px">
-                <span class="text-muted" style="font-size:12px">messages per interim</span>
-                <button class="btn btn-secondary btn-sm" onclick="saveInterimBatchLimit()">Save</button>
-            </div>
-            <div style="margin-top:6px;font-size:11px;color:var(--text-muted)">
-                Once this many unprocessed messages accumulate for a topic, they are pre-summarized into an interim.
-                Pending interims are then combined when the next scheduled run fires.
-            </div>
-        </div>
-
-        <div class="mon-filter-bar" style="flex-wrap:wrap">
-            <select class="select mon-filter-sel" id="interim-filter-bot"    onchange="_renderInterimsTable()">${botOpts}</select>
-            <select class="select mon-filter-sel" id="interim-filter-topic"  onchange="_renderInterimsTable()">${topicOpts}</select>
-            <select class="select mon-filter-sel" id="interim-filter-status" onchange="_renderInterimsTable()">
-                <option value="">All Statuses</option>
-                <option value="pending">⏳ Pending</option>
-                <option value="done">✓ Done</option>
-            </select>
-            <button class="btn btn-secondary btn-sm" onclick="_interimsData=[]; loadInterims()">↻ Refresh</button>
-        </div>
-
-        <div id="interim-table-wrap"></div>`;
-
-    _renderInterimsTable();
-}
-
-function _renderInterimsTable() {
-    const wrap = document.getElementById('interim-table-wrap');
-    if (!wrap) return;
-
-    const bot    = document.getElementById('interim-filter-bot')?.value    || '';
-    const topic  = document.getElementById('interim-filter-topic')?.value  || '';
-    const status = document.getElementById('interim-filter-status')?.value || '';
-
-    let d = _interimsData;
-    if (bot)    d = d.filter(r => r.bot_name   === bot);
-    if (topic)  d = d.filter(r => r.topic_name === topic);
-    if (status) d = d.filter(r => r.status     === status);
-
-    if (!d.length) {
-        wrap.innerHTML = '<p class="mon-empty">No interims found.</p>';
-        return;
-    }
-
-    const pending = d.filter(r => r.status === 'pending').length;
-    const done    = d.filter(r => r.status === 'done').length;
-
-    const rows = d.map(r => {
-        const badge  = r.status === 'pending'
-            ? `<span style="background:rgba(245,158,11,.15);color:#f59e0b;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">⏳ Pending</span>`
-            : `<span style="background:rgba(16,185,129,.15);color:#10b981;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500">✓ Done</span>`;
-        const msgsCell = r.message_count
-            ? `<span class="mon-msgs-link" onclick="showInterimMessages(${r.id},'${escapeHtmlSys(r.bot_name)}','${escapeHtmlSys(r.topic_name)}')">${r.message_count}</span>`
-            : (r.message_count ?? '—');
-        const preview = escapeHtml(r.preview || '');
-        const schedName = r.schedule_name ? escapeHtml(r.schedule_name) : '<span class="text-muted">—</span>';
-        const numLabel  = `<span style="font-weight:600;color:var(--accent-primary)">#${r.interim_number ?? '?'}</span>`;
-        return `<tr>
-            <td style="text-align:center">${numLabel}</td>
-            <td>${escapeHtml(r.bot_name)}</td>
-            <td>${escapeHtml(r.topic_name)}</td>
-            <td>${schedName}</td>
-            <td style="text-align:center">${msgsCell}</td>
-            <td>${badge}</td>
-            <td class="smp-msg-cell" style="max-width:300px" title="${preview}">${preview}</td>
-            <td>
-                <button class="btn-icon" title="View full output"
-                        onclick="_showInterimOutput(${r.id})">📄</button>
-            </td>
-        </tr>`;
-    }).join('');
-
-    wrap.innerHTML = `
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-            ${d.length} interim${d.length !== 1 ? 's' : ''} —
-            <span style="color:#f59e0b">⏳ ${pending} pending</span> ·
-            <span style="color:#10b981">✓ ${done} done</span>
-        </div>
-        <div style="overflow-x:auto">
-            <table class="mon-table smp-table">
-                <thead><tr>
-                    <th>#</th><th>Bot</th><th>Topic</th><th>Schedule</th>
-                    <th>Messages</th><th>Status</th>
-                    <th>Output Preview</th><th></th>
-                </tr></thead>
-                <tbody>${rows}</tbody>
-            </table>
-        </div>`;
-}
-
-async function showInterimMessages(interimId, botName, topicName) {
-    _interimMsgData = [];
-    const panel = document.getElementById('mon-tab-interims');
-    panel.innerHTML = `
-        <div class="sum-msg-page">
-            <div class="sum-msg-page-header">
-                <button class="btn btn-secondary btn-sm" onclick="_closeInterimMessages()">‹ Back to Interims</button>
-                <h3 style="margin:0;font-size:15px">Interim Source Messages — ${escapeHtml(botName)} / ${escapeHtml(topicName)}</h3>
-            </div>
-            <div class="mon-filter-bar" style="flex-wrap:wrap;gap:8px">
-                <input type="text" class="input mon-filter-search" id="interim-msg-search"
-                       placeholder="🔍 Search message text…" oninput="_renderInterimMsgTable()">
-                <select class="select mon-filter-sel" id="interim-msg-filter-source" onchange="_renderInterimMsgTable()">
-                    <option value="">All Sources</option>
-                </select>
-                <button class="btn btn-secondary btn-sm" onclick="_clearInterimMsgFilters()">✕ Clear</button>
-            </div>
-            <div id="interim-msg-output" style="margin:8px 0;padding:10px 14px;background:var(--bg-secondary);border-radius:6px;font-size:12.5px;white-space:pre-wrap;max-height:220px;overflow-y:auto;border:1px solid var(--border-color)">
-                <p class="mon-empty">Loading output…</p>
-            </div>
-            <div id="interim-msg-table-wrap"><p class="mon-empty">Loading messages…</p></div>
-        </div>`;
-
-    const data = await api(`/api/monitor/interim-messages?id=${interimId}`);
-
-    // Show output text
-    const outputEl = document.getElementById('interim-msg-output');
-    const interim = _interimsData.find(r => r.id === interimId);
-    if (outputEl && interim) {
-        outputEl.innerHTML = `<strong style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">INTERIM OUTPUT</strong>${escapeHtml(interim.summary_text || '')}`;
-    }
-
-    const wrap = document.getElementById('interim-msg-table-wrap');
-    if (!wrap) return;
-
-    if (data.status !== 'ok' || !data.messages?.length) {
-        wrap.innerHTML = data.messages?.length === 0
-            ? `<p class="mon-empty">No linked messages found. Messages are linked only for interims created after the migration.</p>`
-            : `<p class="mon-empty">No linked messages found.</p>`;
-        return;
-    }
-
-    _interimMsgData = data.messages;
-    const sources = [...new Set(_interimMsgData.map(m => m.channel_username).filter(Boolean))].sort();
-    const sel = document.getElementById('interim-msg-filter-source');
-    if (sel) sources.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = '@' + s; sel.appendChild(o); });
-
-    _renderInterimMsgTable();
-}
-
-function _renderInterimMsgTable() {
-    const wrap = document.getElementById('interim-msg-table-wrap');
-    if (!wrap) return;
-
-    const search = (document.getElementById('interim-msg-search')?.value || '').toLowerCase();
-    const source = document.getElementById('interim-msg-filter-source')?.value || '';
-
-    let filtered = _interimMsgData;
-    if (search) filtered = filtered.filter(m => (m.preview || '').toLowerCase().includes(search));
-    if (source) filtered = filtered.filter(m => m.channel_username === source);
-
-    if (!filtered.length) {
-        wrap.innerHTML = '<p class="mon-empty">No messages match filters.</p>';
-        return;
-    }
-
-    const rows = filtered.map(m => {
-        const ts  = _fmtLBN(m.timestamp);
-        const src = m.channel_username ? `@${m.channel_username}` : '—';
-        const top = m.topics         ? escapeHtml(m.topics)         : '—';
-        const kw  = m.keywords_found ? escapeHtml(m.keywords_found) : '—';
-        const txt = escapeHtml(m.preview || '');
-        return `<tr>
-            <td style="white-space:nowrap;font-size:11px">${ts}</td>
-            <td>${src}</td>
-            <td>${top}</td>
-            <td>${kw}</td>
-            <td class="smp-msg-cell" title="${txt}">${txt}</td>
-        </tr>`;
-    }).join('');
-
-    wrap.innerHTML = `
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${filtered.length} message${filtered.length !== 1 ? 's' : ''}</div>
-        <div style="overflow-x:auto">
-            <table class="mon-table smp-table">
-                <thead><tr>
-                    <th>Date / Time</th><th>Source</th><th>Topics</th><th>Keywords</th><th>Message</th>
-                </tr></thead>
-                <tbody>${rows}</tbody>
-            </table>
-        </div>`;
-}
-
-function _clearInterimMsgFilters() {
-    const s   = document.getElementById('interim-msg-search');
-    const src = document.getElementById('interim-msg-filter-source');
-    if (s) s.value = '';
-    if (src) src.value = '';
-    _renderInterimMsgTable();
-}
-
-function _closeInterimMessages() {
-    _interimMsgData = [];
-    const panel = document.getElementById('mon-tab-interims');
-    if (panel) panel.innerHTML = '<div id="mon-interims-content"></div>';
-    _renderInterimsPage();
-}
-
-function _showInterimOutput(interimId) {
-    const interim = _interimsData.find(r => r.id === interimId);
-    if (!interim) return;
-    const schedPart = interim.schedule_name ? ` · ${escapeHtml(interim.schedule_name)}` : '';
-    const numLabel  = interim.interim_number != null ? `Interim #${interim.interim_number}` : `ID ${interimId}`;
-    showAlert(`<strong>${numLabel} — ${escapeHtml(interim.bot_name)} / ${escapeHtml(interim.topic_name)}${schedPart}</strong><br>
-               <small style="color:var(--text-muted)">${interim.message_count} messages · ${interim.status}</small>
-               <hr style="border-color:var(--border-color);margin:8px 0">
-               <div style="white-space:pre-wrap;font-size:12.5px;max-height:400px;overflow-y:auto">${escapeHtml(interim.summary_text || '')}</div>`);
-}
-
-async function saveInterimBatchLimit() {
-    const inp = document.getElementById('interim-batch-input');
-    const val = parseInt(inp?.value, 10);
-    if (!val || val < 1 || val > 500) {
-        showAlert('Batch size must be between 1 and 500.'); return;
-    }
-    const result = await api('/api/monitor/interim-settings', { batch_limit: val });
-    if (result.status === 'ok') {
-        _interimBatchLimit = val;
-        showNotification('Batch size saved', 'success');
-    } else {
-        showAlert(result.message || 'Failed to save');
-    }
-}
-
+// ==================== Interim batch limit (Summaries tab) ====================
 // ==================== Logs Page ====================
 let _allLogs       = [];
 let _logsTimer     = null;

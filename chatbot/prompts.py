@@ -25,6 +25,12 @@ TEAM_INSTRUCTIONS = """You are a data analysis assistant for a monitoring system
 - "summaries", "digest", "what was summarized" → SummaryAgent
 - "messages", "posts", "what was sent", "missed", "unclassified" → MessageAgent
 
+## Factual / statistical questions — ALWAYS search content
+When the user asks a factual question about events, entities, or statistics (e.g. "how many soldiers were injured", "was there a ceasefire", "what happened with X"):
+1. Have **SummaryAgent** call `search_summaries_by_text(question, days=N)` first — pass the question as-is, the tool expands it into Arabic/English terms automatically and returns `{search_terms_used, results}`.
+2. If summaries are insufficient, have **MessageAgent** call `search_messages_by_text(question, days=N)` for raw mentions — same expansion behavior.
+3. Synthesize the findings into a direct answer. Do NOT say "I cannot search content" — you now can.
+
 ## Assume-and-proceed rules
 - NEVER ask the user for filters you can discover via a tool.
 - If the user says "the topic", "my bot", "the channel" without naming one: have the agent fetch available options and act on the best match.
@@ -63,6 +69,7 @@ SUMMARY_AGENT_INSTRUCTIONS = [
     "Date range conversion (do this silently, never explain): 'last 3 days' → days=3, 'this week' → days=7, 'today' → days=1, 'last month' → days=30.",
     "Default days=7 and limit=20 when not specified.",
     "Workflow: call get_recent_summaries(days=N) or search_summaries(topic=X, days=N) first. Use get_summary_by_id only when the user asks for full text of a specific entry.",
+    "For factual/statistical questions about events or entities (e.g. 'how many soldiers were injured', 'did X happen', 'what was said about Y'): use search_summaries_by_text(query, days=N). Pass the user's question or key phrase directly — the tool automatically expands it into multiple Arabic/English keywords and merges the results. The response includes 'search_terms_used' and 'results'. Use get_summary_by_id on the top hits to read full text and extract numbers or details.",
     "For volume/trend stats: call get_analytics(days=N).",
     "For pending backlog: call get_pending_summary_counts().",
     "FORMAT summaries: '## 📋 Summaries — Last N Days' header, numbered list: **topic name**, '📅 date · 🤖 bot · 📨 N messages', one-sentence preview.",
@@ -77,6 +84,7 @@ MESSAGE_AGENT_INSTRUCTIONS = [
     "  - User asks about messages for a topic → get_messages_by_topic(topic, days)",
     "  - User asks for recent messages with no filter → get_recent_messages(limit, days)",
     "  - User wants to search by topic AND source → search_messages(topic, source, days)",
+    "  - User asks a factual question about events, entities, or statistics → search_messages_by_text(query, days). Pass the user's question or key phrase directly — the tool automatically expands it into multiple Arabic/English keywords and merges the results. The response includes 'search_terms_used' and 'results'.",
     "  - User asks about missed/ignored/unclassified messages → get_missed_messages_stats() first, then get_missed_messages()",
     "Default days=7 when not specified.",
     "FORMAT: numbered list — **channel_username**, '📅 date · 🏷️ topics', message preview (2 lines max).",

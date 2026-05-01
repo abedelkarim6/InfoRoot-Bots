@@ -8,6 +8,12 @@ let _agentChatYtChannels = []; // cached YouTube channels
 let _agentChatYtKeywords = []; // cached YouTube keywords
 let _agentChatStreaming = false; // true while a stream is in progress
 let _agentChatAbortController = null; // AbortController for the active stream
+let _acThinkingExpanded = {}; // msgId -> bool (user explicitly toggled thinking block open)
+
+function acToggleThinking(msgId) {
+    _acThinkingExpanded[msgId] = !_acThinkingExpanded[msgId];
+    _agentChatUpdateBubble(msgId);
+}
 
 // ==================== Init & Session ====================
 
@@ -461,19 +467,74 @@ function _agentChatUpdateBubble(msgId) {
 
 function _agentChatBubbleInner(msg) {
     if (msg.loading) return _agentChatSkeletonHTML();
+
+    const thoughts = (msg.steps || []).filter(s => s.kind === 'reasoning');
+    const actions  = (msg.steps || []).filter(s => s.kind !== 'reasoning');
+
     let html = '';
-    if (msg.steps && msg.steps.length) {
+
+    // ── Thinking block (collapsible) ──────────────────────────────────────────
+    const hasThoughts = thoughts.length > 0;
+    // Only show as a loading indicator when streaming and no steps have arrived yet
+    const stillThinking = msg.streaming && !msg.text && actions.length === 0 && !hasThoughts;
+
+    if (hasThoughts || stillThinking) {
+        // Expanded while streaming; after done, only open if user explicitly toggled
+        const isOpen = msg.streaming || !!_acThinkingExpanded[msg.id];
+        html += `<div class="ac-thinking-block${isOpen ? ' ac-thinking-open' : ''}">`;
+        html += `<button class="ac-thinking-header" onclick="acToggleThinking(${msg.id})">`;
+
+        if (stillThinking && !hasThoughts) {
+            // Pure loading state — pulsing dot
+            html += `<span class="ac-thinking-pulse"></span>`;
+            html += `<span class="ac-thinking-title">Thinking…</span>`;
+        } else if (msg.streaming) {
+            // Streaming with thoughts already in — show live count
+            html += `<span class="ac-thinking-pulse"></span>`;
+            html += `<span class="ac-thinking-title">Thinking…</span>`;
+            if (hasThoughts) html += `<span class="ac-thinking-count">· ${thoughts.length} step${thoughts.length > 1 ? 's' : ''}</span>`;
+        } else {
+            // Done — summarise
+            html += `<span class="ac-thinking-icon">💭</span>`;
+            html += `<span class="ac-thinking-title">Thought for a moment</span>`;
+            if (hasThoughts) html += `<span class="ac-thinking-count">· ${thoughts.length} step${thoughts.length > 1 ? 's' : ''}</span>`;
+        }
+
+        html += `<span class="ac-thinking-chevron">▼</span>`;
+        html += `</button>`;
+
+        html += `<div class="ac-thinking-content${isOpen ? '' : ' ac-thinking-collapsed'}">`;
+        html += thoughts.map(t => `<div class="ac-thought">${escapeHtml(t.label)}</div>`).join('');
+        html += `</div></div>`;
+    }
+
+    // ── Tool / routing steps ──────────────────────────────────────────────────
+    if (actions.length) {
         html += '<div class="ac-steps">';
-        html += msg.steps.map(s =>
-            `<div class="ac-step"><span class="ac-step-icon">${s.icon}</span><span class="ac-step-label">${escapeHtml(s.label)}</span></div>`
+        html += actions.map(s =>
+            `<div class="ac-step ac-step-${escapeHtml(s.kind || 'tool')}">` +
+            `<span class="ac-step-icon">${s.icon}</span>` +
+            `<span class="ac-step-label">${escapeHtml(s.label)}</span></div>`
         ).join('');
         html += '</div>';
     }
+
+    // ── Answer content ────────────────────────────────────────────────────────
     if (msg.text) {
-        html += `<div class="ac-content${msg.streaming ? ' ac-content-streaming' : ''}">${_agentChatFormatText(msg.text)}</div>`;
-    } else if (msg.streaming && (!msg.steps || !msg.steps.length)) {
+        const { mainText, chips } = _agentChatParseChips(msg.text, msg.streaming);
+        html += `<div class="ac-content${msg.streaming ? ' ac-content-streaming' : ''}">${_agentChatFormatText(mainText || msg.text)}</div>`;
+        if (chips.length) {
+            html += `<div class="ac-option-chips">`;
+            html += chips.map(c =>
+                `<button class="ac-option-chip" onclick="agentChatSend(${JSON.stringify(c)})">${escapeHtml(c)}</button>`
+            ).join('');
+            html += `<button class="ac-option-chip ac-option-chip-custom" onclick="document.getElementById('agent-chat-input').focus()">✏️ Write my own…</button>`;
+            html += `</div>`;
+        }
+    } else if (msg.streaming && !hasThoughts && !actions.length) {
         html += _agentChatSkeletonHTML();
     }
+
     return html;
 }
 
@@ -590,7 +651,49 @@ function _agentChatSkeletonHTML() {
 
 function _agentChatFormatText(text) {
     if (!text) return '';
-    return marked.parse(text, { gfm: true, breaks: true });
+    // Collapse 3+ consecutive newlines → 2 (one blank line) to prevent giant gaps
+    const normalized = text.replace(/\n{3,}/g, '\n\n');
+    return marked.parse(normalized, { gfm: true, breaks: false });
+}
+
+/**
+ * Detect a trailing list of 2–6 items at the end of a done response.
+ * Returns { mainText, chips } — mainText is markdown without the list,
+ * chips is an array of plain-text option strings.
+ * When streaming or no trailing list, returns { mainText: text, chips: [] }.
+ */
+function _agentChatParseChips(text, streaming) {
+    if (streaming || !text) return { mainText: text, chips: [] };
+
+    const lines = text.split('\n');
+    const listRe = /^[ \t]*[-*]\s+(.+)/;
+
+    // Walk backward skipping trailing blank lines, then collect list items
+    let i = lines.length - 1;
+    while (i >= 0 && lines[i].trim() === '') i--;
+
+    const chips = [];
+    let listStart = -1;
+    while (i >= 0) {
+        const m = listRe.exec(lines[i]);
+        if (m) {
+            chips.unshift(m[1].trim());
+            listStart = i;
+            i--;
+        } else if (lines[i].trim() === '' && chips.length) {
+            i--; // tolerate a blank line between list items
+        } else {
+            break;
+        }
+    }
+
+    // Only replace list with chips if it's 2–6 items (avoids data tables becoming chips)
+    if (chips.length < 2 || chips.length > 6 || listStart < 0) {
+        return { mainText: text, chips: [] };
+    }
+
+    const mainText = lines.slice(0, listStart).join('\n').trimEnd();
+    return { mainText, chips };
 }
 
 

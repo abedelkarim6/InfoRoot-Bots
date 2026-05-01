@@ -689,6 +689,10 @@ class Database:
             # Migrate: add header_datetime_offset to schedules (shift displayed time by N minutes)
             cursor.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS header_datetime_offset INTEGER DEFAULT 0")
 
+            # Migrate: add bullet_points fields to schedules
+            cursor.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS bullet_points BOOLEAN DEFAULT FALSE")
+            cursor.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS bullet_points_count INTEGER DEFAULT 0")
+
             # Migrate: add schedule_name to topic_interim_summaries for display
             cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_name TEXT")
 
