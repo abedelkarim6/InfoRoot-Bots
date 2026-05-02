@@ -2422,9 +2422,9 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def _get_topic_id(self, bot_name: str, category_name: str, topic_name: str):
+    def _get_topic_id(self, bot_name: str, category_name: str, topic_name: str, owner_id: int = None):
         try:
-            cat_id = self._get_category_id(bot_name, category_name)
+            cat_id = self._get_category_id(bot_name, category_name, owner_id)
             if not cat_id:
                 return None
             cursor = self._get_cursor()
@@ -2436,9 +2436,9 @@ class SummariesDB(Database):
 
     # ==================== Schedules ====================
 
-    def add_schedule(self, bot_name: str, category_name: str, topic_name: str, schedule: dict) -> int:
+    def add_schedule(self, bot_name: str, category_name: str, topic_name: str, schedule: dict, owner_id: int = None) -> int:
         try:
-            topic_id = self._get_topic_id(bot_name, category_name, topic_name)
+            topic_id = self._get_topic_id(bot_name, category_name, topic_name, owner_id)
             if not topic_id:
                 return None
             cursor = self._get_cursor()

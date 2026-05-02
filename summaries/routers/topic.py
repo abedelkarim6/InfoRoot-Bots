@@ -280,7 +280,8 @@ def add_topic_schedule(request: Request, data: dict = Body(...)):
         return {"status": "error", "message": "Invalid schedule type"}
 
     db = get_db()
-    schedule_id = db.add_schedule(bot_name, category_name, topic_name, schedule)
+    allowed, owner_id = _resolve_bot_access(request, bot_name)
+    schedule_id = db.add_schedule(bot_name, category_name, topic_name, schedule, owner_id=owner_id)
     if schedule_id:
         schedule['id'] = schedule_id
         return {"status": "ok", "schedule": schedule}
