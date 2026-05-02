@@ -70,8 +70,9 @@ def clear_log_records():
 
 
 # ==================== Configuration ====================
-CONFIG_FILE = "config.yaml"
-PROMPTS_FILE = "prompts.yaml"
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_FILE = os.path.join(_BASE_DIR, "config.yaml")
+PROMPTS_FILE = os.path.join(_BASE_DIR, "prompts.yaml")
 # ==================== Configuration ====================
 def load_config():
     """Load configuration from YAML file."""

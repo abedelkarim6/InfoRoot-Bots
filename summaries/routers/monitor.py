@@ -137,28 +137,26 @@ def get_summary_composition(request: Request, id: int = Query(...)):
     try:
         cursor = db._get_cursor()
         allowed_bots = _get_allowed_bots(request)
-        if allowed_bots is not None:
-            cursor.execute("SELECT message_ids, bot_name FROM summaries WHERE id = %s", (id,))
-            row = cursor.fetchone()
-            if not row:
-                return {'status': 'ok', 'interims': [], 'remaining_messages': []}
-            if row['bot_name'] not in allowed_bots:
-                return {'status': 'error', 'message': 'Access denied'}, 403
-        else:
-            cursor.execute("SELECT message_ids FROM summaries WHERE id = %s", (id,))
-            row = cursor.fetchone()
-            if not row:
-                return {'status': 'ok', 'interims': [], 'remaining_messages': []}
+        cursor.execute("SELECT message_ids, bot_name, topic_name FROM summaries WHERE id = %s", (id,))
+        row = cursor.fetchone()
+        if not row:
+            return {'status': 'ok', 'interims': [], 'remaining_messages': []}
+        if allowed_bots is not None and row['bot_name'] not in allowed_bots:
+            return {'status': 'error', 'message': 'Access denied'}, 403
         if not row['message_ids']:
             return {'status': 'ok', 'interims': [], 'remaining_messages': []}
         ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
+        summary_bot   = row['bot_name']
+        summary_topic = row['topic_name']
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
     finally:
         db._commit()
 
     try:
-        interim_id_map = db.get_interim_ids_for_messages(ids)
+        interim_id_map = db.get_interim_ids_for_messages(ids,
+                                                          bot_name=summary_bot,
+                                                          topic_name=summary_topic)
 
         seen: set = set()
         ordered_interim_ids: list = []

@@ -476,7 +476,7 @@ async def generate_and_send_summary(job_data):
 
         # ── Split messages: interim-covered vs. remaining raw ───────────────
         all_ids = [m['id'] for m in all_msgs]
-        interim_id_map = db.get_interim_ids_for_messages(all_ids)  # {msg_id: interim_id}
+        interim_id_map = db.get_interim_ids_for_messages(all_ids, bot_name=bot_name, topic_name=topic_name)
 
         # Collect interim IDs in the order their first message appears
         seen_interim_ids: set = set()
@@ -610,18 +610,19 @@ async def generate_and_send_summary(job_data):
             try:
                 await client.send_message(target_chat, message_text, parse_mode='md')
                 logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
-                db.save_summary(
-                    summary_text=summary_text,
-                    message_count=total_msg_count,
-                    summary_type=schedule_type,
-                    target_entity=str(target_chat),
-                    bot_name=bot_name,
-                    topic_name=topic_name,
-                    message_ids=all_ids,
-                    tokens_used=total_tokens,
-                )
             except Exception as e:
                 logger.error(f"[ERROR] send_message to {target_chat}: {e}")
+            # Always save to DB so the summary is visible in History regardless of send outcome
+            db.save_summary(
+                summary_text=summary_text,
+                message_count=total_msg_count,
+                summary_type=schedule_type,
+                target_entity=str(target_chat),
+                bot_name=bot_name,
+                topic_name=topic_name,
+                message_ids=all_ids,
+                tokens_used=total_tokens,
+            )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
         db.mark_as_summarized(all_ids, schedule_type, bot_name, topic_name)
@@ -708,18 +709,18 @@ async def _send_speech_buckets(job_id: str, job_data: dict, buckets: list,
             for target_chat in target_channels:
                 try:
                     await client.send_message(target_chat, full_text, parse_mode='md')
-                    db.save_summary(
-                        summary_text=bucket_text,
-                        message_count=len(msg_ids),
-                        summary_type=schedule_type,
-                        target_entity=str(target_chat),
-                        bot_name=bot_name,
-                        topic_name=topic_name,
-                        message_ids=msg_ids,
-                        tokens_used=0,
-                    )
                 except Exception as e:
                     logger.error(f"[SPEECH] Failed to send bucket to {target_chat}: {e}")
+                db.save_summary(
+                    summary_text=bucket_text,
+                    message_count=len(msg_ids),
+                    summary_type=schedule_type,
+                    target_entity=str(target_chat),
+                    bot_name=bot_name,
+                    topic_name=topic_name,
+                    message_ids=msg_ids,
+                    tokens_used=0,
+                )
 
         db.mark_as_summarized(msg_ids, schedule_type, bot_name, topic_name)
         logger.info(f"[SPEECH] Sent {len(buckets)} bucket(s) | Bot: {bot_name} | Topic: {topic_name}")

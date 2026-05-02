@@ -337,19 +337,29 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_interim_ids_for_messages(self, message_ids: list) -> dict:
-        """Return {message_id: interim_id} for messages that have an interim record."""
+    def get_interim_ids_for_messages(self, message_ids: list,
+                                      bot_name: str = None, topic_name: str = None) -> dict:
+        """Return {message_id: interim_id} for messages that have an interim record.
+        Pass bot_name + topic_name to restrict to a specific topic's interims."""
         if not message_ids:
             return {}
         try:
             cursor = self._get_cursor()
+            extra = ""
+            params = [message_ids]
+            if bot_name is not None:
+                extra += " AND bot_name = %s"
+                params.append(bot_name)
+            if topic_name is not None:
+                extra += " AND topic_name = %s"
+                params.append(topic_name)
             cursor.execute(
-                """SELECT message_id, interim_id
+                f"""SELECT message_id, interim_id
                    FROM message_summarizations
                    WHERE schedule_type = 'interim'
                      AND interim_id IS NOT NULL
-                     AND message_id = ANY(%s)""",
-                (message_ids,)
+                     AND message_id = ANY(%s){extra}""",
+                params
             )
             return {row['message_id']: row['interim_id'] for row in cursor.fetchall()}
         finally:
