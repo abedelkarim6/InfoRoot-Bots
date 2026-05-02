@@ -1211,7 +1211,7 @@ async function openChannelPicker(event, type) {
 
     // Lazy-load channels from API
     if (!_pickerChannels.length) {
-        const res = await api('/api/telegram/admin_channels');
+        const res = await api('/api/telegram/userbot/dialogs');
         if (res && res.status === 'ok') _pickerChannels = res.channels || [];
     }
 
@@ -1383,7 +1383,7 @@ function showAddCollectionModal(existingName = null) {
         validateChannelTag(ch, type);
     });
     // Preload joined channels for the picker
-    api('/api/telegram/admin_channels').then(res => {
+    api('/api/telegram/userbot/dialogs').then(res => {
         if (res && res.status === 'ok') _pickerChannels = res.channels || [];
     });
 

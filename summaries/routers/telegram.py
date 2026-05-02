@@ -220,11 +220,14 @@ async def get_userbot_dialogs(request: Request):
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
             if isinstance(entity, (Channel, Chat)):
+                can_post = getattr(entity, 'creator', False) or getattr(entity, 'admin_rights', None) is not None
                 channels.append({
                     "id": entity.id,
                     "title": entity.title,
                     "username": getattr(entity, "username", None),
-                    "is_group": getattr(entity, "megagroup", False) or isinstance(entity, Chat),
+                    "is_broadcast": getattr(entity, 'broadcast', False),
+                    "is_megagroup": getattr(entity, "megagroup", False),
+                    "can_post": can_post,
                 })
 
         await client.disconnect()
