@@ -1202,6 +1202,9 @@ function closeChannelPicker() {
 
 async function openChannelPicker(event, type) {
     event.stopPropagation();
+    // Capture button ref before any await — event.currentTarget becomes null after await
+    const btn = event.currentTarget;
+
     // Toggle off if already open for the same type
     const existing = document.getElementById('ch-picker');
     if (existing) {
@@ -1223,7 +1226,6 @@ async function openChannelPicker(event, type) {
     document.body.appendChild(picker);
 
     // Position below the button
-    const btn = event.currentTarget;
     const rect = btn.getBoundingClientRect();
     picker.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 318)) + 'px';
     picker.style.top  = (rect.bottom + 6) + 'px';
