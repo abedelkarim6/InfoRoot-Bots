@@ -15,9 +15,8 @@ def test_login_wrong_password(admin_client):
     import httpx, os
     client = httpx.Client(base_url=os.getenv("TEST_BASE_URL", "http://localhost:8000"), timeout=10)
     resp = client.post("/api/auth/login", json={"username": "admin", "password": "__wrong__"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "error", "Wrong password should return status=error"
+    assert resp.status_code in (401, 403, 429), \
+        f"Wrong password should return 401/403/429, got {resp.status_code}: {resp.text}"
     client.close()
 
 

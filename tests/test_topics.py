@@ -99,7 +99,7 @@ def test_keyword_appears_in_list(admin_client, bot, category, topic):
         "bot_name": bot, "category_name": category, "topic_name": topic,
     })
     data = ok(resp, "GET /api/topic/keywords")
-    kws = [k["keyword"] for k in data.get("keywords", [])]
+    kws = data.get("keywords", [])
     assert KEYWORD in kws, f"Keyword not found in list: {kws}"
 
 
@@ -140,7 +140,7 @@ def test_rename_topic_preserves_keywords(admin_client, bot, category, topic):
         "bot_name": bot, "category_name": category, "topic_name": TOPIC2,
     })
     data = ok(resp, "GET /api/topic/keywords after rename")
-    kws = [k["keyword"] for k in data.get("keywords", [])]
+    kws = data.get("keywords", [])
     assert KEYWORD in kws, (
         f"Keyword lost after rename (regression). "
         f"Keywords under '{TOPIC2}': {kws}"

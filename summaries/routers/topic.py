@@ -126,6 +126,9 @@ def add_topic(request: Request, data: dict = Body(...)):
     if not bot_name or not category_name or not topic_name:
         return {"status": "error", "message": "Missing required fields"}
 
+    if topic_name.lower() in ('none', 'null'):
+        return {"status": "error", "message": f"'{topic_name}' is a reserved name and cannot be used as a topic"}
+
     if not _can_modify_bot(request, bot_name):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
@@ -195,7 +198,8 @@ def set_topic_catch_all(request: Request, data: dict = Body(...)):
         return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
     db = get_db()
-    if db.set_topic_catch_all(bot_name, category_name, topic_name, bool(value)):
+    owner_id = _get_request_owner_id(request, bot_name)
+    if db.set_topic_catch_all(bot_name, category_name, topic_name, bool(value), owner_id=owner_id):
         invalidate_categorizer_cache()
         return {"status": "ok", "catch_all": bool(value)}
     return {"status": "error", "message": "Topic not found"}

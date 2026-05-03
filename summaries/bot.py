@@ -387,6 +387,60 @@ async def _run_with_retry(fn, *args, max_attempts=3, base_delay=5):
     raise last_exc
 
 
+# ==================== Telegram message splitting ====================
+_TELEGRAM_MAX = 4096
+
+
+def _paragraph_split(text):
+    """Split text at the nearest paragraph (or line) break closest to the midpoint."""
+    mid = len(text) // 2
+    idx = text.rfind('\n\n', 0, mid)
+    if idx == -1:
+        idx = text.rfind('\n', 0, mid)
+    if idx == -1:
+        idx = mid
+    return [text[:idx].strip(), text[idx:].strip()]
+
+
+async def _send_with_split(client, target_chat, message_text):
+    """Send message_text, auto-splitting via AI (with paragraph fallback) if > 4096 chars."""
+    if len(message_text) <= _TELEGRAM_MAX:
+        await client.send_message(target_chat, message_text, parse_mode='md')
+        return
+
+    logger.warning(
+        f"[SPLIT] Message too long ({len(message_text)} chars) for {target_chat}, splitting via AI"
+    )
+    parts = None
+    try:
+        split_prompt = (
+            "هذا الملخص طويل جداً للإرسال عبر تيليغرام (يتجاوز 4096 حرف). "
+            "قسّمه إلى جزأين متوازنين تقريباً. "
+            "أضف '(١/٢)' في نهاية الجزء الأول و'(٢/٢)' في نهاية الجزء الثاني. "
+            "افصل بين الجزأين بكلمة SPLIT وحدها في سطر منفصل. "
+            "لا تضف أي نص أو شرح آخر.\n\n"
+            + message_text
+        )
+        split_text, _ = await _run_with_retry(llm_client.generate_summary, split_prompt)
+        candidates = [p.strip() for p in split_text.split('SPLIT', 1) if p.strip()]
+        if len(candidates) == 2 and all(len(p) <= _TELEGRAM_MAX for p in candidates):
+            parts = candidates
+        else:
+            logger.warning(
+                f"[SPLIT] AI returned {len(candidates)} part(s) or a part still too long — falling back"
+            )
+    except Exception as e:
+        logger.warning(f"[SPLIT] AI split failed ({e}) — falling back to paragraph split")
+
+    if parts is None:
+        parts = _paragraph_split(message_text)
+        parts[0] += '\n\n*(١/٢)*'
+        parts[1] += '\n\n*(٢/٢)*'
+
+    for part in parts:
+        await client.send_message(target_chat, part, parse_mode='md')
+
+
 # ==================== Summary Handler ====================
 async def generate_and_send_summary(job_data):
     """
@@ -608,7 +662,7 @@ async def generate_and_send_summary(job_data):
         # ── Send ─────────────────────────────────────────────────────────────
         for target_chat in target_channels:
             try:
-                await client.send_message(target_chat, message_text, parse_mode='md')
+                await _send_with_split(client, target_chat, message_text)
                 logger.info(f"[SENT] Bot={bot_name} | Topic={topic_name} | target={target_chat}")
             except Exception as e:
                 logger.error(f"[ERROR] send_message to {target_chat}: {e}")
@@ -1053,6 +1107,7 @@ async def schedule_summaries():
                     schedule_type = schedule.get('type')
                     prompt_key = schedule.get('prompt_key')
                     schedule_name = schedule.get('name', schedule_type)
+                    schedule_id   = schedule.get('id')
 
                     if not schedule_type or not prompt_key:
                         # logger.warning(f"Invalid schedule for topic '{topic_name}': missing type or prompt_key")
@@ -1061,7 +1116,8 @@ async def schedule_summaries():
                     schedule_header = schedule.get('header') or f"*{schedule_name}*"
                     header_datetime = schedule.get('header_datetime', False)
 
-                    job_id = f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
+                    # Use immutable DB id as job_id so renaming the schedule doesn't create a new job.
+                    job_id = f"sch:{schedule_id}" if schedule_id else f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                     job_data = {
                         'schedule_type': schedule_type,
                         'bot_name': bot_name,
@@ -1132,7 +1188,6 @@ async def schedule_summaries():
                             logger.error(f"Unknown schedule type: {schedule_type}")
                             continue
 
-                        job_id = f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                         SCHEDULER.add_job(
                             trigger_summary,
                             trigger,

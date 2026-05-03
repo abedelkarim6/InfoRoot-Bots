@@ -26,7 +26,7 @@ GET_ENDPOINTS = [
     "/api/monitor/missed",
     "/api/monitor/schedule-stats",
     "/api/monitor/schedule-history",
-    "/api/monitor/pending-messages",
+    # pending-messages requires bot/topic/schedule_type params — not smoke-testable without them
     # Dashboard
     "/api/dashboard/stats",
     # Recycle bin

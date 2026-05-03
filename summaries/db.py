@@ -612,7 +612,7 @@ class SummariesDB(Database):
         """Returns today's sent/failed counts per (bot_name, topic_name, schedule_type)."""
         try:
             cursor = self._get_cursor()
-            conditions = ["fired_at >= CURRENT_DATE"]
+            conditions = ["fired_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Beirut')::DATE"]
             params = []
             if allowed_bot_names is not None:
                 conditions.append("bot_name = ANY(%s)")
@@ -662,7 +662,6 @@ class SummariesDB(Database):
                             FROM summaries s2
                             WHERE s2.bot_name = r.bot_name
                               AND s2.topic_name = r.topic_name
-                              AND s2.message_ids IS NOT NULL
                               AND ABS(EXTRACT(EPOCH FROM (s2.timestamp - r.fired_at))) < 300
                            ) AS target_entities
                     FROM schedule_runs r
@@ -671,7 +670,6 @@ class SummariesDB(Database):
                         FROM summaries s
                         WHERE s.bot_name = r.bot_name
                           AND s.topic_name = r.topic_name
-                          AND s.message_ids IS NOT NULL
                           AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
                         ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
                         LIMIT 1
@@ -2315,6 +2313,17 @@ class SummariesDB(Database):
             cursor.execute("DELETE FROM topics WHERE category_id = %s AND name = %s", (cat_id, topic_name))
             deleted = cursor.rowcount > 0
             if deleted:
+                # Cascade-delete denormalized keyword rows (no FK so must be explicit)
+                if owner_id is None:
+                    cursor.execute(
+                        "DELETE FROM topic_keywords WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL",
+                        (bot_name, category_name, topic_name),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM topic_keywords WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s",
+                        (bot_name, category_name, topic_name, owner_id),
+                    )
                 self._bump_config_version()
             return deleted
         finally:
@@ -2330,8 +2339,13 @@ class SummariesDB(Database):
                            (new_name, cat_id, old_name))
             updated = cursor.rowcount > 0
             if updated:
-                # Cascade rename to denormalized topic_name columns
+                # Cascade rename to denormalized topic_name columns.
+                # Delete any stale rows under new_name first to avoid unique constraint conflicts.
                 if owner_id is None:
+                    cursor.execute(
+                        "DELETE FROM topic_keywords WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL",
+                        (bot_name, category_name, new_name),
+                    )
                     cursor.execute(
                         "UPDATE topic_keywords SET topic_name = %s "
                         "WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id IS NULL",
@@ -2343,6 +2357,10 @@ class SummariesDB(Database):
                         (new_name, bot_name, old_name),
                     )
                 else:
+                    cursor.execute(
+                        "DELETE FROM topic_keywords WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s",
+                        (bot_name, category_name, new_name, owner_id),
+                    )
                     cursor.execute(
                         "UPDATE topic_keywords SET topic_name = %s "
                         "WHERE bot_name = %s AND category_name = %s AND topic_name = %s AND owner_id = %s",
@@ -2395,9 +2413,9 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def set_topic_catch_all(self, bot_name: str, category_name: str, topic_name: str, value: bool) -> bool:
+    def set_topic_catch_all(self, bot_name: str, category_name: str, topic_name: str, value: bool, owner_id: int = None) -> bool:
         try:
-            cat_id = self._get_category_id(bot_name, category_name)
+            cat_id = self._get_category_id(bot_name, category_name, owner_id)
             if not cat_id:
                 return False
             cursor = self._get_cursor()

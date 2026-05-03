@@ -19,7 +19,7 @@ TEST_PREFIX = "_autotest_"
 
 
 def _load_admin_creds():
-    with open(ROOT / "config.yaml") as f:
+    with open(ROOT / "config.yaml", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     adm = cfg.get("admin", {})
     return adm.get("username", "admin"), adm.get("password", "")
@@ -48,7 +48,7 @@ def admin_client():
     resp = client.post("/api/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, f"Admin login HTTP error: {resp.text}"
     data = resp.json()
-    assert data["status"] == "ok", f"Admin login failed: {data}"
+    assert "token" in data, f"Admin login failed: {data}"
     client.headers["Authorization"] = f"Bearer {data['token']}"
 
     yield client
