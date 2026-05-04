@@ -337,10 +337,31 @@
         return sch.type;
     }
 
+    // ---------- Pending-count silent refresh ----------
+    // Re-fetches /api/monitor/data every 60s and updates only the pending counts in
+    // _monSchFlat, then re-renders the table. No loading flash, no scroll jump.
+    async function _refreshPendingCounts() {
+        try {
+            const data = await api('/api/monitor/data');
+            if (!data?.bots) return;
+            for (const item of _monSchFlat) {
+                const botData   = data.bots[item.botName];
+                if (!botData) continue;
+                const catData   = (botData.categories || {})[item.catName];
+                if (!catData) continue;
+                const topicData = (catData.topics || {})[item.topicName];
+                if (!topicData) continue;
+                item.pending = (topicData.pending || {})[item.sch.type] || 0;
+            }
+            applySchFilters();
+        } catch (_) { /* ignore network errors */ }
+    }
+
     // ---------- Countdown timer ----------
     function startMonitorCountdowns() {
         if (_monitorTimerInterval) clearInterval(_monitorTimerInterval);
         _monitorTimerInterval = setInterval(tickCountdowns, 1000);
+        setInterval(_refreshPendingCounts, 60000);
         tickCountdowns();
     }
 

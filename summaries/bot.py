@@ -1012,12 +1012,10 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     async with lock:
         try:
             schedules = db.get_schedules_for_topic(bot_name, topic_name)
-            bp_sch = next((s for s in schedules if s.get('bullet_points')), None)
+            bp_sch  = next((s for s in schedules if s.get('bullet_points')), None)
+            b_count = int(bp_sch.get('bullet_points_count') or 10) if bp_sch else 0
             if bp_sch:
-                b_count = int(bp_sch.get('bullet_points_count') or 10)
                 batch_limit = max(1, 26 - b_count)
-            elif schedules:
-                batch_limit = 20
             else:
                 batch_limit = 20
             while True:
@@ -1048,7 +1046,10 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                         + "\n---\n".join(texts)
                     )
                 else:
-                    prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
+                    prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name, b=b_count)
+
+                if b_count:
+                    prompt += '\n\n' + get_bullet_points_suffix(b_count)
 
                 summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
 

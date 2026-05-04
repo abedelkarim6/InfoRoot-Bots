@@ -40,6 +40,26 @@
         applyMonMessageFilters();
     }
 
+    // Silent background refresh — no "Loading…" flash, no scroll jump.
+    // Skips re-render if the newest message hasn't changed.
+    async function _silentRefreshMessages() {
+        try {
+            const data = await api(`/api/monitor/messages?limit=${_MSG_PAGE_SIZE}&offset=0`);
+            if (data?.status !== 'ok') return;
+            const newMsgs = data.messages || [];
+            if (!newMsgs.length) return;
+            // If the top message id is unchanged, nothing new arrived
+            if (_allMessages.length && newMsgs[0].id === _allMessages[0].id) return;
+            const scrollY = window.scrollY;
+            _allMessages = newMsgs;
+            _msgOffset   = newMsgs.length;
+            _msgHasMore  = newMsgs.length === _MSG_PAGE_SIZE;
+            renderMonMessages();
+            window.scrollTo(0, scrollY);
+        } catch (_) { /* ignore network errors */ }
+    }
+    setInterval(_silentRefreshMessages, 30000);
+
     let _msgFlatView = false;
 
     function toggleMsgFlatView() {
