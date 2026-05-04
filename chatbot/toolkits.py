@@ -26,7 +26,7 @@ def _expand_search_terms(question: str) -> list[str]:
         cfg = load_config()
         gemini_cfg = cfg.get("gemini", {})
         project = gemini_cfg.get("project", "")
-        location = gemini_cfg.get("location", "us-central1")
+        location = gemini_cfg.get("location", "global")
         if not project:
             return [question]
 

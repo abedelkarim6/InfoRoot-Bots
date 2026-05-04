@@ -140,7 +140,7 @@ async def _yt_telegram_send(target: str, text: str):
 _gemini_cfg = _cfg.get("gemini", {})
 init_worker(
     gemini_project=_yt_cfg.get("gemini_project", "") or _gemini_cfg.get("project", ""),
-    gemini_location=_yt_cfg.get("gemini_location", "") or _gemini_cfg.get("location", "us-central1"),
+    gemini_location=_yt_cfg.get("gemini_location", "") or _gemini_cfg.get("location", "global"),
     youtube_data_api_key=_yt_cfg.get("data_api_key", ""),
     telegram_send_fn=_yt_telegram_send,
 )

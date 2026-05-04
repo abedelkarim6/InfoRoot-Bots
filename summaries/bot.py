@@ -1254,7 +1254,7 @@ async def run_bot():
     else:
         llm_client = GeminiClient(
             project=config["gemini"]["project"],
-            location=config["gemini"].get("location", "us-central1"),
+            location=config["gemini"].get("location", "global"),
             model=config["gemini"].get("model", "gemini-2.5-flash"))
 
     API_ID = config["telegram"]["api_id"]

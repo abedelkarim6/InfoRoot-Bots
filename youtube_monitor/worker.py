@@ -29,7 +29,7 @@ _telegram_send_fn = None  # async callable(target, text) set by app.py
 _youtube_data_api_key = ""
 
 
-def init_worker(gemini_project: str = "", gemini_location: str = "us-central1",
+def init_worker(gemini_project: str = "", gemini_location: str = "global",
                 youtube_data_api_key: str = "", telegram_send_fn=None):
     global _gemini_client, _telegram_send_fn, _youtube_data_api_key
     if gemini_project:

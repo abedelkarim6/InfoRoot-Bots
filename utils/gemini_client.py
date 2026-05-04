@@ -5,6 +5,7 @@ Authentication uses Application Default Credentials (ADC) set by:
 """
 
 import time
+import random
 import logging
 import google.genai as genai
 from google.genai import types
@@ -12,21 +13,24 @@ from summaries.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
-# Exponential backoff on 429: waits 5s, 10s, 20s, 40s before giving up
-_RETRY_DELAYS = [5, 10, 20, 40]
+# 429 retry base delays with full jitter (actual sleep = random(0, base)).
+# Jitter prevents overlapping schedule jobs from all retrying simultaneously.
+# Base delays exceed the 60s RPM window so a rate-limited retry has a fair chance.
+_RETRY_BASE_DELAYS = [65, 130]
 
 
 class GeminiClient:
     """Client for interacting with Gemini via Vertex AI."""
 
-    def __init__(self, project: str, location: str = "us-central1", model: str = "gemini-2.5-flash",
+    def __init__(self, project: str, location: str = "global", model: str = "gemini-2.5-flash",
                  user_id: int | None = None):
         self.project    = project
         self.location   = location
         self.model_name = model
         self.user_id    = user_id
+        # "global" spreads load across regions and reduces 429s from per-region capacity limits.
         self.client     = genai.Client(vertexai=True, project=project, location=location)
-        logger.info(f"Gemini (Vertex AI) client initialized — project={project} model={model}")
+        logger.info(f"Gemini (Vertex AI) client initialized — project={project} model={model} location={location}")
 
     def generate_summary(self, prompt: str) -> tuple[str, int]:
         full_prompt = f"{get_system_prompt()}\n\n{prompt}"
@@ -35,10 +39,14 @@ class GeminiClient:
             labels["user_id"] = str(self.user_id)
 
         last_exc = None
-        for attempt, delay in enumerate([0] + _RETRY_DELAYS):
-            if delay:
-                logger.warning(f"[GEMINI] 429 rate-limited — retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})")
-                time.sleep(delay)
+        for attempt, base_delay in enumerate([0] + _RETRY_BASE_DELAYS):
+            if base_delay:
+                jittered = random.uniform(0, base_delay)
+                logger.warning(
+                    f"[GEMINI] 429 rate-limited — retrying in {jittered:.0f}s "
+                    f"(attempt {attempt}/{len(_RETRY_BASE_DELAYS)})"
+                )
+                time.sleep(jittered)
             try:
                 response = self.client.models.generate_content(
                     model=self.model_name,
@@ -70,5 +78,5 @@ class GeminiClient:
                 logger.error(f"Error generating Vertex AI summary: {e}")
                 raise
 
-        logger.error(f"[GEMINI] All retries exhausted after 429 errors: {last_exc}")
+        logger.error(f"[GEMINI] All {len(_RETRY_BASE_DELAYS) + 1} attempts exhausted after 429 errors: {last_exc}")
         raise last_exc

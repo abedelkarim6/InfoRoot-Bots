@@ -34,7 +34,7 @@ def _load_gemini_config():
     cfg = load_config()
     gemini_cfg = cfg.get("gemini", {})
     project  = gemini_cfg.get("project", "")
-    location = gemini_cfg.get("location", "us-central1")
+    location = gemini_cfg.get("location", "global")
     model_id = gemini_cfg.get("model", "gemini-2.0-flash")
     return project, location, model_id
 

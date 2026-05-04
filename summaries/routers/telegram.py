@@ -537,7 +537,7 @@ async def tester_generate_summary(request: Request, data: dict = Body(...)):
             from utils.gemini_client import GeminiClient
             llm = GeminiClient(
                 project=cfg["gemini"]["project"],
-                location=cfg["gemini"].get("location", "us-central1"),
+                location=cfg["gemini"].get("location", "global"),
                 model=cfg["gemini"].get("model", "gemini-2.5-flash"),
             )
         else:
@@ -629,7 +629,7 @@ async def tester_manual_summary(request: Request, data: dict = Body(...)):
             from utils.gemini_client import GeminiClient
             llm = GeminiClient(
                 project=cfg["gemini"]["project"],
-                location=cfg["gemini"].get("location", "us-central1"),
+                location=cfg["gemini"].get("location", "global"),
                 model=cfg["gemini"].get("model", "gemini-2.5-flash"),
             )
         else:
