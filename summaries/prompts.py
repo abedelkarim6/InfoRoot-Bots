@@ -112,9 +112,20 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str,
 
     class _SafeDict(dict):
         def __missing__(self, key):
-            return '{' + key + '}'
+            return '{' + str(key) + '}'
 
-    fmt = string.Formatter()
+    class _SafeFormatter(string.Formatter):
+        """Like string.Formatter but keeps unknown/positional placeholders as literal text."""
+        def get_value(self, key, args, kwargs):
+            if isinstance(key, int):
+                # Positional placeholder {0}, {1}, … — pass through as literal
+                return '{' + str(key) + '}'
+            try:
+                return kwargs[key]
+            except KeyError:
+                return '{' + key + '}'
+
+    fmt = _SafeFormatter()
 
     subs = _SafeDict(
         messages=combined_news,

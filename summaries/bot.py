@@ -1018,6 +1018,11 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 batch_limit = max(1, 26 - b_count)
             else:
                 batch_limit = 20
+            logger.info(
+                f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
+                f"| schedules={len(schedules)} | bullet_pts={'YES b=' + str(b_count) if bp_sch else 'NO'} "
+                f"| batch_limit={batch_limit}"
+            )
             while True:
                 count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
                 if count < batch_limit:
@@ -1032,10 +1037,12 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 texts   = [m['text'] for m in messages]
                 msg_ids = [m['id'] for m in messages]
 
-                # Rolling cumulative: merge previous interim output + new messages
+                # Rolling cumulative: build new-messages prompt via user's template,
+                # then prepend the previous interim as rolling context when present.
                 prev_interim = db.get_latest_interim(bot_name, topic_name)
                 prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
 
+                new_msgs_prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name, b=b_count)
                 if prev_text:
                     prompt = (
                         "فيما يلي ملخص سابق يغطي الأخبار السابقة:\n\n"
@@ -1043,10 +1050,10 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                         + "\n\n---\n\n"
                         "يرجى تحديث هذا الملخص بإضافة الأخبار الجديدة التالية وإنتاج ملخص واحد متكامل "
                         "ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                        + "\n---\n".join(texts)
+                        + new_msgs_prompt
                     )
                 else:
-                    prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name, b=b_count)
+                    prompt = new_msgs_prompt
 
                 if b_count:
                     prompt += '\n\n' + get_bullet_points_suffix(b_count)

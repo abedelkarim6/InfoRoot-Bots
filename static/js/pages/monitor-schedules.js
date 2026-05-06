@@ -8,9 +8,10 @@
     function renderMonitorBots(bots) {
         // Build flat schedule list for filtering/sorting
         _monSchFlat = [];
-        const allBots   = new Set();
-        const allTopics = new Set();
+        const allBots    = new Set();
+        const allTopics  = new Set();
         const allPrompts = new Set();
+        const allTypes   = new Set();
         for (const botName in bots) {
             const botData = bots[botName];
             allBots.add(botName);
@@ -27,6 +28,7 @@
                     for (let i = 0; i < schedules.length; i++) {
                         const sch = schedules[i];
                         if (sch.prompt_key) allPrompts.add(sch.prompt_key);
+                        if (sch.type) allTypes.add(sch.type);
                         _monSchFlat.push({
                             botName, catName, topicName,
                             botEnabled: botData.enabled,
@@ -41,6 +43,7 @@
         populateMonMultiSelect('sch-filter-bot-wrap',    [...allBots].sort());
         populateMonMultiSelect('sch-filter-topic-wrap',  [...allTopics].sort());
         populateMonMultiSelect('sch-filter-prompt-wrap', [...allPrompts].sort());
+        populateMonMultiSelect('sch-filter-type-wrap',   [...allTypes].sort());
         applySchFilters();
     }
 
@@ -178,14 +181,16 @@
 
     function applySchFilters() {
         const container = document.getElementById('monitor-bots-container');
+        const selBots    = getMonMsValues('sch-filter-bot-wrap');
         const selTopics  = getMonMsValues('sch-filter-topic-wrap');
         const selPrompts = getMonMsValues('sch-filter-prompt-wrap');
+        const selTypes   = getMonMsValues('sch-filter-type-wrap');
 
-        const selBots = getMonMsValues('sch-filter-bot-wrap');
         let items = _monSchFlat.filter(r => r.botEnabled !== false && r.topicEnabled !== false && r.sch.enabled !== false);
-        if (selBots.size   > 0) items = items.filter(r => selBots.has(r.botName));
+        if (selBots.size    > 0) items = items.filter(r => selBots.has(r.botName));
         if (selTopics.size  > 0) items = items.filter(r => selTopics.has(r.topicName));
         if (selPrompts.size > 0) items = items.filter(r => selPrompts.has(r.sch.prompt_key || ''));
+        if (selTypes.size   > 0) items = items.filter(r => selTypes.has(r.sch.type || ''));
 
         if (!items.length) {
             container.innerHTML = '<p class="mon-empty">No enabled schedules match the filter.</p>';
@@ -900,6 +905,10 @@
         const panel = document.getElementById('mon-tab-schedules');
         panel.innerHTML = `
             <div class="mon-filter-bar">
+                <div class="mon-multi-select" id="sch-filter-bot-wrap" data-onchange="applySchFilters" data-label="All Bots">
+                    <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-bot-wrap')">All Bots <span class="mon-ms-arrow">▾</span></button>
+                    <div class="mon-ms-dropdown" id="sch-filter-bot-dd"></div>
+                </div>
                 <div class="mon-multi-select" id="sch-filter-topic-wrap" data-onchange="applySchFilters" data-label="All Topics">
                     <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-topic-wrap')">All Topics <span class="mon-ms-arrow">▾</span></button>
                     <div class="mon-ms-dropdown" id="sch-filter-topic-dd"></div>
@@ -907,6 +916,10 @@
                 <div class="mon-multi-select" id="sch-filter-prompt-wrap" data-onchange="applySchFilters" data-label="All Prompts">
                     <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-prompt-wrap')">All Prompts <span class="mon-ms-arrow">▾</span></button>
                     <div class="mon-ms-dropdown" id="sch-filter-prompt-dd"></div>
+                </div>
+                <div class="mon-multi-select" id="sch-filter-type-wrap" data-onchange="applySchFilters" data-label="All Types">
+                    <button class="select mon-filter-sel mon-ms-btn" type="button" onclick="toggleMonMultiSelect('sch-filter-type-wrap')">All Types <span class="mon-ms-arrow">▾</span></button>
+                    <div class="mon-ms-dropdown" id="sch-filter-type-dd"></div>
                 </div>
                 <label class="mon-sort-label"><input type="checkbox" id="sch-sort-time" onchange="applySchFilters()"> Sort by next run</label>
             </div>
