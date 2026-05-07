@@ -522,10 +522,20 @@ async def generate_and_send_summary(job_data):
 
         if total_msg_count == 0:
             logger.info(f"[SKIP] No messages with content | Bot={bot_name} | Topic={topic_name}")
+            db.log_schedule_run(
+                bot_name=bot_name, topic_name=topic_name, schedule_type=schedule_type,
+                status='failed', message_count=0,
+                error_text=f"number of messages 0 less than min_msgs {min_messages}",
+            )
             return
 
         if total_msg_count < min_messages:
             logger.info(f"[SKIP] Not enough messages ({total_msg_count}/{min_messages}) | Bot={bot_name} | Topic={topic_name}")
+            db.log_schedule_run(
+                bot_name=bot_name, topic_name=topic_name, schedule_type=schedule_type,
+                status='failed', message_count=total_msg_count,
+                error_text=f"number of messages {total_msg_count} less than min_msgs {min_messages}",
+            )
             return
 
         # ── Split messages: interim-covered vs. remaining raw ───────────────

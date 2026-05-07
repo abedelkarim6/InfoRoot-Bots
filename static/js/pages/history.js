@@ -142,6 +142,9 @@
         } else if (/503|unavailable/i.test(err)) {
             label   = '503 Service Unavailable — AI backend is down';
             isKnown = true;
+        } else if (/less than min_msgs/i.test(err)) {
+            label   = 'Not enough messages — below minimum threshold';
+            isKnown = true;
         }
 
         const safeErr   = escapeHtml(err);
@@ -154,6 +157,8 @@
                     ? 'The AI API rate limit was hit. The next scheduled run should succeed automatically once the quota resets.'
                     : /499|cancel/i.test(err)
                     ? 'The request was cancelled before the AI could respond — usually a timeout or network interruption. The next run will retry.'
+                    : /less than min_msgs/i.test(err)
+                    ? 'The number of messages collected in the time window was below the bot\'s configured minimum_messages — no summary was generated.'
                     : 'An error occurred with the AI backend.'}
             </p>` : ''}
             <details style="margin-top:8px;">
