@@ -40,9 +40,22 @@ class Database:
         """
         dsn: PostgreSQL connection string, e.g.:
              "postgresql://user:password@localhost:5432/botdb"
+        Pool sizes can be tuned via env vars without code changes:
+        DB_MIN_CONNECTIONS (default 2), DB_MAX_CONNECTIONS (default 50).
         """
+        import os
         self.dsn = dsn
-        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=20, dsn=dsn)
+        try:
+            min_conn = max(1, int(os.environ.get("DB_MIN_CONNECTIONS", "2")))
+        except ValueError:
+            min_conn = 2
+        try:
+            max_conn = max(min_conn, int(os.environ.get("DB_MAX_CONNECTIONS", "50")))
+        except ValueError:
+            max_conn = 50
+        self.pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=min_conn, maxconn=max_conn, dsn=dsn,
+        )
         self._local = threading.local()
         self._create_tables()
 
@@ -257,6 +270,11 @@ class Database:
                 cursor.execute('ALTER TABLE summaries ADD COLUMN message_ids TEXT')
             if 'tokens_used' not in cols2:
                 cursor.execute('ALTER TABLE summaries ADD COLUMN tokens_used INTEGER DEFAULT 0')
+            # `thoughts`: when Gemini's "Extended Thinking" toggle is on, we
+            # capture the model's reasoning trace (parts where part.thought
+            # is True) and store it here for inspection on the AI Usage page.
+            if 'thoughts' not in cols2:
+                cursor.execute('ALTER TABLE summaries ADD COLUMN thoughts TEXT')
 
             # ==================== Config tables (replaces config.yaml) ====================
 

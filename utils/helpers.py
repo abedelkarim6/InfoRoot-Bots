@@ -1,11 +1,15 @@
 import asyncio
 import collections
+import copy
 import datetime
 import io
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
 import time
 import yaml
 import logging
@@ -49,12 +53,82 @@ class _MemoryLogHandler(logging.Handler):
 _memory_handler: _MemoryLogHandler = None  # type: ignore[assignment]
 
 
+# ── Sensitive-data redaction ─────────────────────────────────────
+class _RedactingFilter(logging.Filter):
+    """Redact obvious secrets from log messages before they hit any handler.
+    Operates on the formatted message (so it catches both `%s`-style and
+    f-string usage). Best-effort — designed not to crash the logger."""
+
+    # Long b64-ish strings that follow a "session"/"string_session" key,
+    # bare Telethon session strings (start with "1" + 350+ b64 chars),
+    # API keys (Google/OpenAI prefixes + assignment patterns), and DB
+    # passwords embedded in a DSN.
+    _PATTERNS = [
+        (re.compile(r'(?i)((?:string_)?session(?:_string)?["\']?\s*[:=]\s*["\']?)([A-Za-z0-9+/=_\-]{40,})'),
+         r'\1[REDACTED_SESSION]'),
+        (re.compile(r'\b1[A-Za-z0-9_\-]{300,}=*\b'),  # raw Telethon session
+         '[REDACTED_SESSION]'),
+        (re.compile(r'(?i)(api[_-]?key["\']?\s*[:=]\s*["\']?)([A-Za-z0-9_\-]{16,})'),
+         r'\1[REDACTED_API_KEY]'),
+        (re.compile(r'\bAIza[0-9A-Za-z_\-]{30,}\b'),  # Google API key
+         '[REDACTED_API_KEY]'),
+        (re.compile(r'\bsk-[A-Za-z0-9]{20,}\b'),  # OpenAI key
+         '[REDACTED_API_KEY]'),
+        (re.compile(r'(?i)(password["\']?\s*[:=]\s*["\']?)([^\s"\',}]+)'),
+         r'\1[REDACTED]'),
+        (re.compile(r'(?i)(bearer\s+)([A-Za-z0-9._\-]{10,})'),
+         r'\1[REDACTED_TOKEN]'),
+        (re.compile(r'(postgres(?:ql)?://[^:/\s]+:)([^@\s]+)(@)'),
+         r'\1[REDACTED]\3'),
+    ]
+
+    def _redact(self, text: str) -> str:
+        try:
+            for pattern, replacement in self._PATTERNS:
+                text = pattern.sub(replacement, text)
+        except Exception:
+            pass
+        return text
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            # Pre-render and store on the record so every handler sees the same
+            # redacted text. Format here once instead of per-handler.
+            msg = record.getMessage()
+            redacted = self._redact(msg)
+            if redacted != msg:
+                record.msg = redacted
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+_redacting_filter = _RedactingFilter()
+
+
+def install_redaction_filter() -> None:
+    """Attach the sensitive-data redaction filter to every handler on the root
+    logger. Logger-level filters in Python don't apply to records that
+    propagate from descendant loggers, so the filter MUST live on the
+    handlers to actually catch everything. Idempotent."""
+    root = logging.getLogger()
+    for h in root.handlers:
+        if not any(isinstance(f, _RedactingFilter) for f in h.filters):
+            h.addFilter(_redacting_filter)
+
+
 def init_memory_log_handler(maxlen: int = 1000) -> _MemoryLogHandler:
     """Attach a memory log handler to the root logger. Call once at app startup."""
     global _memory_handler
     _memory_handler = _MemoryLogHandler(maxlen=maxlen)
     _memory_handler.setLevel(logging.INFO)
+    # Also apply the filter at the handler level — guarantees the buffered
+    # records the UI displays are redacted, even if a handler is attached
+    # elsewhere without the root-level filter.
+    _memory_handler.addFilter(_redacting_filter)
     logging.getLogger().addHandler(_memory_handler)
+    install_redaction_filter()
     return _memory_handler
 
 
@@ -73,15 +147,61 @@ def clear_log_records():
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(_BASE_DIR, "config.yaml")
 PROMPTS_FILE = os.path.join(_BASE_DIR, "prompts.yaml")
-# ==================== Configuration ====================
-def load_config():
-    """Load configuration from YAML file."""
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+
+# Hot-reload cache: serves the parsed YAML if the file mtime hasn't changed,
+# avoiding a disk read on every load_config() call (called per-request in many
+# routers). Reload is automatic — no signal/restart needed.
+_config_cache = None
+_config_mtime = 0.0
+_config_lock = threading.Lock()
+
+
+def atomic_write_yaml(path: str, data) -> None:
+    """Write YAML to `path` atomically (temp file + os.replace) so a crash
+    mid-write can never leave a corrupt config behind. Cross-platform safe."""
+    target_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".cfg-", suffix=".tmp", dir=target_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_path, path)  # atomic on POSIX and Windows (Python 3.3+)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def load_config(force_reload: bool = False):
+    """Load configuration from YAML file. Caches the parsed dict and reloads
+    only when the file mtime changes (or `force_reload=True`).
+
+    Returns a deep copy so callers may freely mutate the result without
+    polluting the cache (preserves the original "fresh dict per call"
+    semantics)."""
+    global _config_cache, _config_mtime
+    with _config_lock:
+        try:
+            mtime = os.path.getmtime(CONFIG_FILE)
+        except OSError:
+            mtime = 0.0
+        if force_reload or _config_cache is None or mtime != _config_mtime:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                _config_cache = yaml.safe_load(f) or {}
+            _config_mtime = mtime
+        return copy.deepcopy(_config_cache)
+
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    """Persist the config atomically and invalidate the in-memory cache so the
+    next load_config() reflects the change."""
+    global _config_cache, _config_mtime
+    atomic_write_yaml(CONFIG_FILE, cfg)
+    with _config_lock:
+        _config_cache = None
+        _config_mtime = 0.0
 
 def load_prompts():
     try:
@@ -91,8 +211,7 @@ def load_prompts():
         return {}
 
 def save_prompts(prompts):
-    with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
-        yaml.safe_dump(prompts, f, allow_unicode=True)
+    atomic_write_yaml(PROMPTS_FILE, prompts)
 
 def setup_logging(config):
     """Setup logging with file rotation."""

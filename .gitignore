@@ -13,3 +13,9 @@ userbot.session
 venv/
 todo
 CLAUDE.md
+
+# React frontend (Phase 1)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+static_react/

@@ -1,11 +1,12 @@
 """
 Authentication router — login / logout / register with in-memory token store.
 Tokens are 64-char hex strings that expire after 24 hours.
-Failed logins are rate-limited: 5 attempts → 15-minute lockout per IP.
+Failed logins are rate-limited per-IP and per-account.
 """
 
 import hashlib
 import hmac
+import re
 import time
 import secrets
 from typing import Optional
@@ -28,18 +29,39 @@ router = APIRouter()
 _tokens: dict[str, float] = {}
 # token -> user_id  (None for the admin account)
 _token_users: dict[str, Optional[int]] = {}
+# token -> {"ua": sha256[:16], "ip_subnet": "1.2.3"}  — used for anomaly detection
+_token_bindings: dict[str, dict] = {}
 TOKEN_TTL = 86400  # 24 hours
 
 
-def create_token(user_id: Optional[int] = None) -> str:
+def _ua_hash(user_agent: str) -> str:
+    return hashlib.sha256((user_agent or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _ip_subnet(ip: str) -> str:
+    """Reduce an IP to a coarse subnet so legitimate carrier-NAT changes don't trip warnings.
+    IPv4 → /24 (first three octets). IPv6 → first 4 hex groups (~/64)."""
+    ip = ip or ""
+    if ":" in ip:
+        return ":".join(ip.split(":")[:4])
+    parts = ip.split(".")
+    return ".".join(parts[:3]) if len(parts) >= 3 else ip
+
+
+def create_token(user_id: Optional[int] = None, user_agent: str = "", ip_address: str = "") -> str:
     token = secrets.token_hex(32)
     _tokens[token] = time.time() + TOKEN_TTL
     _token_users[token] = user_id
+    _token_bindings[token] = {
+        "ua": _ua_hash(user_agent),
+        "ip_subnet": _ip_subnet(ip_address),
+    }
     _cleanup_expired()
     return token
 
 
-def validate_token(token: str) -> bool:
+def validate_token(token: str, user_agent: str = "", ip_address: str = "") -> bool:
+    """Validate token expiry; log (but do not reject) UA/subnet drift for anomaly detection."""
     if not token:
         return False
     expiry = _tokens.get(token)
@@ -48,13 +70,26 @@ def validate_token(token: str) -> bool:
     if time.time() > expiry:
         _tokens.pop(token, None)
         _token_users.pop(token, None)
+        _token_bindings.pop(token, None)
         return False
+    # Anomaly detection — never rejects, just warns. Keeps behavior compatible
+    # with legitimate proxy/UA changes while leaving a forensic trail.
+    binding = _token_bindings.get(token)
+    if binding and (user_agent or ip_address):
+        new_ua = _ua_hash(user_agent) if user_agent else binding["ua"]
+        new_subnet = _ip_subnet(ip_address) if ip_address else binding["ip_subnet"]
+        if new_ua != binding["ua"] or new_subnet != binding["ip_subnet"]:
+            logger.warning(
+                f"[AUTH] Token {token[:8]}… used with drifted binding: "
+                f"ua {binding['ua']}→{new_ua}, subnet {binding['ip_subnet']}→{new_subnet}"
+            )
     return True
 
 
 def revoke_token(token: str):
     _tokens.pop(token, None)
     _token_users.pop(token, None)
+    _token_bindings.pop(token, None)
 
 
 def revoke_all_tokens_for_user(user_id: int):
@@ -63,6 +98,7 @@ def revoke_all_tokens_for_user(user_id: int):
     for t in to_revoke:
         _tokens.pop(t, None)
         _token_users.pop(t, None)
+        _token_bindings.pop(t, None)
 
 
 def get_token_user_id(token: str) -> Optional[int]:
@@ -74,6 +110,7 @@ def _cleanup_expired():
     for t in [k for k, v in _tokens.items() if v < now]:
         _tokens.pop(t, None)
         _token_users.pop(t, None)
+        _token_bindings.pop(t, None)
 
 
 # ── Password hashing (PBKDF2-HMAC-SHA256, stdlib only) ───────────────────────
@@ -96,11 +133,37 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+# ── Password policy ──────────────────────────────
+PASSWORD_MIN_LEN = 12
+_PW_SPECIAL_RE = re.compile(r'[!@#$%^&*(),.?":{}|<>_\-+=\[\]/\\\'`~;]')
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    """Return (ok, error_message). Enforces length + 3-of-4 character classes."""
+    if not isinstance(password, str) or len(password) < PASSWORD_MIN_LEN:
+        return False, f"Password must be at least {PASSWORD_MIN_LEN} characters."
+    classes = sum([
+        bool(re.search(r'[A-Z]', password)),
+        bool(re.search(r'[a-z]', password)),
+        bool(re.search(r'\d', password)),
+        bool(_PW_SPECIAL_RE.search(password)),
+    ])
+    if classes < 3:
+        return False, "Password must include at least 3 of: uppercase, lowercase, digit, special character."
+    return True, ""
+
+
 # ── Rate limiting ────────────────────────────────
 # ip -> {"count": int, "locked_until": float}
 _failed: dict[str, dict] = {}
+# username (lowercased) -> {"count": int, "locked_until": float}
+_failed_by_user: dict[str, dict] = {}
 MAX_ATTEMPTS = 5
 LOCKOUT_SECS = 15 * 60  # 15 minutes
+# Per-account threshold is more lenient since legitimate users may share an IP
+# (corporate NAT) and an attacker rotating IPs would otherwise still be capped here.
+USER_MAX_ATTEMPTS = 10
+USER_LOCKOUT_SECS = 30 * 60
 
 
 def _client_ip(request: Request) -> str:
@@ -108,6 +171,10 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _client_user_agent(request: Request) -> str:
+    return request.headers.get("user-agent", "") or ""
 
 
 def _get_bearer(request: Request) -> Optional[str]:
@@ -154,15 +221,26 @@ class LoginRequest(BaseModel):
 @router.post("/auth/login")
 def login(req: LoginRequest, request: Request):
     ip  = _client_ip(request)
+    ua  = _client_user_agent(request)
     now = time.time()
+    username_key = (req.username or "").strip().lower()
 
     info = _failed.get(ip, {"count": 0, "locked_until": 0.0})
+    user_info = _failed_by_user.get(username_key, {"count": 0, "locked_until": 0.0})
 
-    # Locked out?
+    # Locked out by IP?
     if info["locked_until"] > now:
         remaining_mins = int((info["locked_until"] - now) / 60) + 1
         return JSONResponse(
             {"error": f"Too many failed attempts. Try again in {remaining_mins} min.", "locked": True},
+            status_code=429,
+        )
+
+    # Locked out by account? (defends against IP-rotation brute force)
+    if user_info["locked_until"] > now:
+        remaining_mins = int((user_info["locked_until"] - now) / 60) + 1
+        return JSONResponse(
+            {"error": f"This account is temporarily locked. Try again in {remaining_mins} min.", "locked": True},
             status_code=429,
         )
 
@@ -205,17 +283,27 @@ def login(req: LoginRequest, request: Request):
 
     if not valid:
         info["count"] = info.get("count", 0) + 1
-        attempts_left = max(0, MAX_ATTEMPTS - info["count"])
+        user_info["count"] = user_info.get("count", 0) + 1
 
-        if info["count"] >= MAX_ATTEMPTS:
+        ip_locked = info["count"] >= MAX_ATTEMPTS
+        user_locked = user_info["count"] >= USER_MAX_ATTEMPTS
+
+        if ip_locked:
             info["locked_until"] = now + LOCKOUT_SECS
-            _failed[ip] = info
+        if user_locked:
+            user_info["locked_until"] = now + USER_LOCKOUT_SECS
+
+        _failed[ip] = info
+        _failed_by_user[username_key] = user_info
+
+        if ip_locked or user_locked:
+            mins = (USER_LOCKOUT_SECS if user_locked else LOCKOUT_SECS) // 60
             return JSONResponse(
-                {"error": f"Account locked for {LOCKOUT_SECS // 60} minutes after too many failed attempts.", "locked": True},
+                {"error": f"Account locked for {mins} minutes after too many failed attempts.", "locked": True},
                 status_code=429,
             )
 
-        _failed[ip] = info
+        attempts_left = max(0, MAX_ATTEMPTS - info["count"])
         return JSONResponse(
             {
                 "error": f"Invalid credentials. {attempts_left} attempt{'s' if attempts_left != 1 else ''} remaining.",
@@ -224,9 +312,10 @@ def login(req: LoginRequest, request: Request):
             status_code=401,
         )
 
-    # Success — clear fail record
+    # Success — clear fail records (both IP and account)
     _failed.pop(ip, None)
-    token = create_token(user_id=user_id)
+    _failed_by_user.pop(username_key, None)
+    token = create_token(user_id=user_id, user_agent=ua, ip_address=ip)
     return {"token": token}
 
 
@@ -338,8 +427,9 @@ def register(req: RegisterRequest, request: Request):
     username = req.username.strip()
     if len(username) < 3:
         return JSONResponse({"error": "Username must be at least 3 characters."}, status_code=400)
-    if len(req.password) < 6:
-        return JSONResponse({"error": "Password must be at least 6 characters."}, status_code=400)
+    ok, err = validate_password_strength(req.password)
+    if not ok:
+        return JSONResponse({"error": err}, status_code=400)
 
     db = get_db()
     if db.get_user_by_username(username):
@@ -609,8 +699,9 @@ def change_password(req: ChangePasswordRequest, request: Request):
     if not verify_password(req.current_password, user["password_hash"]):
         return JSONResponse({"error": "Current password is incorrect."}, status_code=400)
 
-    if len(req.new_password) < 6:
-        return JSONResponse({"error": "New password must be at least 6 characters."}, status_code=400)
+    ok, err = validate_password_strength(req.new_password)
+    if not ok:
+        return JSONResponse({"error": err}, status_code=400)
 
     new_hash = hash_password(req.new_password)
     try:

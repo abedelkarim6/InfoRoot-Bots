@@ -1,0 +1,12 @@
+/* ===========================================================================
+ * React-specific layout fixes.
+ *
+ * Keep this file MINIMAL. The legacy CSS already gets layout right; we only
+ * patch what's actually broken by the SPA shell.
+ * ========================================================================= */
+
+/* React mounts everything inside #root. Make sure it's a normal block so
+   the legacy fixed-sidebar + body-scroll layout works as intended. */
+#root {
+    display: block;
+}

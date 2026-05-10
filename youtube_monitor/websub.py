@@ -25,6 +25,41 @@ def _get_default_targets() -> list:
         return []
 
 
+def _get_websub_secret() -> str:
+    """Return the configured WebSub HMAC secret, or '' if not set.
+    When set, callbacks are signed by the hub and verified here. When unset,
+    behavior is unchanged (callbacks accepted) so existing deployments keep working."""
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        return (cfg.get("youtube", {}) or {}).get("websub_secret", "") or ""
+    except Exception:
+        return ""
+
+
+def verify_signature(body: bytes, signature_header: str) -> bool:
+    """Verify the X-Hub-Signature header against the configured secret.
+    Returns True when the signature matches. Always returns True if no secret
+    is configured (opt-in mode). Returns False if a secret is set but signature
+    is missing or wrong."""
+    secret = _get_websub_secret()
+    if not secret:
+        # Opt-in: no secret configured → accept (and warn elsewhere)
+        return True
+    sig = (signature_header or "").strip()
+    if not sig.startswith("sha1=") and not sig.startswith("sha256="):
+        return False
+    if sig.startswith("sha1="):
+        algo = "sha1"
+        expected = sig[5:]
+        digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha1).hexdigest()
+    else:
+        algo = "sha256"
+        expected = sig[7:]
+        digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected.lower(), digest.lower())
+
+
 WEBSUB_HUB = "https://pubsubhubbub.appspot.com/subscribe"
 YOUTUBE_TOPIC_BASE = "https://www.youtube.com/xml/feeds/videos.xml?channel_id="
 
@@ -35,6 +70,7 @@ LEASE_SECONDS = 9 * 24 * 3600
 async def subscribe_channel(channel_id: str, callback_url: str, secret: str = None):
     """
     Send a WebSub subscription request for a YouTube channel.
+    If `secret` is not provided, falls back to the configured `youtube.websub_secret`.
     """
     topic_url = f"{YOUTUBE_TOPIC_BASE}{channel_id}"
     data = {
@@ -44,8 +80,9 @@ async def subscribe_channel(channel_id: str, callback_url: str, secret: str = No
         "hub.mode": "subscribe",
         "hub.lease_seconds": str(LEASE_SECONDS),
     }
-    if secret:
-        data["hub.secret"] = secret
+    effective_secret = secret if secret else _get_websub_secret()
+    if effective_secret:
+        data["hub.secret"] = effective_secret
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(WEBSUB_HUB, data=data, timeout=30)

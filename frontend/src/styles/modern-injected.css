@@ -1,0 +1,129 @@
+/* ===========================================================================
+ * Extracted from static/js/modern.js (lines 731–849).
+ * Legacy modern.js injected this CSS at runtime via document.createElement.
+ * The React app doesn't execute that JS, so we ship the same rules as a
+ * static stylesheet. Any change to the source block in modern.js MUST be
+ * mirrored here (or, ideally, modern.js stops injecting and reads from this
+ * file too).
+ * ========================================================================= */
+
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes slideOut {
+    from { transform: translateX(0);    opacity: 1; }
+    to   { transform: translateX(100%); opacity: 0; }
+}
+
+/* ==================== Monitor Page ==================== */
+/* collapsible section */
+.mon-section { background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); margin-bottom:14px; overflow:hidden; }
+.mon-section-hdr { display:flex; justify-content:space-between; align-items:center; padding:13px 18px; font-weight:600; font-size:13px; cursor:pointer; user-select:none; background:var(--bg-tertiary); transition:var(--transition); }
+.mon-section-hdr:hover { background:var(--border-color); }
+.mon-section-body { padding:0; }
+.mon-chevron { font-size:11px; color:var(--text-muted); }
+.mon-empty { padding:20px; text-align:center; color:var(--text-muted); font-size:13px; }
+
+/* bot card */
+.mon-bot-card { background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); margin-bottom:14px; overflow:hidden; }
+.mon-bot-hdr { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:13px 18px; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); font-weight:700; font-size:14px; }
+.mon-bot-dot-on  { font-size:10px; color:var(--success); }
+.mon-bot-dot-off { font-size:10px; color:var(--danger); }
+
+/* category */
+.mon-cat-hdr { padding:6px 18px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-muted); background:var(--bg-primary); border-bottom:1px solid var(--border-color); }
+
+/* topic block */
+.mon-topic-block { border-bottom:1px solid var(--border-color); }
+.mon-topic-block:last-child { border-bottom:none; }
+.mon-topic-title { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 18px 4px; font-weight:600; font-size:13px; color:var(--text-primary); text-transform:capitalize; }
+.mon-topic-off { opacity:0.45; }
+
+/* schedule row */
+.mon-sch-row { display:flex; align-items:center; justify-content:space-between; padding:6px 18px 6px 32px; gap:12px; flex-wrap:wrap; }
+.mon-sch-row:last-child { padding-bottom:10px; }
+.mon-sch-left { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.mon-sch-icon { font-size:14px; }
+.mon-sch-name { font-size:12px; font-weight:600; color:var(--text-primary); }
+.mon-sch-prompt { font-size:10px; padding:1px 7px; border-radius:20px; background:rgba(59,130,246,0.12); color:#93c5fd; font-weight:600; }
+.mon-sch-spec { font-size:11px; color:var(--text-muted); }
+.mon-sch-disabled { opacity:0.4; }
+
+.mon-sch-right { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.mon-pending { font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; white-space:nowrap; }
+.mon-pending.has  { background:rgba(16,185,129,0.15); color:#34d399; }
+.mon-pending.none { background:rgba(100,116,139,0.12); color:var(--text-muted); }
+.mon-next-label { font-size:10px; color:var(--text-muted); }
+.mon-countdown { font-size:12px; font-weight:700; color:var(--success); min-width:60px; text-align:right; }
+.mon-countdown.urgent { color:var(--warning); }
+.mon-next-time { font-size:11px; color:var(--text-muted); min-width:38px; text-align:right; }
+
+/* shared table style */
+.mon-table { width:100%; border-collapse:collapse; font-size:12px; }
+.mon-table th { padding:8px 12px; text-align:left; color:var(--text-muted); font-weight:600; border-bottom:1px solid var(--border-color); white-space:nowrap; }
+.mon-table td { padding:7px 12px; border-bottom:1px solid rgba(45,55,72,0.4); vertical-align:top; color:var(--text-secondary); }
+.mon-table tr:last-child td { border-bottom:none; }
+.mon-table tr:hover td { background:var(--bg-tertiary); }
+.sch-timeline-table thead { position:sticky; top:0; z-index:1; }
+.sch-timeline-table thead th { background:var(--bg-secondary); }
+.sch-date-sep td { background:var(--bg-tertiary); color:var(--text-muted); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:5px 12px; border-bottom:1px solid var(--border-color); }
+.sch-date-sep:hover td { background:var(--bg-tertiary) !important; cursor:default; }
+.mon-ellipsis { max-width:520px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word; line-height:1.45; }
+.mon-type-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; white-space:nowrap; }
+.mon-type-badge.hourly { background:rgba(59,130,246,0.18); color:#60a5fa; }
+.mon-type-badge.daily  { background:rgba(139,92,246,0.18); color:#a78bfa; }
+.mon-type-badge.minute { background:rgba(245,158,11,0.18); color:#fbbf24; }
+
+/* messages section */
+.mon-coll-hdr { padding:9px 14px; font-weight:700; font-size:12px; color:var(--accent-primary); background:var(--bg-tertiary); border-bottom:1px solid var(--border-color); }
+.mon-ch-hdr   { padding:6px 14px; font-size:11px; color:var(--text-muted); background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
+.mon-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:10px; background:rgba(59,130,246,0.13); color:#93c5fd; margin:1px; }
+.mon-tag.cat { background:rgba(139,92,246,0.13); color:#c4b5fd; }
+
+/* tab bar */
+.mon-tab-bar { display:flex; gap:2px; padding:12px 16px 0; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
+.mon-tab { padding:7px 20px; border:none; border-radius:6px 6px 0 0; background:transparent; color:var(--text-muted); cursor:pointer; font-size:13px; font-weight:500; transition:all 0.15s; border-bottom:2px solid transparent; margin-bottom:-1px; }
+.mon-tab:hover { color:var(--text-primary); background:var(--bg-tertiary); }
+.mon-tab.active { color:var(--accent-primary); background:var(--bg-card); border-bottom:2px solid var(--accent-primary); font-weight:600; }
+.mon-tab-panel { padding:16px; }
+.mon-uncl-badge { display:inline-block; background:var(--danger); color:#fff; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; margin-left:4px; vertical-align:middle; }
+.mon-uncl-stats-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+.uncl-word-groups { display:flex; flex-direction:column; gap:12px; }
+.uncl-word-group { border:1px solid var(--border-color); border-radius:var(--radius-md); overflow:hidden; }
+.uncl-word-hdr { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; background:var(--bg-tertiary); cursor:pointer; user-select:none; }
+.uncl-word-hdr:hover { background:var(--bg-hover); }
+.uncl-word-label { font-weight:600; font-size:14px; color:var(--accent-primary); }
+.uncl-word-count { font-size:12px; color:var(--text-muted); }
+.uncl-word-group mark { background:var(--accent-primary); color:#fff; padding:0 2px; border-radius:2px; }
+.mon-filter-bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 0 14px; border-bottom:1px solid var(--border-color); margin-bottom:14px; }
+.mon-filter-sel { min-width:130px; max-width:180px; height:32px; font-size:12px; padding:0 8px; }
+.mon-filter-search { flex:1; min-width:160px; max-width:320px; height:32px; font-size:12px; padding:0 10px; }
+.mon-sort-label { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--text-muted); cursor:pointer; user-select:none; }
+.mon-sort-label input { accent-color:var(--accent-primary); }
+.mon-sch-topic { font-size:11px; background:var(--accent-primary); color:#fff; padding:1px 7px; border-radius:10px; white-space:nowrap; }
+
+/* multi-select dropdown */
+.mon-multi-select { position:relative; display:inline-block; }
+.mon-ms-btn { display:flex; align-items:center; justify-content:space-between; gap:6px; cursor:pointer; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mon-ms-arrow { font-size:10px; flex-shrink:0; }
+.mon-ms-dropdown { display:none; position:absolute; top:100%; left:0; min-width:200px; max-height:280px; overflow-y:auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); z-index:100; padding:4px 0; margin-top:2px; }
+.mon-multi-select.open .mon-ms-dropdown { display:block; }
+.mon-ms-item { display:flex; align-items:center; gap:8px; padding:5px 12px; font-size:12px; color:var(--text-secondary); cursor:pointer; transition:background 0.1s; }
+.mon-ms-item:hover { background:var(--bg-tertiary); }
+.mon-ms-item input { accent-color:var(--accent-primary); flex-shrink:0; }
+.mon-ms-item.all-item { font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-color); margin-bottom:2px; }
+.rules-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.rules-row:last-child { margin-bottom:0; }
+.rules-input { flex:1; min-width:0; height:32px; font-size:13px; }
+.rules-arrow { color:var(--text-muted); font-size:14px; flex-shrink:0; }
+
+/* Export column picker */
+.export-col-item { display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:var(--radius-sm); cursor:pointer; font-size:13px; color:var(--text-secondary); transition:background 0.1s; user-select:none; }
+.export-col-item:hover { background:var(--bg-tertiary); }
+.export-col-item input[type=checkbox] { accent-color:var(--accent-primary); cursor:pointer; width:14px; height:14px; flex-shrink:0; }
+.export-col-all { font-weight:600; color:var(--text-primary); border-bottom:1px solid var(--border-color); border-radius:0; margin-bottom:2px; }
+
+/* Generic small badge style — also added to legacy via inline class on the
+   #logs-error-badge span. Used by the LogsPage Clear button + sidebar. */
+.badge-error { background: var(--danger) !important; color: #fff !important; }

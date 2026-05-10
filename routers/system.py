@@ -49,6 +49,60 @@ def get_gemini_usage():
     return {"status": "ok", **_get()}
 
 
+@router.get("/system/gemini-thinking")
+def get_gemini_thinking(request: Request):
+    """Return the current Gemini thinking toggle. Admin only."""
+    if not is_admin_request(request):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+    db = get_db()
+    val = db.get_setting("gemini_thinking") or {}
+    return {
+        "status": "ok",
+        "enabled": bool(val.get("enabled", False)),
+        # -1 = dynamic (model decides), 0 = off, positive = max tokens cap.
+        # We default to -1 when enabled so the model self-regulates.
+        "budget": int(val.get("budget", -1)),
+    }
+
+
+@router.post("/system/gemini-thinking")
+def set_gemini_thinking(request: Request, data: dict = Body(...)):
+    """Update the Gemini thinking toggle. Admin only."""
+    if not is_admin_request(request):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+    enabled = bool(data.get("enabled", False))
+    try:
+        budget = int(data.get("budget", -1))
+    except (TypeError, ValueError):
+        budget = -1
+    db = get_db()
+    db.set_setting("gemini_thinking", {"enabled": enabled, "budget": budget})
+    return {"status": "ok", "enabled": enabled, "budget": budget}
+
+
+@router.get("/system/summary-thoughts")
+def get_summary_thoughts(request: Request, id: int):
+    """Return the saved thinking trace for a single summary. Admin only."""
+    if not is_admin_request(request):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+    db = get_db()
+    try:
+        cursor = db._get_cursor()
+        cursor.execute(
+            "SELECT id, thoughts FROM summaries WHERE id = %s",
+            (id,)
+        )
+        row = cursor.fetchone()
+    finally:
+        db._commit()
+    if not row:
+        return {"status": "error", "message": "Summary not found"}
+    return {"status": "ok", "id": row["id"], "thoughts": row.get("thoughts") or ""}
+
+
 @router.get("/system/ai-usage-details")
 def get_ai_usage_details(request: Request):
     """Return full AI usage breakdown: live meters + hourly stats + recent summaries. Admin only."""
@@ -95,8 +149,7 @@ async def save_summaries_fixed_prefix(request: Request):
     """Save overrides for the summaries system prompt and fixed prefix (admin only)."""
     if not is_admin_request(request):
         return {"status": "error", "message": "Admin only"}
-    import yaml
-    from utils.helpers import load_config
+    from utils.helpers import load_config, save_config
     data = await request.json()
     cfg = load_config()
     if "system_prompts" not in cfg:
@@ -107,8 +160,7 @@ async def save_summaries_fixed_prefix(request: Request):
         cfg["system_prompts"]["summaries_prefix"] = data["fixed_prefix"]
     if "bullet_points_suffix" in data:
         cfg["system_prompts"]["bullet_points_suffix"] = data["bullet_points_suffix"]
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    save_config(cfg)
     return {"status": "ok"}
 
 

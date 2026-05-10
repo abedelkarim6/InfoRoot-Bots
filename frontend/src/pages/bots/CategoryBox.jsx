@@ -1,0 +1,184 @@
+/**
+ * CategoryBox — single category card containing topic boxes. Default open.
+ * Header has + Add Topic button, enable toggle, and delete (soft-delete).
+ *
+ * Backend endpoints used:
+ *   POST /api/category/toggle
+ *   POST /api/category/delete
+ *   POST /api/topic/add  (used by the inline new-topic input at the bottom)
+ */
+
+import { useRef, useState } from 'react';
+import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
+import { useDialogs } from '../../dialogs/DialogsProvider';
+import TopicBox from './TopicBox';
+
+export default function CategoryBox({ botName, catName, cat }) {
+  const [open, setOpen] = useState(true);
+  const topics = Object.entries(cat.topics || {});
+  const newTopicInputRef = useRef(null);
+
+  const toggle = useApiMutation('/api/category/toggle', {
+    invalidate: ['config'],
+    successMsg: (res, vars) =>
+      vars.enabled
+        ? 'Category enabled (all topics restored)'
+        : 'Category disabled',
+    errorMsg: 'Failed to update category'
+  });
+
+  const remove = useApiMutation('/api/category/delete', {
+    invalidate: ['config', 'recycle-bin'],
+    successMsg: 'Category deleted',
+    errorMsg: 'Failed to delete category'
+  });
+
+  const confirmDelete = useConfirmedMutation(remove, {
+    message: `Delete category "${catName}" and all its topics?`,
+    title: 'Delete Category',
+    confirmLabel: 'Delete',
+    confirmClass: 'btn-danger'
+  });
+
+  function onToggleEnabled(e) {
+    toggle.mutate({
+      bot_name: botName,
+      category_name: catName,
+      enabled: e.target.checked
+    });
+  }
+
+  function onDelete() {
+    confirmDelete({ bot_name: botName, category_name: catName });
+  }
+
+  function onClickAddTopic(e) {
+    e.stopPropagation();
+    if (!open) setOpen(true);
+    // Defer focus to next paint when the body mounts.
+    setTimeout(() => {
+      newTopicInputRef.current?.focus();
+    }, 0);
+  }
+
+  return (
+    <div
+      className={`category-box collapsible-section ${open ? 'open' : ''}`}
+      id={`category-${botName}-${catName}`}
+    >
+      <div className="category-header-row" onClick={() => setOpen((v) => !v)}>
+        <div className="category-title-group">
+          <h4>🗂️ {catName}</h4>
+          <span className="text-muted" style={{ marginLeft: 8 }}>
+            ({topics.length} topic{topics.length !== 1 ? 's' : ''})
+          </span>
+        </div>
+        <div className="category-controls" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onClickAddTopic}
+          >
+            + Add Topic
+          </button>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={!!cat.enabled}
+              onChange={onToggleEnabled}
+              disabled={toggle.isPending}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+          <button
+            className="btn-icon btn-danger"
+            onClick={onDelete}
+            disabled={remove.isPending}
+          >
+            🗑️
+          </button>
+          <span className="collapsible-toggle">▼</span>
+        </div>
+      </div>
+
+      {open && (
+        <div className="collapsible-content">
+          <div className="topics-container">
+            {topics.map(([topicName, topic]) => (
+              <TopicBox
+                key={topicName}
+                botName={botName}
+                catName={catName}
+                topicName={topicName}
+                topic={topic}
+                categoryEnabled={cat.enabled !== false}
+              />
+            ))}
+            <AddTopicInline
+              botName={botName}
+              catName={catName}
+              inputRef={newTopicInputRef}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddTopicInline({ botName, catName, inputRef }) {
+  const [name, setName] = useState('');
+  const { showAlert } = useDialogs();
+
+  const add = useApiMutation('/api/topic/add', {
+    invalidate: ['config'],
+    successMsg: 'Topic added',
+    errorMsg: 'Failed to add topic',
+    onSuccess: () => setName('')
+  });
+
+  function submit() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showAlert('Please enter a topic name', { icon: '✏️' });
+      return;
+    }
+    add.mutate({
+      bot_name: botName,
+      category_name: catName,
+      topic_name: trimmed
+    });
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <input
+        ref={inputRef}
+        type="text"
+        className="input"
+        placeholder="New topic name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+            submit();
+          }
+        }}
+        style={{
+          display: 'inline-block',
+          width: 'auto',
+          marginRight: 8
+        }}
+        disabled={add.isPending}
+      />
+      <button
+        className="btn btn-secondary btn-sm"
+        onClick={submit}
+        disabled={add.isPending}
+      >
+        Add
+      </button>
+    </div>
+  );
+}

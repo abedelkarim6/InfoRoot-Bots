@@ -34,8 +34,12 @@ logging.getLogger().addHandler(_fh)
 
 # Attach in-memory log buffer (used by the admin Logs page)
 # Must be called after basicConfig so the root logger is already configured.
-from utils.helpers import init_memory_log_handler as _init_mem_log
+from utils.helpers import init_memory_log_handler as _init_mem_log, install_redaction_filter as _install_redaction
 _init_mem_log(maxlen=1000)
+# Attach the sensitive-data redaction filter to every handler currently on the
+# root logger (console, rotating file, in-memory). Done after init_memory_log
+# so the memory handler is included in the sweep.
+_install_redaction()
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
@@ -165,10 +169,64 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
-        if token and validate_token(token):
+        # Pull UA + client IP so validate_token can log binding drift.
+        ua = request.headers.get("user-agent", "") or ""
+        fwd = request.headers.get("X-Forwarded-For", "")
+        ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+
+        if token and validate_token(token, user_agent=ua, ip_address=ip):
             return await call_next(request)
 
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
+_audit_logger = logging.getLogger("audit")
+_AUDIT_MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """Log mutating /api/* requests with the actor (user_id + username), the
+    method+path, the originating IP, and the response status. Read-only GETs
+    are skipped to keep the audit trail signal-rich."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        try:
+            path = request.url.path
+            method = request.method
+            if method in _AUDIT_MUTATING and path.startswith("/api/") and path not in (
+                "/api/auth/login",  # already handled below
+            ):
+                from routers.auth import (
+                    _get_bearer, validate_token, get_token_user_id,
+                )
+                token = _get_bearer(request)
+                user_id = None
+                username = "anonymous"
+                if token and validate_token(token):
+                    user_id = get_token_user_id(token)
+                    if user_id is None:
+                        username = "admin(legacy)"
+                    else:
+                        try:
+                            u = get_db().get_user_by_id(user_id)
+                            username = (u or {}).get("username", f"uid:{user_id}")
+                        except Exception:
+                            username = f"uid:{user_id}"
+                fwd = request.headers.get("X-Forwarded-For", "")
+                ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+                _audit_logger.info(
+                    f"[AUDIT] user={username} uid={user_id} ip={ip} "
+                    f"{method} {path} -> {response.status_code}"
+                )
+            elif path == "/api/auth/login" and method == "POST":
+                fwd = request.headers.get("X-Forwarded-For", "")
+                ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+                outcome = "ok" if response.status_code == 200 else f"fail({response.status_code})"
+                _audit_logger.info(f"[AUDIT] login ip={ip} -> {outcome}")
+        except Exception as exc:
+            _audit_logger.warning(f"[AUDIT] middleware error: {exc}")
+        return response
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -238,27 +296,69 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Telegram Bot Admin", lifespan=lifespan)
+app.add_middleware(AuditLogMiddleware)
 app.add_middleware(TokenAuthMiddleware)
 
 # bot_task is set by start_bot_task() inside lifespan
 app.state.bot_task = None
 
-# Serve static HTML/JS/CSS (no-cache so browser always gets latest)
+# Cache headers for the hashed Vite asset bundle. The hashed JS/CSS files in
+# /static_react/assets/ are content-addressed (filename changes when content
+# changes) so they're safe to cache aggressively. index.html and other root
+# files in /static_react/ stay no-cache so a redeploy is picked up immediately.
 @app.middleware("http")
-async def no_cache_static(request: Request, call_next):
+async def react_cache_headers(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith("/static/"):
+    path = request.url.path
+    if path.startswith("/static_react/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static_react/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Baseline security headers. HSTS is only emitted on HTTPS requests so that
+# local-dev (plain http) keeps working — browsers ignore HSTS over http anyway.
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    )
+    if is_https:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# React frontend
+# Build with `cd frontend && npm run build` — Vite outputs to ../static_react.
+#   /static_react/* — hashed JS/CSS/asset bundle (StaticFiles)
+#   /, /login, /register, /bots, … — SPA catch-all that returns
+#       static_react/index.html so React Router takes over client-side routing.
+# Mounted last so /api/* and /youtube/websub/* routers always win.
+# ---------------------------------------------------------------------------
+_REACT_DIR = os.path.join(os.path.dirname(__file__), "static_react")
+if not os.path.isdir(_REACT_DIR):
+    raise RuntimeError(
+        f"[REACT] React build missing at {_REACT_DIR}. "
+        "Run `cd frontend && npm run build` before starting the server."
+    )
+app.mount("/static_react", StaticFiles(directory=_REACT_DIR), name="static_react")
+logger.info(f"[REACT] Serving React build from {_REACT_DIR}")
 
 # Include routers
 app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(collection.router, prefix="/api", tags=["collection"])
 app.include_router(bot.router, prefix="/api", tags=["bot"])
 app.include_router(topic.router, prefix="/api", tags=["topic"])
-# category.py is legacy (YAML-based) — all category routes are now in topic.py (DB-based)
 app.include_router(telegram.router, prefix="/api", tags=["telegram"])
 app.include_router(prompts.router, prefix="/api", tags=["prompts"])
 app.include_router(rules.router, prefix="/api", tags=["rules"])
@@ -274,16 +374,6 @@ app.include_router(chatbot.router, prefix="/api", tags=["chatbot"])
 app.include_router(youtube_router, prefix="/api", tags=["youtube"])
 # WebSub callback route (public, no /api prefix — YouTube hub needs direct access)
 app.include_router(websub_router)
-
-# Serve static pages
-@app.get("/login")
-def login_page():
-    return FileResponse("static/login.html")
-
-
-@app.get("/")
-def main_page():
-    return FileResponse("static/index.html")
 
 @app.get("/api/warnings")
 def get_warnings(request: Request):
@@ -338,3 +428,27 @@ def get_config(request: Request):
         'collections': db.get_user_collections(user_id),
         'seo_visible': seo_visible,
     }
+
+
+# ---------------------------------------------------------------------------
+# SPA catch-all — MUST stay last in this file so /api/* and every other
+# explicit route is matched first. Returns the React build's index.html for
+# any other path so client-side routing takes over (BrowserRouter handles
+# /login, /bots/:botName, etc.).
+# ---------------------------------------------------------------------------
+_REACT_INDEX = os.path.join(_REACT_DIR, "index.html")
+
+
+@app.get("/")
+def react_root():
+    return FileResponse(_REACT_INDEX)
+
+
+@app.get("/{full_path:path}")
+def react_spa(full_path: str):
+    # Defensive: never swallow API or websub paths if a router happened to
+    # mismatch (shouldn't, since those routes are registered above and
+    # FastAPI matches in order, but cheap to belt-and-brace).
+    if full_path.startswith("api/") or full_path.startswith("youtube/websub"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return FileResponse(_REACT_INDEX)

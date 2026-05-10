@@ -23,9 +23,13 @@ def save_collection(request: Request, data: dict = Body(...)):
         return {"status": "error", "message": "Missing collection_name"}
 
     if is_admin_request(request):
+        # Sources and destinations are now edited independently from the
+        # per-bot Telegram Sources / Destinations buttons, so a collection
+        # may be partially configured (sources without destinations or vice
+        # versa). Both arrays default to empty.
         target_channels = data.get("target_channels", [])
-        if not target_channels or not isinstance(target_channels, list):
-            return {"status": "error", "message": "At least one target channel required"}
+        if not isinstance(target_channels, list):
+            target_channels = []
         db = get_db()
         db.save_collection(collection_name, {
             "source_channels": data.get("source_channels", []),

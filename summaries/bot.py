@@ -554,72 +554,87 @@ async def generate_and_send_summary(job_data):
 
         remaining_msgs = [m for m in all_msgs if m['id'] not in interim_id_map]
 
-        BATCH = 25
-        total_tokens = 0
-        parts = []  # summary texts to merge into the final output
-
-        # Use only the LAST interim — it already contains all previous interims rolled up
+        # Use only the LAST interim — it already rolls up every prior interim.
         last_interim_text = ''
         if ordered_interim_ids:
             last_interims = db.get_interims_by_ids([ordered_interim_ids[-1]])
             if last_interims:
                 last_interim_text = (last_interims[0].get('summary_text') or '').strip()
-                if last_interim_text:
-                    parts.append(last_interim_text)
 
-        # Directly summarize any remaining (not yet interim-covered) messages
-        if remaining_msgs:
+        logger.info(
+            f"[INTERIM_TRACE] bot={bot_name} | topic={topic_name} | sched={schedule_type} "
+            f"| total={total_msg_count} | covered={len(all_ids) - len(remaining_msgs)} "
+            f"| remaining={len(remaining_msgs)} "
+            f"| last_interim_id={ordered_interim_ids[-1] if ordered_interim_ids else None} "
+            f"| last_interim_chars={len(last_interim_text)}"
+        )
+
+        BATCH = 25
+        total_tokens = 0
+        summary_text = ''
+
+        if not remaining_msgs:
+            # Pure interim path: the latest interim already represents the full
+            # rolling summary across this window. Send it as-is — it was generated
+            # with bullet_points_suffix at interim time, so no extra LLM call is
+            # needed (and re-running would risk the LLM altering the formatting).
+            if not last_interim_text:
+                logger.warning(
+                    f"[SKIP] No remaining msgs and last interim text is empty "
+                    f"| Bot={bot_name} | Topic={topic_name}"
+                )
+                db.log_schedule_run(
+                    bot_name=bot_name, topic_name=topic_name, schedule_type=schedule_type,
+                    status='failed', message_count=total_msg_count,
+                    error_text="last interim text empty"
+                )
+                return
+            summary_text = last_interim_text
+        else:
+            # Rolling path: feed the user's template ONE batch of remaining messages
+            # with {final_interim} = previous rolling summary. The template owns the
+            # blend; bullet_points_suffix is always appended so the final output
+            # matches the schedule's bullet config.
             rem_texts = [m['text'] for m in remaining_msgs]
+
             if len(rem_texts) <= BATCH:
-                rem_prompt = get_summary_prompt(rem_texts, bot_name, prompt_key,
-                                                topic_name=topic_name, final_interim=last_interim_text,
-                                                b=b)
+                prompt = get_summary_prompt(
+                    rem_texts, bot_name, prompt_key,
+                    topic_name=topic_name, final_interim=last_interim_text, b=b
+                )
                 if bullet_points and b:
-                    rem_prompt += '\n\n' + get_bullet_points_suffix(b)
-                rem_text, tk = await _run_with_retry(llm_client.generate_summary, rem_prompt)
+                    prompt += '\n\n' + get_bullet_points_suffix(b)
+                summary_text, tk = await _run_with_retry(llm_client.generate_summary, prompt)
                 total_tokens += tk
-                if rem_text.strip():
-                    parts.append(rem_text.strip())
+                summary_text = (summary_text or '').strip()
             else:
-                partials = []
-                for i in range(0, len(rem_texts), BATCH):
-                    chunk = rem_texts[i:i + BATCH]
-                    p = get_summary_prompt(chunk, bot_name, prompt_key,
-                                          topic_name=topic_name, final_interim=last_interim_text,
-                                          b=b)
-                    if bullet_points and b:
+                # Rare: > BATCH remaining messages. Roll the {final_interim} forward
+                # through each chunk so the cumulative chain is preserved, then
+                # apply bullet_points_suffix only on the LAST chunk's call.
+                rolling_text = last_interim_text
+                chunks = [rem_texts[i:i + BATCH] for i in range(0, len(rem_texts), BATCH)]
+                for idx, chunk in enumerate(chunks, 1):
+                    is_last = (idx == len(chunks))
+                    p = get_summary_prompt(
+                        chunk, bot_name, prompt_key,
+                        topic_name=topic_name, final_interim=rolling_text, b=b
+                    )
+                    if is_last and bullet_points and b:
                         p += '\n\n' + get_bullet_points_suffix(b)
                     s, tk = await _run_with_retry(llm_client.generate_summary, p)
                     total_tokens += tk
-                    if s.strip():
-                        partials.append(s.strip())
-                if len(partials) == 1:
-                    parts.append(partials[0])
-                elif len(partials) > 1:
-                    merge_rem = (
-                        "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
-                        "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                        + "\n---\n".join(partials)
-                    )
-                    rem_merged, mk = await _run_with_retry(llm_client.generate_summary, merge_rem)
-                    total_tokens += mk
-                    if rem_merged.strip():
-                        parts.append(rem_merged.strip())
+                    if (s or '').strip():
+                        rolling_text = s.strip()
+                summary_text = rolling_text
 
-        # Merge all parts into one final summary
-        if not parts:
-            logger.warning(f"[SKIP] All summary parts empty | Bot={bot_name} | Topic={topic_name}")
-            return
-        elif len(parts) == 1:
-            summary_text = parts[0]
-        else:
-            merge_prompt = (
-                "فيما يلي عدة ملخصات جزئية لمجموعة أخبار متعلقة بموضوع واحد. "
-                "يرجى دمجها في ملخص واحد متكامل ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                + "\n---\n".join(parts)
+        if not summary_text:
+            logger.warning(f"[SKIP] AI returned empty summary | Bot={bot_name} | Topic={topic_name}")
+            db.log_schedule_run(
+                bot_name=bot_name, topic_name=topic_name, schedule_type=schedule_type,
+                status='failed', message_count=total_msg_count,
+                error_text="AI returned empty summary"
             )
-            summary_text, merge_tk = await _run_with_retry(llm_client.generate_summary, merge_prompt)
-            total_tokens += merge_tk
+            return
 
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)} | tokens={total_tokens}")
 
@@ -686,6 +701,7 @@ async def generate_and_send_summary(job_data):
                 topic_name=topic_name,
                 message_ids=all_ids,
                 tokens_used=total_tokens,
+                thoughts=getattr(llm_client, 'last_thoughts', '') or None,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -1022,15 +1038,20 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     async with lock:
         try:
             schedules = db.get_schedules_for_topic(bot_name, topic_name)
-            bp_sch  = next((s for s in schedules if s.get('bullet_points')), None)
-            b_count = int(bp_sch.get('bullet_points_count') or 10) if bp_sch else 0
-            if bp_sch:
+            # When a topic has multiple bullet-points schedules with different b counts,
+            # pick the LARGEST b → smallest batch (26 − b_max). The interim is one shared
+            # rolling summary across all schedules, so the batch must be small enough that
+            # the strictest schedule can still produce its bullet count from one batch.
+            bp_counts = [int(s.get('bullet_points_count') or 0)
+                         for s in schedules if s.get('bullet_points')]
+            b_count = max(bp_counts) if bp_counts else 0
+            if b_count:
                 batch_limit = max(1, 26 - b_count)
             else:
                 batch_limit = 20
             logger.info(
                 f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
-                f"| schedules={len(schedules)} | bullet_pts={'YES b=' + str(b_count) if bp_sch else 'NO'} "
+                f"| schedules={len(schedules)} | bp_counts={bp_counts} | b_used={b_count} "
                 f"| batch_limit={batch_limit}"
             )
             while True:
@@ -1047,24 +1068,18 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                 texts   = [m['text'] for m in messages]
                 msg_ids = [m['id'] for m in messages]
 
-                # Rolling cumulative: build new-messages prompt via user's template,
-                # then prepend the previous interim as rolling context when present.
+                # Rolling cumulative — driven entirely by the user's prompt template.
+                # The template's {final_interim} slot receives the previous interim text
+                # (empty string on first run); the template owns how that context is
+                # blended with {messages} so the output style matches the schedule's
+                # final output exactly.
                 prev_interim = db.get_latest_interim(bot_name, topic_name)
                 prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
 
-                new_msgs_prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name, b=b_count)
-                if prev_text:
-                    prompt = (
-                        "فيما يلي ملخص سابق يغطي الأخبار السابقة:\n\n"
-                        + prev_text
-                        + "\n\n---\n\n"
-                        "يرجى تحديث هذا الملخص بإضافة الأخبار الجديدة التالية وإنتاج ملخص واحد متكامل "
-                        "ومنسجم بنفس الأسلوب، مع تجنب التكرار:\n\n"
-                        + new_msgs_prompt
-                    )
-                else:
-                    prompt = new_msgs_prompt
-
+                prompt = get_summary_prompt(
+                    texts, bot_name, prompt_key,
+                    topic_name=topic_name, final_interim=prev_text, b=b_count
+                )
                 if b_count:
                     prompt += '\n\n' + get_bullet_points_suffix(b_count)
 

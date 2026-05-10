@@ -113,7 +113,13 @@ class SummariesDB(Database):
                            bot_name: str, topic_name: str, status: str = 'summarized',
                            interim_id: int = None):
         try:
-            """Mark messages for a specific (bot, topic, schedule_type) with the given status."""
+            """Mark messages for a specific (bot, topic, schedule_type) with the given status.
+
+            ON CONFLICT also BACKFILLS interim_id when the existing row has it NULL
+            (legacy rows from before the interim_id migration). Without this, those
+            messages are invisible to get_interim_ids_for_messages and the schedule
+            fire treats them as 'remaining' → re-summarizes from raw text.
+            """
             if not message_ids:
                 return
             cursor = self._get_cursor()
@@ -122,7 +128,10 @@ class SummariesDB(Database):
                     """INSERT INTO message_summarizations
                            (message_id, bot_name, topic_name, schedule_type, status, interim_id)
                        VALUES (%s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO NOTHING""",
+                       ON CONFLICT (message_id, bot_name, topic_name, schedule_type) DO UPDATE
+                           SET interim_id = EXCLUDED.interim_id
+                       WHERE message_summarizations.interim_id IS NULL
+                         AND EXCLUDED.interim_id IS NOT NULL""",
                     (mid, bot_name, topic_name, schedule_type, status, interim_id)
                 )
         finally:
@@ -480,17 +489,18 @@ class SummariesDB(Database):
     def save_summary(self, summary_text: str, message_count: int,
                      summary_type: str, target_entity: str,
                      bot_name: str = None, topic_name: str = None,
-                     message_ids: list = None, tokens_used: int = 0) -> int:
+                     message_ids: list = None, tokens_used: int = 0,
+                     thoughts: str = None) -> int:
         try:
             """Save a generated summary and return its id."""
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None)
             )
             row = cursor.fetchone()
             return row['id']
@@ -571,12 +581,18 @@ class SummariesDB(Database):
             self._commit()
 
     def get_recent_summaries_for_ai_page(self, limit: int = 100) -> list:
-        """Returns recent summaries with token counts for the AI Usage page."""
+        """Returns recent summaries with token counts for the AI Usage page.
+
+        `has_thoughts` lets the UI mark rows whose Gemini thinking trace can
+        be fetched via /api/system/summary-thoughts. Trace bodies are NOT
+        returned here — they can be large.
+        """
         try:
             cursor = self._get_cursor()
             cursor.execute("""
                 SELECT id, bot_name, topic_name, summary_type, target_entity,
-                       message_count, COALESCE(tokens_used, 0) AS tokens_used, timestamp
+                       message_count, COALESCE(tokens_used, 0) AS tokens_used, timestamp,
+                       (thoughts IS NOT NULL AND length(thoughts) > 0) AS has_thoughts
                 FROM summaries
                 ORDER BY timestamp DESC
                 LIMIT %s

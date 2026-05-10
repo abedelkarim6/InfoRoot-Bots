@@ -16,6 +16,8 @@ from youtube_monitor.websub import (
     unsubscribe_channel,
     handle_verification,
     process_websub_notification,
+    verify_signature as _verify_websub_sig,
+    _get_websub_secret as _websub_secret,
 )
 from youtube_monitor.keyword_search import run_keyword_search, run_all_keyword_searches
 from youtube_monitor.worker import process_pending_queue, process_queue_item
@@ -151,6 +153,16 @@ async def websub_verify(request: Request):
 @websub_router.post("/youtube/websub/callback")
 async def websub_notification(request: Request):
     body = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature") or ""
+    if _websub_secret():
+        # Strict mode: secret configured → require valid signature.
+        if not _verify_websub_sig(body, sig):
+            logger.warning("[WEBSUB] Rejected callback with missing/invalid signature")
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"status": "error", "message": "Invalid signature"}, status_code=401)
+    else:
+        # Opt-in mode: no secret set → accept but warn so operators know the gap.
+        logger.warning("[WEBSUB] No youtube.websub_secret configured — accepting callback unverified")
     count = process_websub_notification(body)
     return {"status": "ok", "enqueued": count}
 
@@ -574,15 +586,13 @@ async def get_prompt():
 
 @router.post("/prompt/save")
 async def save_prompt(request: Request):
-    import yaml
-    from utils.helpers import load_config
+    from utils.helpers import load_config, save_config
     data = await request.json()
     cfg = load_config()
     if "youtube" not in cfg:
         cfg["youtube"] = {}
     cfg["youtube"]["prompt"] = data.get("prompt", "")
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    save_config(cfg)
     return {"status": "ok"}
 
 
@@ -603,8 +613,7 @@ async def get_fixed_prefix(request: Request):
 async def save_fixed_prefix(request: Request):
     if not is_admin_request(request):
         return {"status": "error", "message": "Admin only"}
-    import yaml
-    from utils.helpers import load_config
+    from utils.helpers import load_config, save_config
     data = await request.json()
     cfg = load_config()
     if "system_prompts" not in cfg:
@@ -613,22 +622,19 @@ async def save_fixed_prefix(request: Request):
         cfg["system_prompts"]["youtube_prefix_video"] = data["prefix_video"]
     if "prefix_transcript" in data:
         cfg["system_prompts"]["youtube_prefix_transcript"] = data["prefix_transcript"]
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    save_config(cfg)
     return {"status": "ok"}
 
 
 @router.post("/default-targets/save")
 async def save_default_targets(request: Request):
-    import yaml
-    from utils.helpers import load_config
+    from utils.helpers import load_config, save_config
     data = await request.json()
     cfg = load_config()
     if "youtube" not in cfg:
         cfg["youtube"] = {}
     cfg["youtube"]["default_targets"] = data.get("targets", [])
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    save_config(cfg)
     return {"status": "ok"}
 
 

@@ -59,15 +59,28 @@ def test_created_collection_appears_in_list(admin_client):
         f"{NAME} not found in collections after create"
 
 
-def test_create_requires_target_channel(admin_client):
+def test_create_allows_empty_target_channels(admin_client):
+    """
+    Sources and destinations are edited independently in the React UI, so a
+    collection may be partially configured (no targets yet). Empty
+    target_channels must NOT be rejected.
+    """
     resp = admin_client.post("/api/collection/save", json={
         "collection_name": NAME,
         "source_channels":  [],
-        "target_channels":  [],   # empty — should fail
+        "target_channels":  [],
+    })
+    ok(resp, "POST /api/collection/save with empty target_channels")
+
+
+def test_create_requires_collection_name(admin_client):
+    resp = admin_client.post("/api/collection/save", json={
+        "source_channels": [],
+        "target_channels": [FAKE_CH],
     })
     assert resp.status_code == 200
     assert resp.json()["status"] == "error", \
-        "Collection with no target channels should be rejected"
+        "Missing collection_name should return error"
 
 
 def test_rename_collection(admin_client):
