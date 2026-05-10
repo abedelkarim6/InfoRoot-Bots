@@ -21,12 +21,13 @@ import {
 } from './shared';
 import { downloadCsv } from './exportCsv';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlSet } from '../../lib/useUrlState';
 
 export default function SummariesTab({ data, isLoading }) {
   const { showAlert } = useDialogs();
-  const [selBots, setSelBots] = useState(() => new Set());
-  const [selTopics, setSelTopics] = useState(() => new Set());
-  const [selTypes, setSelTypes] = useState(() => new Set());
+  const [selBots, setSelBots] = useUrlSet('msbot');
+  const [selTopics, setSelTopics] = useUrlSet('mstopic');
+  const [selTypes, setSelTypes] = useUrlSet('mstype');
   const [showExport, setShowExport] = useState(false);
 
   const statsQuery = useQuery({

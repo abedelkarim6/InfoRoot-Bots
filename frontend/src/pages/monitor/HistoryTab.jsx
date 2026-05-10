@@ -15,6 +15,7 @@ import { useDialogs } from '../../dialogs/DialogsProvider';
 import MultiSelect from './MultiSelect';
 import ExportColumnsModal from './ExportColumnsModal';
 import { downloadCsv } from './exportCsv';
+import { useUrlInt, useUrlSet } from '../../lib/useUrlState';
 
 const HIST_STYLES = `
   .hist-table { width:100%; border-collapse:collapse; font-size:12.5px; }
@@ -43,10 +44,12 @@ export default function HistoryTab() {
 
   const allRuns = data?.status === 'ok' ? data.runs || [] : [];
 
-  const [selBots, setSelBots] = useState(() => new Set());
-  const [selTopics, setSelTopics] = useState(() => new Set());
-  const [selStatus, setSelStatus] = useState(() => new Set());
-  const [composition, setComposition] = useState(null); // { summaryId } | null
+  const [selBots, setSelBots] = useUrlSet('hbot');
+  const [selTopics, setSelTopics] = useUrlSet('htopic');
+  const [selStatus, setSelStatus] = useUrlSet('hstatus');
+  // ?summary=<id> opens the composition drill-down for that summary.
+  const [summaryId, setSummaryId] = useUrlInt('summary', 0);
+  const composition = summaryId > 0 ? { summaryId } : null;
   const [showExport, setShowExport] = useState(false);
 
   const allBots = useMemo(
@@ -74,7 +77,7 @@ export default function HistoryTab() {
     return (
       <CompositionPanel
         summaryId={composition.summaryId}
-        onBack={() => setComposition(null)}
+        onBack={() => setSummaryId(0)}
       />
     );
   }
@@ -194,7 +197,7 @@ export default function HistoryTab() {
                 <HistoryRow
                   key={r.id ?? i}
                   run={r}
-                  onShowComposition={(id) => setComposition({ summaryId: id })}
+                  onShowComposition={(id) => setSummaryId(id)}
                   onViewSummary={viewSummary}
                   onViewError={viewError}
                 />

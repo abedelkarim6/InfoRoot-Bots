@@ -192,8 +192,6 @@ def get_monitor_messages(
     db = get_db()
     try:
         allowed_bots = _get_allowed_bots(request)
-        if offset == 0:
-            db.cleanup_uncollected_messages()
         messages = db.get_recent_messages(limit=limit, offset=offset, allowed_bot_names=allowed_bots)
 
         id_to_username = {}

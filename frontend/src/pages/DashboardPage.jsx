@@ -15,6 +15,7 @@ import { api } from '../lib/api';
 import PageHeader from '../components/PageHeader';
 import { useGlobalConfig } from '../config/ConfigProvider';
 import { useAuth } from '../auth/AuthContext';
+import { useUrlInt, useUrlSet, useUrlString } from '../lib/useUrlState';
 
 /* ── Colour palette (matches app accent colours) ─ */
 const PALETTE = [
@@ -46,11 +47,11 @@ export default function DashboardPage() {
   const { config } = useGlobalConfig();
   const { isAdmin } = useAuth();
 
-  const [days, setDays] = useState(14);
-  const [filterSources, setFilterSources] = useState(() => new Set());
-  const [filterTopics, setFilterTopics] = useState(() => new Set());
-  const [filterChannels, setFilterChannels] = useState(() => new Set());
-  const [matrixSrcFilter, setMatrixSrcFilter] = useState('');
+  const [days, setDays] = useUrlInt('days', 14);
+  const [filterSources, setFilterSources] = useUrlSet('src');
+  const [filterTopics, setFilterTopics] = useUrlSet('topic');
+  const [filterChannels, setFilterChannels] = useUrlSet('ch');
+  const [matrixSrcFilter, setMatrixSrcFilter] = useUrlString('mxsrc', '');
 
   // Build the URL — TanStack Query will refetch when any of these change.
   const queryUrl = useMemo(() => {

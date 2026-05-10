@@ -36,12 +36,16 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useApiMutation } from '../lib/useApiMutation';
 import { useDialogs } from '../dialogs/DialogsProvider';
+import { useUrlString } from '../lib/useUrlState';
 import PageHeader from '../components/PageHeader';
 
 const ACCOUNTS_KEY = ['accounts'];
+const VALID_ACCT_TABS = new Set(['users', 'plans']);
 
 export default function AccountsPage() {
-  const [tab, setTab] = useState('users');
+  const [tabParam, setTabParam] = useUrlString('tab', 'users');
+  const tab = VALID_ACCT_TABS.has(tabParam) ? tabParam : 'users';
+  const setTab = setTabParam;
   const [createOpen, setCreateOpen] = useState(false);
 
   const { data, isLoading, refetch, isFetching } = useQuery({

@@ -149,8 +149,15 @@ export default function AiUsagePage() {
                 {hourly.length !== 1 ? 's' : ''} with activity)
               </span>
             </div>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="aiu-table-wrap" style={{ overflowX: 'auto' }}>
               <table className="yt-table">
+                <colgroup>
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: '30%' }} />
+                  <col />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Hour</th>
@@ -245,8 +252,18 @@ function RecentSummariesCard({ recent }) {
           <strong>🕐 Recent Summaries</strong>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>(last 100)</span>
         </div>
-        <div style={{ overflowX: 'auto' }}>
+        <div className="aiu-table-wrap" style={{ overflowX: 'auto' }}>
           <table className="yt-table">
+            <colgroup>
+              <col style={{ width: 110 }} />
+              <col style={{ width: 130 }} />
+              <col style={{ width: 150 }} />
+              <col style={{ width: 110 }} />
+              <col style={{ width: 70 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 50 }} />
+              <col />
+            </colgroup>
             <thead>
               <tr>
                 <th>When</th>

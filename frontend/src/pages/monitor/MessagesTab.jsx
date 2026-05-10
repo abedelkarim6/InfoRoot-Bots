@@ -13,6 +13,7 @@ import ExportColumnsModal from './ExportColumnsModal';
 import { splitTags } from './shared';
 import { downloadCsv } from './exportCsv';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlString, useUrlBool, useUrlSet } from '../../lib/useUrlState';
 
 const PAGE_SIZE = 50;
 
@@ -23,17 +24,17 @@ export default function MessagesTab() {
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [flatView, setFlatView] = useState(false);
+  const [flatView, setFlatView] = useUrlBool('flat');
   const [showExport, setShowExport] = useState(false);
 
-  // Filters
-  const [selColls, setSelColls] = useState(() => new Set());
-  const [selChannels, setSelChannels] = useState(() => new Set());
-  const [selTopics, setSelTopics] = useState(() => new Set());
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  // Filters — URL-backed
+  const [selColls, setSelColls] = useUrlSet('coll');
+  const [selChannels, setSelChannels] = useUrlSet('ch');
+  const [selTopics, setSelTopics] = useUrlSet('topic');
+  const [search, setSearch] = useUrlString('q', '');
+  const [searchInput, setSearchInput] = useState(search);
+  const [dateFrom, setDateFrom] = useUrlString('from', '');
+  const [dateTo, setDateTo] = useUrlString('to', '');
 
   const debouncedSetSearch = useMemo(() => debounce((v) => setSearch(v), 220), []);
 

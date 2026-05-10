@@ -714,6 +714,28 @@ class Database:
             # Migrate: add schedule_name to topic_interim_summaries for display
             cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_name TEXT")
 
+            # Indexes for monitor-page hot queries. All tabs paginate by
+            # `timestamp DESC` and filter by bot_name/collection_name/keywords_found.
+            # Without these, every Messages/Unclassified/Schedules/History load
+            # does a full table scan + sort on the messages and summaries tables.
+            cursor.execute("CREATE INDEX IF NOT EXISTS messages_timestamp_idx ON messages (timestamp DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS messages_bot_ts_idx ON messages (bot_name, timestamp DESC)")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS messages_collection_ts_idx
+                ON messages (collection_name, timestamp DESC)
+                WHERE collection_name IS NOT NULL AND collection_name != ''
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS messages_unclassified_ts_idx
+                ON messages (timestamp DESC)
+                WHERE collection_name IS NOT NULL AND collection_name != ''
+                  AND (keywords_found IS NULL OR keywords_found = '')
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS summaries_timestamp_idx ON summaries (timestamp DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS summaries_bot_topic_ts_idx ON summaries (bot_name, topic_name, timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ms_message_id_idx ON message_summarizations (message_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ms_bot_topic_status_idx ON message_summarizations (bot_name, topic_name, status)")
+
         finally:
             self._commit()
 

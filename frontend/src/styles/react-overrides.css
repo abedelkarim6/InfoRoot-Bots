@@ -10,3 +10,66 @@
 #root {
     display: block;
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Full-width content area.
+
+   Goal: every admin page (especially Logs + AI Usage, where the tables
+   have to grow) fills all horizontal space remaining beside the sidebar.
+   The sidebar is fixed at var(--sidebar-width); .main-content is offset by
+   that margin and uses the rest. .page / .card / table wrappers default to
+   block (width: auto) which expands to fill the parent, but we set
+   width: 100% defensively in case a child has shrink-wrap behavior from
+   a flex / grid / inline-block descendant.
+   ────────────────────────────────────────────────────────────────────── */
+.main-content {
+    width: auto;
+    box-sizing: border-box;
+}
+.page {
+    width: 100%;
+    box-sizing: border-box;
+}
+/* Direct children: every wrapper/card under the page fills horizontally. */
+.page > .card,
+.page > div,
+.page > header {
+    width: 100%;
+    box-sizing: border-box;
+}
+/* Nested cards too — LogsPage wraps each tab panel in an extra <div> for
+   the show/hide toggle, so .card lives one level deeper than on most pages.
+   Descendant selector catches that case without affecting flex layouts. */
+.page .card {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Tables themselves are already width:100%, but their wrapper (when an
+   .overflow-x:auto scroll container is in play) needs to also fill so the
+   table actually has 100% to expand into. */
+#logs-table-wrap,
+#failures-table-wrap,
+.aiu-table-wrap {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* The Logs table benefits from time/level columns being kept narrow so the
+   Message column gets every remaining pixel. */
+#logs-table-wrap table {
+    table-layout: auto;
+    width: 100%;
+}
+#logs-table-wrap col.col-time   { width: 145px; }
+#logs-table-wrap col.col-logger { width: 130px; }
+#logs-table-wrap col.col-level  { width: 80px;  }
+#logs-table-wrap col.col-msg    { width: auto;  }
+
+/* AI Usage hourly + recent tables — explicit column widths for fixed-size
+   columns push the variable Bots / Topics / Target columns to consume the
+   rest of the row instead of clustering to the left. */
+.aiu-table-wrap table {
+    table-layout: auto;
+    width: 100%;
+}

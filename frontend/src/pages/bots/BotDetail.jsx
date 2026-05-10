@@ -19,6 +19,7 @@ import { useGlobalConfig } from '../../config/ConfigProvider';
 import { api } from '../../lib/api';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlString } from '../../lib/useUrlState';
 import BasicSettings from './BasicSettings';
 import Rules from './Rules';
 import Prompts from './Prompts';
@@ -31,12 +32,16 @@ const TABS = [
   { id: 'prompts',    label: '📝 Prompts' },
   { id: 'categories', label: '📂 Categories & Topics' }
 ];
+const VALID_TABS = new Set(TABS.map((t) => t.id));
 
 export default function BotDetail({ botName }) {
   const { config } = useGlobalConfig();
   const bot = (config?.bots || {})[botName];
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('categories');
+  // ?tab=basic|rules|prompts|categories — falls back to categories.
+  const [tabParam, setTabParam] = useUrlString('tab', 'categories');
+  const activeTab = VALID_TABS.has(tabParam) ? tabParam : 'categories';
+  const setActiveTab = setTabParam;
 
   // Resolve the bot's current source / target channels from the union of all
   // collections it references. This is what the per-bot Sources/Destinations

@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api, debounce, fmtLBN } from '../../lib/api';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useGlobalConfig } from '../../config/ConfigProvider';
+import { useUrlString } from '../../lib/useUrlState';
 import PageHeader from '../../components/PageHeader';
 
 const LOG_LEVEL_CLS = {
@@ -47,6 +48,9 @@ const TAG_OPTIONS = [
 ];
 
 // CSS injected once for the logs table (mirrors legacy _injectLogStyles).
+// Column widths are controlled by the <colgroup> + react-overrides.css so
+// the table always fills the available horizontal space, with the Message
+// column absorbing every extra pixel.
 const LOG_STYLES = `
   #logs-table-wrap table { width:100%; border-collapse:collapse; font-size:12.5px; }
   #logs-table-wrap th { background:var(--bg-tertiary); color:var(--text-secondary);
@@ -57,11 +61,11 @@ const LOG_STYLES = `
       vertical-align:top; }
   #logs-table-wrap tr:last-child td { border-bottom:none; }
   #logs-table-wrap tr:hover td { background:var(--bg-tertiary); }
-  .log-time  { white-space:nowrap; color:var(--text-muted); font-size:11.5px; width:155px; }
-  .log-name  { white-space:nowrap; color:var(--text-muted); font-size:11.5px; max-width:110px;
+  .log-time  { white-space:nowrap; color:var(--text-muted); font-size:11.5px; }
+  .log-name  { white-space:nowrap; color:var(--text-muted); font-size:11.5px;
                overflow:hidden; text-overflow:ellipsis; }
   .log-level { font-weight:700; font-size:11px; white-space:nowrap; }
-  .log-msg   { word-break:break-word; color:var(--text-primary); }
+  .log-msg   { word-break:break-word; color:var(--text-primary); width:100%; }
   .log-level-error   { color:#ef4444; }
   .log-level-warn    { color:#f59e0b; }
   .log-level-info    { color:#3b82f6; }
@@ -73,8 +77,12 @@ const LOG_STYLES = `
              border-radius:3px; padding:0 3px; margin-right:2px; font-family:monospace; }
 `;
 
+const VALID_LOG_TABS = new Set(['system', 'failures']);
+
 export default function LogsPage() {
-  const [activeTab, setActiveTab] = useState('system');
+  const [tabParam, setTabParam] = useUrlString('tab', 'system');
+  const activeTab = VALID_LOG_TABS.has(tabParam) ? tabParam : 'system';
+  const setActiveTab = setTabParam;
 
   return (
     <div className="page active" id="logs-page">
@@ -117,17 +125,17 @@ export default function LogsPage() {
 // ────────────────────────────────────────────────────────────────────────────
 
 function SystemLogsPanel() {
-  const [level, setLevel] = useState('');
-  const [tag, setTag] = useState('');
-  const [search, setSearch] = useState('');
-  const [searchInput, setSearchInput] = useState('');
+  const [level, setLevel] = useUrlString('level', '');
+  const [tag, setTag] = useUrlString('tag', '');
+  const [search, setSearch] = useUrlString('q', '');
+  const [searchInput, setSearchInput] = useState(search);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // 220ms-debounced commit of search input → query (mirrors legacy
+  // 220ms-debounced commit of search input → URL (mirrors legacy
   // `_dApplyLogFilters` debounce in shared/api.js).
   const debouncedSetSearch = useMemo(
     () => debounce((v) => setSearch(v), 220),
-    []
+    [setSearch]
   );
 
   const params = new URLSearchParams({ limit: '500' });
@@ -286,6 +294,12 @@ function SystemLogsPanel() {
             </p>
           ) : (
             <table>
+              <colgroup>
+                <col className="col-time" />
+                <col className="col-logger" />
+                <col className="col-level" />
+                <col className="col-msg" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Time</th>
@@ -353,8 +367,8 @@ function renderTaggedMessage(msg) {
 // ────────────────────────────────────────────────────────────────────────────
 
 function SummaryFailuresPanel() {
-  const [botFilter, setBotFilter] = useState('');
-  const [daysFilter, setDaysFilter] = useState('7');
+  const [botFilter, setBotFilter] = useUrlString('bot', '');
+  const [daysFilter, setDaysFilter] = useUrlString('days', '7');
 
   const { config } = useGlobalConfig();
   const knownBots = useMemo(() => {
@@ -423,6 +437,7 @@ function SummaryFailuresPanel() {
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <div
           id="failures-table-wrap"
+          className="aiu-table-wrap"
           style={{ overflowX: 'auto', maxHeight: '70vh', overflowY: 'auto' }}
         >
           {isLoading ? (

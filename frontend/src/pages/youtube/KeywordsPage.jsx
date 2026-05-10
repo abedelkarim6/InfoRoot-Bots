@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api, escapeHtml } from '../../lib/api';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlString } from '../../lib/useUrlState';
 import PageHeader from '../../components/PageHeader';
 import {
   LANG_OPTIONS,
@@ -29,7 +30,7 @@ import {
 
 export default function KeywordsPage() {
   const { showNotification } = useDialogs();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useUrlString('q', '');
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [modalKw, setModalKw] = useState(null); // null | { mode: 'add' } | { mode: 'edit', kw }
 

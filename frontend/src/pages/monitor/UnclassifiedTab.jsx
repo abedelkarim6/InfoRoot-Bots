@@ -18,6 +18,7 @@ import ExportColumnsModal from './ExportColumnsModal';
 import { extractCommonWords } from './shared';
 import { downloadCsv } from './exportCsv';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlString, useUrlSet } from '../../lib/useUrlState';
 
 const PAGE_SIZE = 50;
 const STORAGE_KEY = 'mon-uncl-cleared-at';
@@ -31,17 +32,17 @@ export default function UnclassifiedTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const [view, setView] = useState('channel'); // 'channel' | 'words' | 'flat'
+  const [view, setView] = useUrlString('view', 'channel'); // 'channel' | 'words' | 'flat'
   const [showExport, setShowExport] = useState(false);
 
-  // Filters
-  const [selBots, setSelBots] = useState(() => new Set());
-  const [selColls, setSelColls] = useState(() => new Set());
-  const [selChannels, setSelChannels] = useState(() => new Set());
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  // Filters (URL-backed so refresh + back-button preserve them).
+  const [selBots, setSelBots] = useUrlSet('bot');
+  const [selColls, setSelColls] = useUrlSet('coll');
+  const [selChannels, setSelChannels] = useUrlSet('ch');
+  const [search, setSearch] = useUrlString('q', '');
+  const [searchInput, setSearchInput] = useState(search);
+  const [dateFrom, setDateFrom] = useUrlString('from', '');
+  const [dateTo, setDateTo] = useUrlString('to', '');
 
   const [clearedAt, setClearedAt] = useState(() => localStorage.getItem(STORAGE_KEY) || null);
   const initialized = useRef(false);

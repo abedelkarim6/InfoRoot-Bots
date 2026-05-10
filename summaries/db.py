@@ -650,6 +650,15 @@ class SummariesDB(Database):
     def get_schedule_history(self, limit: int = 200, bot_name: str = None,
                              topic_name: str = None, status: str = None,
                              allowed_bot_names: list = None):
+        """Schedule run history with the matched summary (closest ±300 s) and
+        every target entity that fired in that window.
+
+        Rewritten to limit schedule_runs first (the heavy filter), then do
+        one indexable range join on summaries — `s.timestamp BETWEEN r.fired_at
+        ± 300s` instead of the prior `ABS(EXTRACT(EPOCH …)) < 300` which was
+        not sargable. With the `summaries_bot_topic_ts_idx` index this avoids
+        the per-row sequential scan the old LATERAL + correlated subquery did.
+        """
         try:
             cursor = self._get_cursor()
             conditions = []
@@ -669,29 +678,37 @@ class SummariesDB(Database):
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             params.append(limit)
             cursor.execute(
-                f"""SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
-                           r.message_count, r.error_text, r.fired_at,
-                           r.rpm_at_failure, r.tpm_at_failure, r.rpd_at_failure,
-                           matched.id           AS summary_id,
-                           matched.summary_text AS summary_text,
-                           (SELECT string_agg(DISTINCT s2.target_entity, ', ')
-                            FROM summaries s2
-                            WHERE s2.bot_name = r.bot_name
-                              AND s2.topic_name = r.topic_name
-                              AND ABS(EXTRACT(EPOCH FROM (s2.timestamp - r.fired_at))) < 300
-                           ) AS target_entities
-                    FROM schedule_runs r
-                    LEFT JOIN LATERAL (
-                        SELECT s.id, s.summary_text
-                        FROM summaries s
-                        WHERE s.bot_name = r.bot_name
-                          AND s.topic_name = r.topic_name
-                          AND ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) < 300
-                        ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at))) ASC
-                        LIMIT 1
-                    ) matched ON true
+                f"""
+                WITH r AS (
+                    SELECT id, bot_name, topic_name, schedule_type, status,
+                           message_count, error_text, fired_at,
+                           rpm_at_failure, tpm_at_failure, rpd_at_failure
+                    FROM schedule_runs
                     {where}
-                    ORDER BY r.fired_at DESC LIMIT %s""",
+                    ORDER BY fired_at DESC
+                    LIMIT %s
+                ),
+                matched AS (
+                    SELECT r.id AS run_id,
+                           (array_agg(s.id           ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_id,
+                           (array_agg(s.summary_text ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_text,
+                           string_agg(DISTINCT s.target_entity, ', ') AS target_entities
+                    FROM r
+                    JOIN summaries s
+                      ON s.bot_name   = r.bot_name
+                     AND s.topic_name = r.topic_name
+                     AND s.timestamp >= r.fired_at - INTERVAL '300 seconds'
+                     AND s.timestamp <= r.fired_at + INTERVAL '300 seconds'
+                    GROUP BY r.id
+                )
+                SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
+                       r.message_count, r.error_text, r.fired_at,
+                       r.rpm_at_failure, r.tpm_at_failure, r.rpd_at_failure,
+                       m.summary_id, m.summary_text, m.target_entities
+                FROM r
+                LEFT JOIN matched m ON m.run_id = r.id
+                ORDER BY r.fired_at DESC
+                """,
                 params or None
             )
             rows = cursor.fetchall()
@@ -835,7 +852,12 @@ class SummariesDB(Database):
 
     def get_unclassified_stats(self, allowed_bot_names: list = None, since: str = None):
         try:
-            """Return counts for unclassified messages grouped by bot and collection."""
+            """Return counts for unclassified messages grouped by bot and collection.
+
+            Time-bounded to keep the query bounded as the messages table grows:
+            when `since` is given it's used as the lower bound; otherwise the
+            last 7 days are scanned (matches the badge's "recent" semantics).
+            """
             cursor = self._get_cursor()
             where = "collection_name IS NOT NULL AND collection_name != '' AND (keywords_found IS NULL OR keywords_found = '')"
             params = []
@@ -845,6 +867,8 @@ class SummariesDB(Database):
             if since:
                 where += " AND timestamp > %s::timestamptz"
                 params.append(since)
+            else:
+                where += " AND timestamp >= NOW() - INTERVAL '7 days'"
             cursor.execute(f"""
                 SELECT bot_name, collection_name, COUNT(*) AS cnt
                 FROM messages
@@ -924,74 +948,120 @@ class SummariesDB(Database):
     # ==================== Analytics ====================
 
     def get_pending_counts(self, allowed_bot_names: list = None, windows: dict = None):
-        """Returns pending message counts per bot per topic for each schedule type.
+        """Returns pending message counts per bot per topic per schedule type.
 
-        windows: optional dict of (bot_name, topic_name, schedule_type) -> datetime.datetime.
-        When provided, a message only counts as pending for a given schedule type if its
-        timestamp >= the corresponding window start. Fallback: 48-hour window.
+        Aggregated entirely in SQL — replaces the previous "fetch all 48 h of
+        messages into Python and iterate" pattern. For each (bot, topic,
+        schedule_type) entry in `windows`, counts messages where:
+          - the topic appears in `messages.topics` (comma-separated),
+          - the message timestamp >= the configured window_start,
+          - no `message_summarizations` row marks it summarized for that
+            (bot, topic, schedule_type),
+          - no `message_summarizations` row marks the (bot, topic) "missed".
+
+        Args:
+            windows: dict of (bot_name, topic_name, schedule_type) → datetime.
+                     Values may be tz-aware (Beirut) — they're stripped to
+                     naive Beirut local to match `messages.timestamp`. If the
+                     dict is empty/None we return {} (no configured schedules
+                     means there's nothing to be "pending" for).
         """
+        if not windows:
+            return {}
+
+        # Convert each window timestamp to a naive Beirut-local datetime so it
+        # compares directly against `messages.timestamp` (naive, Beirut).
+        try:
+            from zoneinfo import ZoneInfo
+            _beirut = ZoneInfo('Asia/Beirut')
+        except Exception:
+            _beirut = None
+
+        win_rows_sql = []
+        win_params = []
+        win_keys = []
+        for (bn, topic, stype), win_dt in windows.items():
+            if win_dt is None:
+                continue
+            if _beirut is not None and getattr(win_dt, 'tzinfo', None) is not None:
+                try:
+                    win_dt = win_dt.astimezone(_beirut).replace(tzinfo=None)
+                except Exception:
+                    win_dt = win_dt.replace(tzinfo=None)
+            elif getattr(win_dt, 'tzinfo', None) is not None:
+                win_dt = win_dt.replace(tzinfo=None)
+            win_rows_sql.append("(%s, %s, %s, %s::timestamp)")
+            win_params.extend([bn, topic, stype, win_dt])
+            win_keys.append((bn, topic, stype))
+
+        if not win_rows_sql:
+            return {}
+
         try:
             cursor = self._get_cursor()
+            params = list(win_params)
+            bot_filter_sql = ""
             if allowed_bot_names is not None:
-                cursor.execute("""
-                    SELECT m.id, m.bot_name, m.topics, m.timestamp
-                    FROM messages m
-                    WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
-                      AND (m.collection_name IS NOT NULL AND m.collection_name != '')
-                      AND m.timestamp >= NOW() - INTERVAL '48 hours'
-                      AND m.bot_name = ANY(%s)
-                """, (allowed_bot_names,))
-            else:
-                cursor.execute("""
-                    SELECT m.id, m.bot_name, m.topics, m.timestamp
-                    FROM messages m
-                    WHERE m.bot_name IS NOT NULL AND m.topics IS NOT NULL AND m.topics != ''
-                      AND (m.collection_name IS NOT NULL AND m.collection_name != '')
-                      AND m.timestamp >= NOW() - INTERVAL '48 hours'
-                """)
-            rows = cursor.fetchall()
+                bot_filter_sql = "AND m.bot_name = ANY(%s)"
+                params.append(allowed_bot_names)
 
-            cursor.execute("""
-                SELECT ms.message_id, ms.bot_name, ms.topic_name, ms.schedule_type, ms.status
-                FROM message_summarizations ms
-                JOIN messages m ON m.id = ms.message_id
-                WHERE m.timestamp >= NOW() - INTERVAL '48 hours'
-            """)
-            done = set()
-            missed = set()
-            for r in cursor.fetchall():
-                done.add((r['message_id'], r['bot_name'], r['topic_name'], r['schedule_type']))
-                if r['status'] == 'missed':
-                    missed.add((r['message_id'], r['bot_name'], r['topic_name']))
+            sql = f"""
+                WITH windows_t (bot_name, topic_name, schedule_type, window_start) AS (
+                    VALUES {", ".join(win_rows_sql)}
+                ),
+                topic_msgs AS (
+                    SELECT m.id,
+                           m.bot_name,
+                           TRIM(t.topic) AS topic_name,
+                           m.timestamp
+                    FROM messages m
+                    CROSS JOIN LATERAL unnest(string_to_array(m.topics, ',')) AS t(topic)
+                    WHERE m.bot_name IS NOT NULL
+                      AND m.topics IS NOT NULL AND m.topics != ''
+                      AND m.collection_name IS NOT NULL AND m.collection_name != ''
+                      AND m.timestamp >= NOW() - INTERVAL '48 hours'
+                      {bot_filter_sql}
+                )
+                SELECT tm.bot_name, tm.topic_name, w.schedule_type, COUNT(*) AS cnt
+                FROM topic_msgs tm
+                JOIN windows_t w
+                  ON w.bot_name = tm.bot_name
+                 AND w.topic_name = tm.topic_name
+                WHERE TRIM(tm.topic_name) != ''
+                  AND tm.timestamp >= w.window_start
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message_summarizations ms
+                      WHERE ms.message_id = tm.id
+                        AND ms.bot_name   = tm.bot_name
+                        AND ms.topic_name = tm.topic_name
+                        AND ms.status     = 'missed'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message_summarizations ms
+                      WHERE ms.message_id    = tm.id
+                        AND ms.bot_name      = tm.bot_name
+                        AND ms.topic_name    = tm.topic_name
+                        AND ms.schedule_type = w.schedule_type
+                  )
+                GROUP BY tm.bot_name, tm.topic_name, w.schedule_type
+            """
+            cursor.execute(sql, params)
 
+            DEFAULT = {'hourly': 0, 'daily': 0, 'minute': 0,
+                       'interval_hourly': 0, 'interval_minutes': 0,
+                       'speeches_interval': 0}
             counts = {}
-            for row in rows:
-                bn = row['bot_name'] or 'unknown'
-                topics_str = row['topics'] or ''
-                topics = [t.strip() for t in topics_str.split(',') if t.strip()]
-                msg_ts = row['timestamp']
+            # Pre-seed every (bot, topic) present in windows so the frontend
+            # always finds a dict and falls back to zero for unconfigured types.
+            for bn, topic, _stype in win_keys:
+                counts.setdefault(bn, {}).setdefault(topic, dict(DEFAULT))
 
-                if bn not in counts:
-                    counts[bn] = {}
-
-                for topic in topics:
-                    if topic not in counts[bn]:
-                        counts[bn][topic] = {'hourly': 0, 'daily': 0, 'minute': 0, 'interval_hourly': 0, 'interval_minutes': 0, 'speeches_interval': 0}
-                    if (row['id'], bn, topic) in missed:
-                        continue
-                    for stype in ('hourly', 'daily', 'minute', 'interval_hourly', 'interval_minutes', 'speeches_interval'):
-                        if (row['id'], bn, topic, stype) in done:
-                            continue
-                        if windows and msg_ts is not None:
-                            win = windows.get((bn, topic, stype))
-                            if win is not None:
-                                import datetime as _dt
-                                from zoneinfo import ZoneInfo
-                                # messages.timestamp is TIMESTAMP (no tz) storing Beirut local time
-                                msg_ts_cmp = msg_ts if msg_ts.tzinfo is not None else msg_ts.replace(tzinfo=ZoneInfo('Asia/Beirut'))
-                                if msg_ts_cmp < win:
-                                    continue
-                        counts[bn][topic][stype] += 1
+            for row in cursor.fetchall():
+                bn = row['bot_name']
+                topic = row['topic_name']
+                stype = row['schedule_type']
+                bucket = counts.setdefault(bn, {}).setdefault(topic, dict(DEFAULT))
+                bucket[stype] = int(row['cnt'])
 
             return counts
         finally:

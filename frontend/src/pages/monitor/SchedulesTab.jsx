@@ -22,14 +22,17 @@ import {
 } from './shared';
 import { buildScheduleFireRows, downloadCsv } from './exportCsv';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useUrlString, useUrlSet } from '../../lib/useUrlState';
 
 export default function SchedulesTab({ data, isLoading }) {
   const { showAlert } = useDialogs();
-  const [selBots, setSelBots] = useState(() => new Set());
-  const [selTopics, setSelTopics] = useState(() => new Set());
-  const [selPrompts, setSelPrompts] = useState(() => new Set());
-  const [selTypes, setSelTypes] = useState(() => new Set());
-  const [pending, setPending] = useState(null); // { botName, topicName, schedType, sch } | null
+  const [selBots, setSelBots] = useUrlSet('sbot');
+  const [selTopics, setSelTopics] = useUrlSet('stopic');
+  const [selPrompts, setSelPrompts] = useUrlSet('sprompt');
+  const [selTypes, setSelTypes] = useUrlSet('stype');
+  // Pending drill-down is encoded as ?pending=bot::topic::type
+  // The matching schedule object is looked up from `flat` at render time.
+  const [pendingKey, setPendingKey] = useUrlString('pending', '');
   const [showExport, setShowExport] = useState(false);
 
   // Tick once per second so countdowns stay live without refetching the API.
@@ -76,6 +79,20 @@ export default function SchedulesTab({ data, isLoading }) {
   }, [enabledItems, nowMs]);
 
   // If the user has drilled into pending messages, render that instead.
+  // pendingKey shape: "botName::topicName::schedType". The full schedule
+  // object is looked up from `flat` so refreshing the URL works (sch is
+  // not stored in URL — only the keys to find it).
+  let pending = null;
+  if (pendingKey) {
+    const [botName, topicName, schedType] = pendingKey.split('::');
+    const match = flat.find(
+      (r) =>
+        r.botName === botName &&
+        r.topicName === topicName &&
+        r.sch.type === schedType
+    );
+    if (match) pending = { botName, topicName, schedType, sch: match.sch };
+  }
   if (pending) {
     return (
       <PendingMessagesPanel
@@ -83,10 +100,13 @@ export default function SchedulesTab({ data, isLoading }) {
         topicName={pending.topicName}
         schedType={pending.schedType}
         sch={pending.sch}
-        onBack={() => setPending(null)}
+        onBack={() => setPendingKey('')}
       />
     );
   }
+  // If pendingKey is set but no match (data not yet loaded, or schedule was
+  // removed since the URL was bookmarked), fall through to the normal view.
+  // We don't auto-clear the URL so a slow data fetch can still resolve it.
 
   return (
     <>
@@ -132,7 +152,11 @@ export default function SchedulesTab({ data, isLoading }) {
       ) : !fires.length ? (
         <p className="mon-empty">No upcoming fires in the next 24 hours.</p>
       ) : (
-        <ScheduleTimeline fires={fires} nowMs={nowMs} onShowPending={setPending} />
+        <ScheduleTimeline
+          fires={fires}
+          nowMs={nowMs}
+          onShowPending={(p) => setPendingKey(`${p.botName}::${p.topicName}::${p.schedType}`)}
+        />
       )}
 
       {showExport && (

@@ -14,39 +14,75 @@
  * header toggles it; the polling stops automatically when the page unmounts.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, debounce, escapeHtml } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useAuth } from '../../auth/AuthContext';
 import PageHeader from '../../components/PageHeader';
+import { useUrlInt, useUrlString } from '../../lib/useUrlState';
 import { estimateCost, parseCommaSep, timeAgo, todayISODate } from './shared';
 
 const PAGE_SIZE = 50;
-const MAX_PROCESSING = 3;
 
 export default function VideosPage() {
   const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const { showNotification } = useDialogs();
 
-  // ── Filter state (kept locally; default date range = today) ──
-  const [filters, setFilters] = useState(() => ({
-    status: '',
-    channel: '',
-    source: '',
-    dateFrom: todayISODate(),
-    dateTo: todayISODate()
-  }));
-  const [page, setPage] = useState(0);
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const processingCountRef = useRef(0);
+  // ── Filter state — URL-backed so refresh and back-button preserve it.
+  // First entry to the page (no params in URL) defaults the date range to
+  // today; subsequent navigations honor whatever the URL says.
+  const [filterStatus, setFilterStatus] = useUrlString('status', '');
+  const [filterChannel, setFilterChannel] = useUrlString('ch', '');
+  const [filterSource, setFilterSource] = useUrlString('src', '');
+  const [filterDateFrom, setFilterDateFrom] = useUrlString('from', '');
+  const [filterDateTo, setFilterDateTo] = useUrlString('to', '');
+  const filters = {
+    status: filterStatus,
+    channel: filterChannel,
+    source: filterSource,
+    dateFrom: filterDateFrom,
+    dateTo: filterDateTo
+  };
+  const setFilters = useCallback(
+    (next) => {
+      const v = typeof next === 'function' ? next(filters) : next;
+      setFilterStatus(v.status || '');
+      setFilterChannel(v.channel || '');
+      setFilterSource(v.source || '');
+      setFilterDateFrom(v.dateFrom || '');
+      setFilterDateTo(v.dateTo || '');
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filterStatus, filterChannel, filterSource, filterDateFrom, filterDateTo]
+  );
 
-  // Reset page when filters change
+  // Default the date range to today only on the very first visit (when no
+  // date params are in the URL). After that the URL is the source of truth.
+  const datesInitialized = useRef(false);
+  useEffect(() => {
+    if (datesInitialized.current) return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.get('from') && !url.searchParams.get('to')) {
+      const today = todayISODate();
+      setFilterDateFrom(today);
+      setFilterDateTo(today);
+    }
+    datesInitialized.current = true;
+  }, [setFilterDateFrom, setFilterDateTo]);
+
+  const [page, setPage] = useUrlInt('page', 0);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  // Reset page when filters change — uses a JSON-stringified key so we don't
+  // depend on filters' object identity (rebuilt every render from URL state).
+  const filterKey = `${filterStatus}|${filterChannel}|${filterSource}|${filterDateFrom}|${filterDateTo}`;
   useEffect(() => {
     setPage(0);
-  }, [filters]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
 
   const queryUrl = useMemo(() => {
     const offset = page * PAGE_SIZE;
@@ -80,8 +116,8 @@ export default function VideosPage() {
   // ── Mutations ────────────────────────────────────────────────
   const triggerProcess = useApiMutation('/api/youtube/queue/process', {
     invalidate: ['yt-videos'],
-    successMsg: (res) => `Processed ${res?.processed ?? 0} item(s)`,
-    errorMsg: 'Processing failed'
+    successMsg: 'Queue processing started — refresh in a minute to see results',
+    errorMsg: 'Failed to start queue processing'
   });
 
   const resetStuck = useApiMutation('/api/youtube/queue/reset-stuck', {
@@ -262,11 +298,7 @@ export default function VideosPage() {
       ) : items.length === 0 ? (
         <p className="mon-empty">No videos found.</p>
       ) : (
-        <VideoTable
-          items={items}
-          isAdmin={isAdmin}
-          processingCountRef={processingCountRef}
-        />
+        <VideoTable items={items} isAdmin={isAdmin} />
       )}
 
       {/* Pagination */}
@@ -407,6 +439,22 @@ function ManualSubmitCard() {
   const [url, setUrl] = useState('');
   const [target, setTarget] = useState('');
 
+  // Pull the logged-in account's joined channels and keep only the
+  // writable ones (creator or admin_rights). Same endpoint used by the
+  // Bot/Collections channel pickers — see BotChannelsModal.jsx.
+  const { data: dialogsRes, isLoading: dialogsLoading } = useQuery({
+    queryKey: ['user-dialogs'],
+    queryFn: () => api('/api/telegram/userbot/dialogs'),
+    staleTime: 60_000
+  });
+  const writableChannels = useMemo(() => {
+    if (dialogsRes?.status !== 'ok') return [];
+    return (dialogsRes.channels || []).filter((c) => c.can_post);
+  }, [dialogsRes]);
+  const hasSession =
+    dialogsRes?.status === 'ok' ||
+    (dialogsRes && dialogsRes.status !== 'no_session' && dialogsRes.status !== 'unauthorized');
+
   const add = useApiMutation('/api/youtube/videos/add', {
     invalidate: ['yt-videos'],
     successMsg: (res) => `Video ${res?.video_id ?? ''} queued`,
@@ -441,14 +489,43 @@ function ManualSubmitCard() {
           placeholder="YouTube URL or video ID"
           style={{ flex: 2 }}
         />
-        <input
-          type="text"
-          className="input"
-          value={target}
-          onChange={(e) => setTarget(e.target.value)}
-          placeholder="Telegram target (e.g. @channel)"
-          style={{ flex: 1 }}
-        />
+        {hasSession === false ? (
+          <input
+            type="text"
+            className="input"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="Telegram target (e.g. @channel)"
+            style={{ flex: 1 }}
+            title="No Telegram account linked — enter a target manually"
+          />
+        ) : (
+          <select
+            className="select"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            style={{ flex: 1 }}
+            disabled={dialogsLoading}
+            title="Pick a channel where your account can post"
+          >
+            <option value="">
+              {dialogsLoading
+                ? 'Loading channels…'
+                : writableChannels.length === 0
+                ? 'No writable channels — use defaults'
+                : 'Use default targets'}
+            </option>
+            {writableChannels.map((c) => {
+              const value = c.username ? '@' + c.username : String(c.id);
+              const label = c.username ? `${c.title} (@${c.username})` : c.title;
+              return (
+                <option key={c.id} value={value}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        )}
         <button className="btn btn-primary" onClick={handleAdd} disabled={add.isPending}>
           Add & Queue
         </button>
@@ -661,7 +738,7 @@ const SOURCE_LABEL = {
   metadata: 'Metadata'
 };
 
-function VideoTable({ items, isAdmin, processingCountRef }) {
+function VideoTable({ items, isAdmin }) {
   return (
     <div id="yt-videos-container">
       <table className="yt-table">
@@ -681,12 +758,7 @@ function VideoTable({ items, isAdmin, processingCountRef }) {
         </thead>
         <tbody>
           {items.map((item) => (
-            <VideoRow
-              key={item.id}
-              item={item}
-              isAdmin={isAdmin}
-              processingCountRef={processingCountRef}
-            />
+            <VideoRow key={item.id} item={item} isAdmin={isAdmin} />
           ))}
         </tbody>
       </table>
@@ -694,7 +766,7 @@ function VideoTable({ items, isAdmin, processingCountRef }) {
   );
 }
 
-function VideoRow({ item, isAdmin, processingCountRef }) {
+function VideoRow({ item, isAdmin }) {
   const { showNotification, showAlert, showConfirm } = useDialogs();
   const qc = useQueryClient();
   const [localProcessing, setLocalProcessing] = useState(false);
@@ -740,24 +812,19 @@ function VideoRow({ item, isAdmin, processingCountRef }) {
   const cost = isAdmin ? estimateCost(item) : null;
 
   async function handleProcessOne() {
-    if (processingCountRef.current >= MAX_PROCESSING) {
-      showNotification(`Max ${MAX_PROCESSING} items processing at once — please wait`, 'error');
-      return;
-    }
-    processingCountRef.current += 1;
+    // The backend now dispatches the job in the background and returns
+    // immediately, so we don't await the actual processing result here.
+    // The row's status will flip to 'processing' on the next refetch and
+    // to 'done'/'failed' once the worker finishes (auto-refresh: 30s).
     setLocalProcessing(true);
     try {
       const res = await api('/api/youtube/queue/process-one', { id: item.id });
       if (res?.status === 'ok') {
-        showNotification(
-          res.success ? 'Item processed successfully' : 'Processing failed',
-          res.success ? 'success' : 'error'
-        );
+        showNotification('Processing started — status will update shortly', 'success');
       } else {
-        showNotification(res?.message || 'Processing failed', 'error');
+        showNotification(res?.message || 'Failed to start processing', 'error');
       }
     } finally {
-      processingCountRef.current -= 1;
       setLocalProcessing(false);
       qc.invalidateQueries({ queryKey: ['yt-videos'] });
     }

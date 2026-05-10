@@ -19,6 +19,7 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
+import { useUrlString } from '../../lib/useUrlState';
 import PageHeader from '../../components/PageHeader';
 
 const TAB_STYLES = `
@@ -38,8 +39,12 @@ const TAB_STYLES = `
   .tgt-tab--active { color: var(--color-primary); border-bottom-color: var(--color-primary); }
 `;
 
+const VALID_TGT_TABS = new Set(['telegram', 'summaries', 'manual']);
+
 export default function TgTesterPage() {
-  const [tab, setTab] = useState('telegram');
+  const [tabParam, setTabParam] = useUrlString('tab', 'telegram');
+  const tab = VALID_TGT_TABS.has(tabParam) ? tabParam : 'telegram';
+  const setTab = setTabParam;
 
   // Single source of truth for the bot config + recent summaries.
   const monitorQuery = useQuery({

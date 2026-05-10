@@ -682,18 +682,45 @@ async def retry_queue_item(request: Request):
     return {"status": "ok"}
 
 
+async def _run_queue_item_bg(queue_id: int, item: dict):
+    """Background wrapper: enforces a per-item timeout and writes a final
+    status row even if process_queue_item itself crashes."""
+    try:
+        await asyncio.wait_for(process_queue_item(item), timeout=200)
+    except asyncio.TimeoutError:
+        try:
+            get_yt_db().update_queue_status(queue_id, 'failed', error_log='Processing timed out (200s)')
+        except Exception as e:
+            logger.error(f"[YT-PROCESS-ONE-BG] timeout-update failed for {queue_id}: {e}")
+    except Exception as e:
+        logger.error(f"[YT-PROCESS-ONE-BG] {queue_id}: {e}", exc_info=True)
+        try:
+            get_yt_db().update_queue_status(queue_id, 'failed', error_log=str(e))
+        except Exception as ee:
+            logger.error(f"[YT-PROCESS-ONE-BG] failed-update failed for {queue_id}: {ee}")
+
+
+async def _run_pending_queue_bg():
+    try:
+        await process_pending_queue()
+    except Exception as e:
+        logger.error(f"[YT-PROCESS-BG] {e}", exc_info=True)
+
+
 @router.post("/queue/process")
 async def trigger_process_queue():
-    try:
-        count = await process_pending_queue()
-        return {"status": "ok", "processed": count}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    """Kick off pending-queue processing in the background and return
+    immediately so nginx (60s) doesn't 504. The table's auto-refresh
+    surfaces results as items move through 'processing' → 'done'/'failed'."""
+    asyncio.create_task(_run_pending_queue_bg())
+    return {"status": "ok", "queued": True}
 
 
 @router.post("/queue/process-one")
 async def process_single_queue_item(request: Request):
-    """Process a single queue item immediately."""
+    """Schedule a single queue item to be processed in the background.
+    Returns immediately; the row's status moves to 'processing' on the
+    next refresh and to 'done'/'failed' once the worker finishes."""
     data = await request.json()
     queue_id = data.get("id")
     if not queue_id:
@@ -704,19 +731,14 @@ async def process_single_queue_item(request: Request):
         return {"status": "error", "message": "Queue item not found"}
     if item['status'] not in ('pending', 'failed'):
         return {"status": "error", "message": f"Cannot process item with status '{item['status']}'"}
-    try:
-        # Reset to pending if failed
-        if item['status'] == 'failed':
-            db.retry_queue_item(queue_id)
-            item = db.get_queue_item_by_id(queue_id)
-        success = await asyncio.wait_for(process_queue_item(item), timeout=200)
-        return {"status": "ok", "success": success}
-    except asyncio.TimeoutError:
-        db.update_queue_status(queue_id, 'failed', error_log='Processing timed out (200s)')
-        return {"status": "error", "message": "Processing timed out — item marked failed, you can retry"}
-    except Exception as e:
-        db.update_queue_status(queue_id, 'failed', error_log=str(e))
-        return {"status": "error", "message": str(e)}
+
+    # Reset to pending if failed (so attempts counter resets correctly)
+    if item['status'] == 'failed':
+        db.retry_queue_item(queue_id)
+        item = db.get_queue_item_by_id(queue_id)
+
+    asyncio.create_task(_run_queue_item_bg(queue_id, item))
+    return {"status": "ok", "queued": True}
 
 
 @router.post("/queue/reset-stuck")
