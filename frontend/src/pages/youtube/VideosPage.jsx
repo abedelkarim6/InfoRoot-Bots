@@ -22,7 +22,7 @@ import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useAuth } from '../../auth/AuthContext';
 import PageHeader from '../../components/PageHeader';
 import { useUrlInt, useUrlString } from '../../lib/useUrlState';
-import { estimateCost, parseCommaSep, timeAgo, todayISODate } from './shared';
+import { estimateCost, timeAgo, todayISODate } from './shared';
 
 const PAGE_SIZE = 50;
 
@@ -678,13 +678,31 @@ function FixedPrefixCard() {
 // ─── Default Targets ────────────────────────────────────────────────────────
 
 function DefaultTargetsCard() {
-  const [targets, setTargets] = useState('');
+  const { showNotification } = useDialogs();
+  const [targets, setTargets] = useState([]);
+  const [customDraft, setCustomDraft] = useState('');
+
+  // Same query key as ManualSubmitCard — React Query shares the cache, so
+  // both cards on this page consume a single /api/telegram/userbot/dialogs
+  // round-trip. Filter to writable channels (creator or admin_rights).
+  const { data: dialogsRes, isLoading: dialogsLoading } = useQuery({
+    queryKey: ['user-dialogs'],
+    queryFn: () => api('/api/telegram/userbot/dialogs'),
+    staleTime: 60_000
+  });
+  const writableChannels = useMemo(() => {
+    if (dialogsRes?.status !== 'ok') return [];
+    return (dialogsRes.channels || []).filter((c) => c.can_post);
+  }, [dialogsRes]);
+  const hasSession =
+    dialogsRes?.status === 'ok' ||
+    (dialogsRes && dialogsRes.status !== 'no_session' && dialogsRes.status !== 'unauthorized');
 
   useEffect(() => {
     let cancelled = false;
     api('/api/youtube/prompt').then((res) => {
       if (cancelled || res?.status !== 'ok') return;
-      setTargets((res.default_targets || []).join(', '));
+      setTargets(Array.isArray(res.default_targets) ? res.default_targets : []);
     });
     return () => {
       cancelled = true;
@@ -696,13 +714,44 @@ function DefaultTargetsCard() {
     errorMsg: 'Failed to save targets'
   });
 
+  function addTarget(raw) {
+    const v = (raw || '').trim();
+    if (!v) return;
+    if (targets.includes(v)) {
+      showNotification(`"${v}" is already in the list`, 'info');
+      return;
+    }
+    setTargets((prev) => [...prev, v]);
+  }
+
+  function removeTarget(value) {
+    setTargets((prev) => prev.filter((t) => t !== value));
+  }
+
+  function handlePickerChange(e) {
+    const value = e.target.value;
+    if (value) addTarget(value);
+    e.target.value = ''; // reset so the same option can be re-picked after a remove
+  }
+
+  function handleCustomAdd() {
+    addTarget(customDraft);
+    setCustomDraft('');
+  }
+
+  // Hide channels already in the targets list from the picker.
+  const availableChannels = writableChannels.filter((c) => {
+    const value = c.username ? '@' + c.username : String(c.id);
+    return !targets.includes(value);
+  });
+
   return (
     <div className="yt-prompt-card" style={{ flex: '0 0 auto', minWidth: 260 }}>
       <div className="yt-prompt-header">
         <h3>📤 Default Targets</h3>
         <button
           className="btn btn-primary btn-sm"
-          onClick={() => save.mutate({ targets: parseCommaSep(targets) })}
+          onClick={() => save.mutate({ targets })}
           disabled={save.isPending}
         >
           Save
@@ -711,14 +760,96 @@ function DefaultTargetsCard() {
       <p className="text-muted" style={{ margin: '0 0 8px', fontSize: 13 }}>
         Fallback targets when a channel/tracker has none set.
       </p>
-      <input
-        type="text"
-        className="input"
-        value={targets}
-        onChange={(e) => setTargets(e.target.value)}
-        placeholder="@channel1, @channel2"
-        style={{ width: '100%' }}
-      />
+
+      {targets.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 4,
+            marginBottom: 8
+          }}
+        >
+          {targets.map((t) => (
+            <span
+              key={t}
+              className="yt-filter-tag"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              {t}
+              <button
+                onClick={() => removeTarget(t)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'inherit',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontSize: 14,
+                  lineHeight: 1
+                }}
+                title="Remove"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {hasSession !== false && (
+        <select
+          className="select"
+          value=""
+          onChange={handlePickerChange}
+          disabled={dialogsLoading}
+          style={{ width: '100%', marginBottom: 6 }}
+          title="Pick a channel where your account can post"
+        >
+          <option value="">
+            {dialogsLoading
+              ? 'Loading channels…'
+              : availableChannels.length === 0
+              ? writableChannels.length === 0
+                ? 'No writable channels found'
+                : 'All your channels are already added'
+              : '+ Add from your channels'}
+          </option>
+          {availableChannels.map((c) => {
+            const value = c.username ? '@' + c.username : String(c.id);
+            const label = c.username ? `${c.title} (@${c.username})` : c.title;
+            return (
+              <option key={c.id} value={value}>
+                {label}
+              </option>
+            );
+          })}
+        </select>
+      )}
+
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          type="text"
+          className="input"
+          value={customDraft}
+          onChange={(e) => setCustomDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleCustomAdd();
+            }
+          }}
+          placeholder="Or type @channel"
+          style={{ flex: 1 }}
+        />
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={handleCustomAdd}
+          disabled={!customDraft.trim()}
+        >
+          Add
+        </button>
+      </div>
     </div>
   );
 }
