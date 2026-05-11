@@ -38,8 +38,11 @@ echo "==> PM2:     $PM2_NAME"
 echo
 
 # ── 1. Pull latest code ─────────────────────────────────────────────────────
+# Use an explicit refspec so the remote-tracking ref refs/remotes/origin/$BRANCH
+# is created on first deploy of a new branch. Plain `git fetch origin $BRANCH`
+# only updates FETCH_HEAD, which makes `checkout --track origin/$BRANCH` fail.
 echo "==> Fetching origin..."
-git fetch origin "$BRANCH"
+git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
 
 # `checkout -B` creates the local branch if it doesn't exist, or resets it to
 # match origin/BRANCH if it does. Combined with `--track`, it's idempotent
