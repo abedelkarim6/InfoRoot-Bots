@@ -201,7 +201,10 @@ def process_websub_notification(body: bytes):
                 telegram_targets = ch_row.get('telegram_targets') or []
                 if not telegram_targets and ch_row.get('telegram_target'):
                     telegram_targets = [ch_row['telegram_target']]
-                prompt = ch_row.get('prompt')
+                # Resolve the channel's prompt_key → prompt text. None/missing
+                # falls back to the first available youtube prompt.
+                from youtube_monitor.prompts import resolve_yt_prompt
+                prompt = resolve_yt_prompt(ch_row.get('prompt_key'))
 
                 # Apply title filters immediately (title is in the notification)
                 video_title = video.get('title', '')

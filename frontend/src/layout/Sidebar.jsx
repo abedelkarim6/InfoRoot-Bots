@@ -128,6 +128,10 @@ export default function Sidebar() {
           </>
         )}
 
+        {(hasBots || youtubeOn) && (
+          <NavItem to="/prompts" icon="📝" label="Prompts" />
+        )}
+
         {youtubeOn && (
           <>
             <div className="nav-separator" />

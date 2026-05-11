@@ -592,6 +592,118 @@ class Database:
                     ON prompts(bot_name, key, owner_id) WHERE owner_id IS NOT NULL
                 """)
 
+            # Migrate prompts to GLOBAL (no per-bot scoping). Adds:
+            #   - type     (summaries | youtube)
+            #   - name     (display name, defaults to key)
+            # Renames each existing summaries key to "<bot_name>/<key>" so per-bot
+            # texts are preserved, and rewires schedules.prompt_key to the new keys.
+            # Also seeds a single 'default' youtube prompt from config.yaml.
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'prompts'")
+            pr_cols2 = [r['column_name'] for r in cursor.fetchall()]
+            if pr_cols2 and 'type' not in pr_cols2:
+                cursor.execute("ALTER TABLE prompts ADD COLUMN type TEXT NOT NULL DEFAULT 'summaries'")
+                cursor.execute("ALTER TABLE prompts ADD COLUMN name TEXT")
+                cursor.execute("UPDATE prompts SET name = key WHERE name IS NULL")
+                # bot_name was NOT NULL in the original schema — global prompts
+                # (type='youtube' and renamed summaries entries) use NULL bot_name.
+                cursor.execute("ALTER TABLE prompts ALTER COLUMN bot_name DROP NOT NULL")
+
+                # Rewire schedules.prompt_key BEFORE renaming prompts so the join
+                # against the un-prefixed key still matches. Uses the schedule's
+                # owning bot to build the new "bot/key" form.
+                cursor.execute("""
+                    UPDATE schedules sch
+                    SET prompt_key = b.name || '/' || sch.prompt_key
+                    FROM topics t
+                    JOIN categories c ON c.id = t.category_id
+                    JOIN bots b      ON b.id = c.bot_id
+                    WHERE sch.topic_id = t.id
+                      AND sch.prompt_key IS NOT NULL AND sch.prompt_key <> ''
+                      AND POSITION('/' IN sch.prompt_key) = 0
+                """)
+
+                # Rename existing summaries prompt keys to "<bot_name>/<key>".
+                # Handles collisions (same bot_name/key already prefixed from a
+                # prior partial run) via NOT EXISTS guard.
+                cursor.execute("""
+                    UPDATE prompts p
+                    SET key = p.bot_name || '/' || p.key
+                    WHERE p.type = 'summaries'
+                      AND p.bot_name IS NOT NULL AND p.bot_name <> ''
+                      AND POSITION('/' IN p.key) = 0
+                      AND NOT EXISTS (
+                        SELECT 1 FROM prompts p2
+                        WHERE p2.id <> p.id
+                          AND p2.type = 'summaries'
+                          AND p2.key = p.bot_name || '/' || p.key
+                          AND (p2.owner_id IS NOT DISTINCT FROM p.owner_id)
+                      )
+                """)
+                # Refresh display name to match the new key (so the UI shows the
+                # prefixed name as the prompt's title by default).
+                cursor.execute("UPDATE prompts SET name = key WHERE type = 'summaries'")
+
+                # Drop old (bot_name, key) indexes — replaced by (type, key).
+                cursor.execute("DROP INDEX IF EXISTS prompts_admin_idx")
+                cursor.execute("DROP INDEX IF EXISTS prompts_user_idx")
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS prompts_global_admin_idx
+                    ON prompts(type, key) WHERE owner_id IS NULL
+                """)
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS prompts_global_user_idx
+                    ON prompts(type, key, owner_id) WHERE owner_id IS NOT NULL
+                """)
+
+                # Seed a 'default' YouTube prompt from config.yaml if present.
+                # Wrapped in a SAVEPOINT so any failure here can't abort the
+                # surrounding migration transaction.
+                try:
+                    import yaml
+                    with open("config.yaml", "r", encoding="utf-8") as f:
+                        _cfg = yaml.safe_load(f) or {}
+                    yt_prompt = (_cfg.get("youtube", {}) or {}).get("prompt", "") or ""
+                    if yt_prompt.strip():
+                        cursor.execute("SAVEPOINT yt_seed")
+                        try:
+                            cursor.execute("""
+                                INSERT INTO prompts (bot_name, key, name, text, type, owner_id)
+                                VALUES (NULL, 'default', 'default', %s, 'youtube', NULL)
+                                ON CONFLICT DO NOTHING
+                            """, (yt_prompt,))
+                            cursor.execute("RELEASE SAVEPOINT yt_seed")
+                            logger.info("[DB] Seeded default YouTube prompt from config.yaml")
+                        except Exception as e:
+                            cursor.execute("ROLLBACK TO SAVEPOINT yt_seed")
+                            logger.warning(f"[DB] Could not seed YT default prompt: {e}")
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"[DB] Could not seed YT default prompt: {e}")
+
+                logger.info("[DB] Migrated prompts to global schema (type + name columns)")
+
+            # Idempotent cleanup: remove summaries prompts whose bot_name points
+            # to a bot that no longer exists for the same owner. Runs every
+            # startup — cheap, only deletes orphans.
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'prompts'")
+            _cols_now = {r['column_name'] for r in cursor.fetchall()}
+            if {'type', 'bot_name'}.issubset(_cols_now):
+                cursor.execute("""
+                    DELETE FROM prompts p
+                    WHERE p.type = 'summaries'
+                      AND p.bot_name IS NOT NULL
+                      AND p.bot_name <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 FROM bots b
+                          WHERE b.name = p.bot_name
+                            AND b.owner_id IS NOT DISTINCT FROM p.owner_id
+                      )
+                """)
+                _orphans = cursor.rowcount
+                if _orphans > 0:
+                    logger.info(f"[DB] Cleaned up {_orphans} orphan prompt(s) from deleted bots")
+
             # Per-user bot inheritance configuration
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_bot_inheritance (
@@ -1510,8 +1622,15 @@ class Database:
         self.save_collection(data['name'], data)
 
     def recycle_bin_restore_prompt(self, data: dict):
-        """Restore a prompt."""
-        self.save_prompt(data['bot_name'], data['key'], data.get('text', ''))
+        """Restore a global prompt. Newer snapshots include type/name; older
+        per-bot snapshots are restored as summaries-type with the bot prefix
+        re-applied to the key."""
+        prompt_type = data.get('type') or 'summaries'
+        key = data.get('key', '')
+        if not data.get('type') and data.get('bot_name'):
+            key = f"{data['bot_name']}/{key}"
+        name = data.get('name') or key
+        self.save_prompt(key, data.get('text', ''), prompt_type=prompt_type, name=name)
 
     def recycle_bin_restore_schedule(self, data: dict):
         """Restore a schedule."""

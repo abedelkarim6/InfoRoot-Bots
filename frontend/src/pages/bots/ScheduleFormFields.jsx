@@ -6,7 +6,9 @@
  * the parent.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../../lib/api';
 
 const TYPE_OPTIONS = [
   { value: 'minute',           label: 'Every Minute' },
@@ -380,7 +382,23 @@ export function BulletPointsFields({ form, setForm }) {
 
 export function TelegramTargetsField({ form, setForm }) {
   const [draft, setDraft] = useState('');
+  const [query, setQuery] = useState('');
   const targets = form.telegram_targets || [];
+
+  // Pull the logged-in account's joined writable channels — same source as
+  // the per-bot Destinations picker.
+  const { data: dialogsRes, isLoading: dialogsLoading } = useQuery({
+    queryKey: ['user-dialogs'],
+    queryFn: () => api('/api/telegram/userbot/dialogs'),
+    staleTime: 60_000
+  });
+  const writableChannels = useMemo(() => {
+    if (dialogsRes?.status !== 'ok') return [];
+    return (dialogsRes.channels || []).filter((c) => c.can_post);
+  }, [dialogsRes]);
+  const hasSession =
+    dialogsRes?.status === 'ok' ||
+    (dialogsRes && dialogsRes.status !== 'no_session' && dialogsRes.status !== 'unauthorized');
 
   function add(val) {
     const v = (val ?? draft).trim();
@@ -410,28 +428,149 @@ export function TelegramTargetsField({ form, setForm }) {
     }
   }
 
+  function titleFor(value) {
+    if (!value) return value;
+    const stripped = String(value).replace(/^@/, '').toLowerCase();
+    const match = writableChannels.find(
+      (d) => (d.username && d.username.toLowerCase() === stripped) || String(d.id) === stripped
+    );
+    return match?.title || value;
+  }
+
+  function isSelected(d) {
+    return targets.some((c) => {
+      const s = c.replace(/^@/, '').toLowerCase();
+      return (d.username && s === d.username.toLowerCase()) || s === String(d.id);
+    });
+  }
+
+  function toggleDialog(d) {
+    const value = d.username ? '@' + d.username : String(d.id);
+    if (isSelected(d)) remove(value);
+    else add(value);
+  }
+
+  const filteredDialogs = useMemo(() => {
+    const q = query.toLowerCase().trim();
+    return q
+      ? writableChannels.filter(
+          (c) =>
+            c.title.toLowerCase().includes(q) ||
+            (c.username && c.username.toLowerCase().includes(q))
+        )
+      : writableChannels;
+  }, [writableChannels, query]);
+
   return (
     <div className="form-group">
       <label className="form-label">Telegram Targets (optional)</label>
-      <div className="tags-container">
-        {targets.map((t) => (
-          <span className="tag" key={t}>
-            {t}
-            <span className="tag-remove" onClick={() => remove(t)}>
-              ×
+
+      {/* Selected chips — only shown when there's at least one */}
+      {targets.length > 0 && (
+        <div className="tags-container" style={{ marginBottom: 6 }}>
+          {targets.map((t) => (
+            <span className="tag" key={t}>
+              {titleFor(t)}
+              <span className="tag-remove" onClick={() => remove(t)}>
+                ×
+              </span>
             </span>
-          </span>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
+
+      {/* Inline browse + search (always visible when the account has a session) */}
+      {hasSession !== false && (
+        <div
+          style={{
+            border: '1px solid var(--border-color)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--bg-tertiary)',
+            overflow: 'hidden'
+          }}
+        >
+          <input
+            type="text"
+            className="input"
+            placeholder={
+              dialogsLoading
+                ? 'Loading your channels…'
+                : `🔍 Search ${writableChannels.length} writable channel${writableChannels.length === 1 ? '' : 's'}…`
+            }
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            style={{
+              border: 'none',
+              borderBottom: '1px solid var(--border-color)',
+              borderRadius: 0,
+              background: 'transparent'
+            }}
+          />
+          <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+            {dialogsLoading ? (
+              <p className="text-muted" style={{ padding: 12, textAlign: 'center', margin: 0 }}>
+                Loading…
+              </p>
+            ) : filteredDialogs.length === 0 ? (
+              <p className="text-muted" style={{ padding: 12, textAlign: 'center', margin: 0 }}>
+                {writableChannels.length === 0
+                  ? 'No writable channels found on this account.'
+                  : 'No channels match your search.'}
+              </p>
+            ) : (
+              filteredDialogs.map((d) => {
+                const selected = isSelected(d);
+                const display = d.username ? '@' + d.username : '#' + d.id;
+                return (
+                  <div
+                    key={d.id}
+                    onClick={() => toggleDialog(d)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '7px 10px',
+                      cursor: 'pointer',
+                      borderTop: '1px solid var(--border-color)',
+                      background: selected ? 'rgba(99,102,241,.12)' : 'transparent'
+                    }}
+                    onMouseOver={(e) => {
+                      if (!selected) e.currentTarget.style.background = 'var(--bg-hover, rgba(255,255,255,0.04))';
+                    }}
+                    onMouseOut={(e) => {
+                      if (!selected) e.currentTarget.style.background = 'transparent';
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      readOnly
+                      style={{ pointerEvents: 'none', margin: 0 }}
+                    />
+                    <span style={{ flex: 1, fontSize: 13 }}>{d.title}</span>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{display}</span>
+                    <span style={{ fontSize: 13 }} title={d.is_broadcast ? 'Channel' : 'Group'}>
+                      {d.is_broadcast ? '📢' : '👥'}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Manual entry for channels NOT in the joined list (chat IDs, externals) */}
       <input
         type="text"
         className="input mt-1"
-        placeholder="@channel or chat ID — press Enter to add"
+        placeholder="Or paste @channel / chat ID and press Enter"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={onKeyDown}
         onBlur={() => draft.trim() && add()}
       />
+
       <small
         className="text-muted sch-tg-hint"
         style={targets.length ? { color: 'var(--warning)' } : undefined}

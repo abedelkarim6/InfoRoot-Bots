@@ -26,7 +26,7 @@ export default function EditScheduleModal({
   onClose
 }) {
   const { prompts } = useGlobalConfig();
-  const botPrompts = (prompts && prompts[botName]) || {};
+  const botPrompts = (prompts && prompts.summaries) || {};
   const [form, setForm] = useState(() => scheduleFormFromExisting(schedule));
   const { showAlert } = useDialogs();
 

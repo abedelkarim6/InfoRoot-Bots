@@ -32,7 +32,8 @@ export default function AddScheduleModal({
 }) {
   const { config, prompts } = useGlobalConfig();
   const bot = config?.bots?.[botName];
-  const botPrompts = (prompts && prompts[botName]) || {};
+  // Prompts are global; the summaries-tab prompts apply to every bot.
+  const botPrompts = (prompts && prompts.summaries) || {};
   const defaultSchedules = bot?.default_schedules || [];
 
   const [form, setForm] = useState(() => emptyScheduleForm('hourly'));

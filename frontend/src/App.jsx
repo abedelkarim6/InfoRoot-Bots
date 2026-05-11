@@ -27,6 +27,7 @@ import TgTesterPage from './pages/admin/TgTesterPage';
 import YtVideosPage from './pages/youtube/VideosPage';
 import YtChannelsPage from './pages/youtube/ChannelsPage';
 import YtKeywordsPage from './pages/youtube/KeywordsPage';
+import PromptsPage from './pages/PromptsPage';
 import YtChatPage from './pages/chat/VideoChatPage';
 import AgentChatPage from './pages/chat/AgentChatPage';
 import LegalPage from './pages/LegalPage';
@@ -68,6 +69,7 @@ export default function App() {
                 <Route path="collections"  element={<Navigate to="/bots" replace />} />
                 <Route path="bots"             element={<BotsPage />} />
                 <Route path="bots/:botName"    element={<BotsPage />} />
+                <Route path="prompts"      element={<PromptsPage />} />
                 <Route path="monitor"      element={<MonitorPage />} />
                 <Route path="recycle-bin"  element={<RecycleBinPage />} />
 

@@ -7,7 +7,7 @@ const ConfigContext = createContext(null);
 /**
  * Mirrors the legacy `loadAllData()` pattern but in TanStack Query terms:
  *   - /api/config  → globalConfig (system flags, bots, collections)
- *   - /api/prompts → globalPrompts (per-bot prompt templates)
+ *   - /api/prompts → globalPrompts ({summaries: {...}, youtube: {...}} — global)
  *
  * Both are cached with the default 30s staleTime; mutations should invalidate
  * `['config']` and/or `['prompts']` instead of refetching manually.

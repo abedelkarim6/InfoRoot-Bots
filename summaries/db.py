@@ -2074,6 +2074,19 @@ class SummariesDB(Database):
             deleted = cursor.rowcount > 0
             if deleted:
                 cursor.execute("DELETE FROM messages WHERE bot_name = %s", (name,))
+                # Remove the bot's prompts from the global prompts table.
+                # Keys were prefixed with "<bot_name>/" by the global-prompts
+                # migration; the legacy bot_name column is also kept in sync.
+                if owner_id is None:
+                    cursor.execute(
+                        "DELETE FROM prompts WHERE type = 'summaries' AND bot_name = %s AND owner_id IS NULL",
+                        (name,),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM prompts WHERE type = 'summaries' AND bot_name = %s AND owner_id = %s",
+                        (name, owner_id),
+                    )
                 self._bump_config_version()
             return deleted
         finally:
@@ -2088,7 +2101,52 @@ class SummariesDB(Database):
                 cursor.execute("UPDATE bots SET name = %s WHERE name = %s AND owner_id = %s", (new_name, old_name, owner_id))
             updated = cursor.rowcount > 0
             if updated:
-                cursor.execute("UPDATE prompts SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
+                # Re-prefix the bot's prompt keys ("<old>/x" → "<new>/x") and
+                # rewire any schedules pointing at them. Owner scope already
+                # filters out other users' prompts.
+                if owner_id is None:
+                    owner_filter_sql = "owner_id IS NULL"
+                    owner_params = ()
+                else:
+                    owner_filter_sql = "owner_id = %s"
+                    owner_params = (owner_id,)
+
+                old_prefix = old_name + '/'
+                new_prefix = new_name + '/'
+                cursor.execute(
+                    f"""
+                    UPDATE prompts
+                    SET bot_name = %s,
+                        key = %s || substring(key from char_length(%s) + 1),
+                        name = %s || substring(name from char_length(%s) + 1)
+                    WHERE bot_name = %s
+                      AND type = 'summaries'
+                      AND key LIKE %s
+                      AND {owner_filter_sql}
+                    """,
+                    (new_name, new_prefix, old_prefix, new_prefix, old_prefix,
+                     old_name, old_prefix + '%') + owner_params,
+                )
+                # Catch any straggler rows that don't follow the prefix scheme.
+                cursor.execute(
+                    f"UPDATE prompts SET bot_name = %s WHERE bot_name = %s AND {owner_filter_sql}",
+                    (new_name, old_name) + owner_params,
+                )
+                # Rewire schedules whose prompt_key starts with the old prefix.
+                cursor.execute(
+                    f"""
+                    UPDATE schedules sch
+                    SET prompt_key = %s || substring(sch.prompt_key from char_length(%s) + 1)
+                    FROM topics t
+                    JOIN categories c ON c.id = t.category_id
+                    JOIN bots b      ON b.id = c.bot_id
+                    WHERE sch.topic_id = t.id
+                      AND b.name = %s AND b.{owner_filter_sql}
+                      AND sch.prompt_key LIKE %s
+                    """,
+                    (new_prefix, old_prefix, new_name, *owner_params, old_prefix + '%'),
+                )
+
                 cursor.execute("UPDATE topic_keywords SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
                 cursor.execute("UPDATE messages SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
                 cursor.execute("UPDATE summaries SET bot_name = %s WHERE bot_name = %s", (new_name, old_name))
@@ -2457,26 +2515,33 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def rename_prompt_key_in_schedules(self, bot_name: str, old_key: str, new_key: str, owner_id: int = None) -> int:
+    def rename_prompt_key_in_schedules(self, old_key: str, new_key: str, owner_id: int = None) -> int:
+        """Update prompt_key in ALL schedules (across every bot) for the given owner.
+        Prompts are global now — there is no per-bot scoping on rename."""
         try:
-            """Update prompt_key in all schedules of a bot when a prompt is renamed."""
             cursor = self._get_cursor()
             if owner_id is None:
-                owner_filter = "b.owner_id IS NULL"
-                params = (new_key, old_key, bot_name)
+                cursor.execute("""
+                    UPDATE schedules SET prompt_key = %s
+                    WHERE prompt_key = %s
+                      AND topic_id IN (
+                          SELECT s.id FROM topics s
+                          JOIN categories c ON s.category_id = c.id
+                          JOIN bots b ON c.bot_id = b.id
+                          WHERE b.owner_id IS NULL
+                      )
+                """, (new_key, old_key))
             else:
-                owner_filter = "b.owner_id = %s"
-                params = (new_key, old_key, bot_name, owner_id)
-            cursor.execute(f"""
-                UPDATE schedules SET prompt_key = %s
-                WHERE prompt_key = %s
-                  AND topic_id IN (
-                      SELECT s.id FROM topics s
-                      JOIN categories c ON s.category_id = c.id
-                      JOIN bots b ON c.bot_id = b.id
-                      WHERE b.name = %s AND {owner_filter}
-                  )
-            """, params)
+                cursor.execute("""
+                    UPDATE schedules SET prompt_key = %s
+                    WHERE prompt_key = %s
+                      AND topic_id IN (
+                          SELECT s.id FROM topics s
+                          JOIN categories c ON s.category_id = c.id
+                          JOIN bots b ON c.bot_id = b.id
+                          WHERE b.owner_id = %s
+                      )
+                """, (new_key, old_key, owner_id))
             count = cursor.rowcount
             if count > 0:
                 self._bump_config_version()
@@ -2636,62 +2701,109 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    # ==================== Prompts ====================
+    # ==================== Prompts (GLOBAL, typed) ====================
 
     def get_all_prompts(self, owner_id: int = None) -> dict:
+        """Return prompts grouped by type: {'summaries': {key: {text, name}}, 'youtube': {...}}."""
         try:
-            """Return prompts grouped by bot_name: {bot_name: {key: {text: ...}}}"""
             cursor = self._get_cursor()
             if owner_id is None:
-                cursor.execute("SELECT bot_name, key, text FROM prompts WHERE owner_id IS NULL ORDER BY id")
+                cursor.execute(
+                    "SELECT key, name, text, type FROM prompts WHERE owner_id IS NULL ORDER BY type, id"
+                )
             else:
-                cursor.execute("SELECT bot_name, key, text FROM prompts WHERE owner_id = %s ORDER BY id", (owner_id,))
-            result = {}
+                cursor.execute(
+                    "SELECT key, name, text, type FROM prompts WHERE owner_id = %s ORDER BY type, id",
+                    (owner_id,),
+                )
+            result = {'summaries': {}, 'youtube': {}}
             for row in cursor.fetchall():
-                bn = row['bot_name']
-                if bn not in result:
-                    result[bn] = {}
-                result[bn][row['key']] = {'text': row['text']}
+                bucket = result.setdefault(row['type'] or 'summaries', {})
+                bucket[row['key']] = {'text': row['text'], 'name': row['name'] or row['key']}
             return result
         finally:
             self._commit()
 
-    def get_bot_prompts(self, bot_name: str, owner_id: int = None) -> dict:
+    def get_prompts_by_type(self, prompt_type: str, owner_id: int = None) -> dict:
+        """Return {key: {text, name}} for the given type."""
         try:
             cursor = self._get_cursor()
             if owner_id is None:
-                cursor.execute("SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id IS NULL ORDER BY id", (bot_name,))
+                cursor.execute(
+                    "SELECT key, name, text FROM prompts WHERE type = %s AND owner_id IS NULL ORDER BY id",
+                    (prompt_type,),
+                )
             else:
-                cursor.execute("SELECT key, text FROM prompts WHERE bot_name = %s AND owner_id = %s ORDER BY id", (bot_name, owner_id))
-            return {row['key']: {'text': row['text']} for row in cursor.fetchall()}
+                cursor.execute(
+                    "SELECT key, name, text FROM prompts WHERE type = %s AND owner_id = %s ORDER BY id",
+                    (prompt_type, owner_id),
+                )
+            return {r['key']: {'text': r['text'], 'name': r['name'] or r['key']} for r in cursor.fetchall()}
         finally:
             self._commit()
 
-    def save_prompt(self, bot_name: str, key: str, text: str, owner_id: int = None):
+    def get_bot_prompts(self, bot_name: str = None, owner_id: int = None) -> dict:
+        """Backwards-compat shim: prompts are global now; bot_name is ignored.
+        Returns {key: {text, name}} of summaries-type prompts."""
+        return self.get_prompts_by_type('summaries', owner_id=owner_id)
+
+    def save_prompt(self, key: str, text: str, owner_id: int = None,
+                    prompt_type: str = 'summaries', name: str = None):
+        """Upsert a global prompt scoped by (type, key, owner_id)."""
         try:
             cursor = self._get_cursor()
+            display_name = name if name is not None else key
             if owner_id is None:
                 cursor.execute("""
-                    INSERT INTO prompts (bot_name, key, text, owner_id) VALUES (%s, %s, %s, NULL)
-                    ON CONFLICT (bot_name, key) WHERE owner_id IS NULL DO UPDATE SET text = EXCLUDED.text
-                """, (bot_name, key, text))
+                    INSERT INTO prompts (bot_name, key, name, text, type, owner_id)
+                    VALUES (NULL, %s, %s, %s, %s, NULL)
+                    ON CONFLICT (type, key) WHERE owner_id IS NULL
+                    DO UPDATE SET text = EXCLUDED.text, name = EXCLUDED.name
+                """, (key, display_name, text, prompt_type))
             else:
                 cursor.execute("""
-                    INSERT INTO prompts (bot_name, key, text, owner_id) VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (bot_name, key, owner_id) WHERE owner_id IS NOT NULL DO UPDATE SET text = EXCLUDED.text
-                """, (bot_name, key, text, owner_id))
+                    INSERT INTO prompts (bot_name, key, name, text, type, owner_id)
+                    VALUES (NULL, %s, %s, %s, %s, %s)
+                    ON CONFLICT (type, key, owner_id) WHERE owner_id IS NOT NULL
+                    DO UPDATE SET text = EXCLUDED.text, name = EXCLUDED.name
+                """, (key, display_name, text, prompt_type, owner_id))
         finally:
             self._commit()
 
-    def delete_prompt(self, bot_name: str, key: str, owner_id: int = None) -> bool:
+    def delete_prompt(self, key: str, owner_id: int = None, prompt_type: str = 'summaries') -> bool:
         try:
             cursor = self._get_cursor()
             if owner_id is None:
-                cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s AND owner_id IS NULL", (bot_name, key))
+                cursor.execute(
+                    "DELETE FROM prompts WHERE type = %s AND key = %s AND owner_id IS NULL",
+                    (prompt_type, key),
+                )
             else:
-                cursor.execute("DELETE FROM prompts WHERE bot_name = %s AND key = %s AND owner_id = %s", (bot_name, key, owner_id))
-            deleted = cursor.rowcount > 0
-            return deleted
+                cursor.execute(
+                    "DELETE FROM prompts WHERE type = %s AND key = %s AND owner_id = %s",
+                    (prompt_type, key, owner_id),
+                )
+            return cursor.rowcount > 0
+        finally:
+            self._commit()
+
+    def get_first_prompt_key(self, prompt_type: str, owner_id: int = None) -> str:
+        """Lowest-id prompt key of the given type — used as the default when a
+        channel/keyword has no explicit prompt_key."""
+        try:
+            cursor = self._get_cursor()
+            if owner_id is None:
+                cursor.execute(
+                    "SELECT key FROM prompts WHERE type = %s AND owner_id IS NULL ORDER BY id LIMIT 1",
+                    (prompt_type,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT key FROM prompts WHERE type = %s AND owner_id = %s ORDER BY id LIMIT 1",
+                    (prompt_type, owner_id),
+                )
+            row = cursor.fetchone()
+            return row['key'] if row else None
         finally:
             self._commit()
 
@@ -2709,24 +2821,25 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_prompt_schedules(self, bot_name: str, key: str, owner_id: int = None) -> list:
+    def get_prompt_schedules(self, key: str, owner_id: int = None) -> list:
+        """Return all schedules (across every bot) that reference this prompt key."""
         try:
-            """Return schedules (with topic/category context) that reference this prompt key."""
             cursor = self._get_cursor()
             if owner_id is None:
                 owner_filter = "b.owner_id IS NULL"
-                params = (bot_name, key)
+                params = (key,)
             else:
                 owner_filter = "b.owner_id = %s"
-                params = (bot_name, key, owner_id)
+                params = (key, owner_id)
             cursor.execute(f"""
-                SELECT s.name AS schedule_name, t.name AS topic_name, c.name AS category_name
+                SELECT b.name AS bot_name, s.name AS schedule_name,
+                       t.name AS topic_name, c.name AS category_name
                 FROM schedules s
                 JOIN topics t ON t.id = s.topic_id
                 JOIN categories c ON c.id = t.category_id
                 JOIN bots b ON b.id = c.bot_id
-                WHERE b.name = %s AND s.prompt_key = %s AND {owner_filter}
-                ORDER BY c.name, t.name, s.name
+                WHERE s.prompt_key = %s AND {owner_filter}
+                ORDER BY b.name, c.name, t.name, s.name
             """, params)
             return [dict(r) for r in cursor.fetchall()]
         finally:
@@ -2749,7 +2862,8 @@ class SummariesDB(Database):
                   AND s.prompt_key IS NOT NULL AND s.prompt_key != ''
                   AND NOT EXISTS (
                       SELECT 1 FROM prompts p
-                      WHERE p.bot_name = b.name AND p.key = s.prompt_key
+                      WHERE p.type = 'summaries' AND p.key = s.prompt_key
+                        AND p.owner_id IS NULL
                   )
                 ORDER BY b.name, s.prompt_key
             """)

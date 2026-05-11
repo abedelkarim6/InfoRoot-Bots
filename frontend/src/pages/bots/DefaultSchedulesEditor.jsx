@@ -222,7 +222,7 @@ function DefaultScheduleRow({ ds, onEdit, onRemove, disabled }) {
 
 function DefaultScheduleModal({ botName, isAdd, existing, onClose, onSave }) {
   const { prompts } = useGlobalConfig();
-  const botPrompts = (prompts && prompts[botName]) || {};
+  const botPrompts = (prompts && prompts.summaries) || {};
   const { showAlert } = useDialogs();
 
   const [form, setForm] = useState(() => {

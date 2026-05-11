@@ -82,7 +82,10 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str,
                        topic_name: str = '', final_interim: str = '',
                        b: int = 0) -> str:
     """
-    Injects news messages into bot-specific prompt templates.
+    Injects news messages into a global summaries prompt template.
+
+    `bot_name` is retained for backwards compatibility but is no longer used to
+    scope the prompt — prompts are global across all bots.
 
     Supported placeholders (usable in the fixed prefix and/or user prompt template):
       {messages}      — the joined raw message texts
@@ -94,12 +97,14 @@ def get_summary_prompt(texts: List[str], bot_name: str, prompt_key: str,
     combined_news = "\n---\n".join(texts)
 
     db = get_db()
-    bot_prompts = db.get_bot_prompts(bot_name)
+    bot_prompts = db.get_prompts_by_type('summaries')
 
     if prompt_key not in bot_prompts:
-        prompt_key = 'bullet_points' if 'bullet_points' in bot_prompts else list(bot_prompts.keys())[0] if bot_prompts else 'brief'
-        if prompt_key not in bot_prompts:
-            raise ValueError(f"No prompts found for bot '{bot_name}'")
+        prompt_key = 'bullet_points' if 'bullet_points' in bot_prompts else (
+            list(bot_prompts.keys())[0] if bot_prompts else None
+        )
+        if not prompt_key or prompt_key not in bot_prompts:
+            raise ValueError("No summaries prompts found in the prompts table")
 
     prompt_val = bot_prompts[prompt_key]
 

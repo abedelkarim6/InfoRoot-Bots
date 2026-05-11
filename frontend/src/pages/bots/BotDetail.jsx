@@ -22,14 +22,13 @@ import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useUrlString } from '../../lib/useUrlState';
 import BasicSettings from './BasicSettings';
 import Rules from './Rules';
-import Prompts from './Prompts';
 import TopicsSection from './TopicsSection';
 import BotChannelsModal from './BotChannelsModal';
 
+// Prompts are global now — managed on the top-level /prompts page.
 const TABS = [
   { id: 'basic',      label: '⚙️ Basic' },
   { id: 'rules',      label: '🔧 Rules' },
-  { id: 'prompts',    label: '📝 Prompts' },
   { id: 'categories', label: '📂 Categories & Topics' }
 ];
 const VALID_TABS = new Set(TABS.map((t) => t.id));
@@ -38,7 +37,7 @@ export default function BotDetail({ botName }) {
   const { config } = useGlobalConfig();
   const bot = (config?.bots || {})[botName];
   const navigate = useNavigate();
-  // ?tab=basic|rules|prompts|categories — falls back to categories.
+  // ?tab=basic|rules|categories — falls back to categories.
   const [tabParam, setTabParam] = useUrlString('tab', 'categories');
   const activeTab = VALID_TABS.has(tabParam) ? tabParam : 'categories';
   const setActiveTab = setTabParam;
@@ -88,9 +87,6 @@ export default function BotDetail({ botName }) {
           </div>
           <div className={`bot-tab-pane ${activeTab === 'rules' ? 'active' : ''}`} data-tab="rules">
             {activeTab === 'rules' && <Rules botName={botName} bot={bot} />}
-          </div>
-          <div className={`bot-tab-pane ${activeTab === 'prompts' ? 'active' : ''}`} data-tab="prompts">
-            {activeTab === 'prompts' && <Prompts botName={botName} />}
           </div>
           <div className={`bot-tab-pane ${activeTab === 'categories' ? 'active' : ''}`} data-tab="categories">
             {activeTab === 'categories' && (

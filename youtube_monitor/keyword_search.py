@@ -158,7 +158,10 @@ def run_keyword_search(keyword_config: dict, global_blocked_ids: set = None) -> 
         # Fall back to global default targets
         if not telegram_targets:
             telegram_targets = _get_default_targets()
-        prompt = keyword_config.get('prompt')
+        # Resolve the keyword's prompt_key → prompt text. None falls back to
+        # the first available youtube prompt.
+        from youtube_monitor.prompts import resolve_yt_prompt
+        prompt = resolve_yt_prompt(keyword_config.get('prompt_key'))
 
         db.mark_video_seen(vid, title=title, channel_id=channel_id, source='keyword_search')
 

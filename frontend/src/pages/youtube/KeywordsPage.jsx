@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api, escapeHtml } from '../../lib/api';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
+import { useGlobalConfig } from '../../config/ConfigProvider';
 import { useUrlString } from '../../lib/useUrlState';
 import PageHeader from '../../components/PageHeader';
 import {
@@ -443,6 +444,9 @@ function BlockedChannelsCard() {
 function KeywordModal({ mode, kw, onClose }) {
   const isEdit = mode === 'edit';
   const { showNotification } = useDialogs();
+  const { prompts } = useGlobalConfig();
+  const ytPrompts = (prompts && prompts.youtube) || {};
+  const ytPromptKeys = Object.keys(ytPrompts);
 
   const initialSched = kwScheduleToFields(kw?.schedule_interval_minutes);
 
@@ -462,7 +466,7 @@ function KeywordModal({ mode, kw, onClose }) {
     blocklist: (kw?.channel_blocklist || []).join(', '),
     must_include: (kw?.title_must_include || []).join(', '),
     must_exclude: (kw?.title_must_exclude || []).join(', '),
-    prompt: kw?.prompt || ''
+    prompt_key: kw?.prompt_key || ''
   }));
   const setF = (k, v) => setForm((s) => ({ ...s, [k]: v }));
 
@@ -483,7 +487,7 @@ function KeywordModal({ mode, kw, onClose }) {
       keyword,
       sub_keywords: parseCommaSep(form.sub_keywords),
       telegram_targets: parseCommaSep(form.telegram_targets),
-      prompt: form.prompt.trim() || null,
+      prompt_key: form.prompt_key || null,
       date_window_days: parseInt(form.window, 10) || 1,
       active: kw ? kw.active : true,
       min_duration_seconds: form.min_dur_min ? parseInt(form.min_dur_min, 10) * 60 : null,
@@ -693,15 +697,23 @@ function KeywordModal({ mode, kw, onClose }) {
           </div>
           <div className="yt-kw-form-field">
             <label className="input-label">
-              Custom Prompt <span className="text-muted">(leave empty for global default)</span>
+              Prompt <span className="text-muted">(leave empty to use the default — first prompt in the YouTube tab)</span>
             </label>
-            <textarea
-              className="input yt-prompt-textarea"
-              rows={3}
-              value={form.prompt}
-              onChange={(e) => setF('prompt', e.target.value)}
-              placeholder="Custom summarization prompt…"
-            />
+            <select
+              className="select"
+              value={form.prompt_key}
+              onChange={(e) => setF('prompt_key', e.target.value)}
+            >
+              <option value="">(Default)</option>
+              {ytPromptKeys.map((k) => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+            {ytPromptKeys.length === 0 && (
+              <small className="text-muted" style={{ display: 'block', marginTop: 4 }}>
+                No YouTube prompts defined yet — add one on the Prompts page.
+              </small>
+            )}
           </div>
         </div>
         <div className="dialog-actions">

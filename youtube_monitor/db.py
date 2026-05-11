@@ -186,6 +186,11 @@ class YouTubeDB:
         _ensure_col('yt_channels', 'upload_type', 'TEXT')
         _ensure_col('yt_summaries', 'prompt_hash', 'TEXT')
 
+        # Reference into the global prompts table (type='youtube'). NULL means
+        # "use the first available YouTube prompt" — see prompts.resolve_yt_prompt.
+        _ensure_col('yt_channels', 'prompt_key', 'TEXT')
+        _ensure_col('yt_keywords', 'prompt_key', 'TEXT')
+
         # Migrate old single telegram_target into new telegram_targets array
         cursor.execute("""
             UPDATE yt_channels
@@ -228,7 +233,7 @@ class YouTubeDB:
         title_inc = json.dumps(data.get('title_must_include') or [])
         title_exc = json.dumps(data.get('title_must_exclude') or [])
         cursor.execute("""
-            INSERT INTO yt_channels (channel_id, channel_name, telegram_targets, prompt,
+            INSERT INTO yt_channels (channel_id, channel_name, telegram_targets, prompt_key,
                 min_duration_seconds, max_duration_seconds,
                 title_must_include, title_must_exclude,
                 min_view_count, language, upload_type)
@@ -236,7 +241,7 @@ class YouTubeDB:
             ON CONFLICT (channel_id) DO UPDATE SET
                 channel_name = COALESCE(EXCLUDED.channel_name, yt_channels.channel_name),
                 telegram_targets = EXCLUDED.telegram_targets,
-                prompt = COALESCE(EXCLUDED.prompt, yt_channels.prompt),
+                prompt_key = EXCLUDED.prompt_key,
                 min_duration_seconds = EXCLUDED.min_duration_seconds,
                 max_duration_seconds = EXCLUDED.max_duration_seconds,
                 title_must_include = EXCLUDED.title_must_include,
@@ -245,7 +250,7 @@ class YouTubeDB:
                 language = EXCLUDED.language,
                 upload_type = EXCLUDED.upload_type
             RETURNING id
-        """, (channel_id, data.get('channel_name'), targets_json, data.get('prompt'),
+        """, (channel_id, data.get('channel_name'), targets_json, data.get('prompt_key'),
               data.get('min_duration_seconds'), data.get('max_duration_seconds'),
               title_inc, title_exc,
               data.get('min_view_count', 0), data.get('language'), data.get('upload_type')))
@@ -260,12 +265,12 @@ class YouTubeDB:
         title_exc = json.dumps(data.get('title_must_exclude') or [])
         cursor.execute("""
             UPDATE yt_channels
-            SET channel_name = %s, telegram_targets = %s::jsonb, prompt = %s,
+            SET channel_name = %s, telegram_targets = %s::jsonb, prompt_key = %s,
                 min_duration_seconds = %s, max_duration_seconds = %s,
                 title_must_include = %s::jsonb, title_must_exclude = %s::jsonb,
                 min_view_count = %s, language = %s, upload_type = %s
             WHERE channel_id = %s
-        """, (data.get('channel_name'), targets_json, data.get('prompt'),
+        """, (data.get('channel_name'), targets_json, data.get('prompt_key'),
               data.get('min_duration_seconds'), data.get('max_duration_seconds'),
               title_inc, title_exc,
               data.get('min_view_count', 0), data.get('language'), data.get('upload_type'),
@@ -351,7 +356,7 @@ class YouTubeDB:
         targets = data.get('telegram_targets') or []
         cursor.execute("""
             INSERT INTO yt_keywords (
-                keyword, telegram_targets, prompt,
+                keyword, telegram_targets, prompt_key,
                 date_window_days, active,
                 min_duration_seconds, max_duration_seconds,
                 channel_allowlist, channel_blocklist,
@@ -363,7 +368,7 @@ class YouTubeDB:
         """, (
             data['keyword'],
             json.dumps(targets),
-            data.get('prompt'),
+            data.get('prompt_key'),
             data.get('date_window_days', 1),
             data.get('active', True),
             data.get('min_duration_seconds'),
@@ -389,7 +394,7 @@ class YouTubeDB:
             UPDATE yt_keywords SET
                 keyword = %s,
                 telegram_targets = %s::jsonb,
-                prompt = %s,
+                prompt_key = %s,
                 date_window_days = %s,
                 active = %s,
                 min_duration_seconds = %s,
@@ -407,7 +412,7 @@ class YouTubeDB:
         """, (
             data['keyword'],
             json.dumps(targets),
-            data.get('prompt'),
+            data.get('prompt_key'),
             data.get('date_window_days', 1),
             data.get('active', True),
             data.get('min_duration_seconds'),

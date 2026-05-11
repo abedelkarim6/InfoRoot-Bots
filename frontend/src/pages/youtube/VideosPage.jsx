@@ -20,6 +20,7 @@ import { api, debounce, escapeHtml } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useAuth } from '../../auth/AuthContext';
+import { useGlobalConfig } from '../../config/ConfigProvider';
 import PageHeader from '../../components/PageHeader';
 import { useUrlInt, useUrlString } from '../../lib/useUrlState';
 import { estimateCost, timeAgo, todayISODate } from './shared';
@@ -196,8 +197,6 @@ export default function VideosPage() {
 
       <div className="yt-top-cards-row">
         <ManualSubmitCard />
-        <PromptCard />
-        {isAdmin && <FixedPrefixCard />}
         <DefaultTargetsCard />
       </div>
 
@@ -438,6 +437,7 @@ function ManualSubmitCard() {
   const { showNotification } = useDialogs();
   const [url, setUrl] = useState('');
   const [target, setTarget] = useState('');
+  const [promptKey, setPromptKey] = useState('');
 
   // Pull the logged-in account's joined channels and keep only the
   // writable ones (creator or admin_rights). Same endpoint used by the
@@ -455,6 +455,11 @@ function ManualSubmitCard() {
     dialogsRes?.status === 'ok' ||
     (dialogsRes && dialogsRes.status !== 'no_session' && dialogsRes.status !== 'unauthorized');
 
+  // Global YouTube prompts — first key is the implicit default.
+  const { prompts } = useGlobalConfig();
+  const ytPrompts = (prompts && prompts.youtube) || {};
+  const ytPromptKeys = Object.keys(ytPrompts);
+
   const add = useApiMutation('/api/youtube/videos/add', {
     invalidate: ['yt-videos'],
     successMsg: (res) => `Video ${res?.video_id ?? ''} queued`,
@@ -468,7 +473,11 @@ function ManualSubmitCard() {
       return;
     }
     add.mutate(
-      { url: u, telegram_target: target.trim() || null },
+      {
+        url: u,
+        telegram_target: target.trim() || null,
+        prompt_key: promptKey || null
+      },
       {
         onSuccess: (res) => {
           if (res?.status === 'ok') setUrl('');
@@ -526,6 +535,20 @@ function ManualSubmitCard() {
             })}
           </select>
         )}
+        <select
+          className="select"
+          value={promptKey}
+          onChange={(e) => setPromptKey(e.target.value)}
+          style={{ flex: 1 }}
+          title="Pick which YouTube prompt to summarize this video with"
+        >
+          <option value="">
+            {ytPromptKeys.length === 0 ? 'No prompts — use built-in default' : '(Default prompt)'}
+          </option>
+          {ytPromptKeys.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
         <button className="btn btn-primary" onClick={handleAdd} disabled={add.isPending}>
           Add & Queue
         </button>

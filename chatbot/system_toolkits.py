@@ -688,15 +688,18 @@ class PromptControlToolkit(Toolkit):
                 break
         if not bot_key:
             return _err(f"Bot '{bot_name}' not found. Available: {list(all_bots.keys())}")
-        existing = db.get_bot_prompts(bot_key)
-        action = "update" if prompt_key in existing else "add"
-        db.save_prompt(bot_key, prompt_key, text)
+        # Prompts are global now — store with the legacy "bot/key" naming so
+        # the agent can still target a specific bot's prompt by name.
+        global_key = f"{bot_key}/{prompt_key}" if '/' not in prompt_key else prompt_key
+        existing = db.get_prompts_by_type('summaries')
+        action = "update" if global_key in existing else "add"
+        db.save_prompt(global_key, text, prompt_type='summaries')
         self.action_log.append({
             "type": action, "entity": "Prompt",
-            "name": f"{bot_key}/{prompt_key}",
+            "name": global_key,
             "detail": f"{len(text)} chars", "status": "success"
         })
-        return _ok({"bot": bot_key, "key": prompt_key, "action": action})
+        return _ok({"bot": bot_key, "key": global_key, "action": action})
 
     def delete_prompt(self, bot_name: str, prompt_key: str) -> str:
         """Delete a prompt from a bot. Confirm with the user before calling this.
@@ -717,15 +720,16 @@ class PromptControlToolkit(Toolkit):
                 break
         if not bot_key:
             return _err(f"Bot '{bot_name}' not found. Available: {list(all_bots.keys())}")
-        prompts = db.get_bot_prompts(bot_key)
-        if prompt_key not in prompts:
-            return _err(f"Prompt '{prompt_key}' not found in bot '{bot_key}'. Existing: {list(prompts.keys())}")
-        db.delete_prompt(bot_key, prompt_key)
+        global_key = f"{bot_key}/{prompt_key}" if '/' not in prompt_key else prompt_key
+        prompts = db.get_prompts_by_type('summaries')
+        if global_key not in prompts:
+            return _err(f"Prompt '{global_key}' not found. Existing: {list(prompts.keys())}")
+        db.delete_prompt(global_key, prompt_type='summaries')
         self.action_log.append({
             "type": "delete", "entity": "Prompt",
-            "name": f"{bot_key}/{prompt_key}", "status": "success"
+            "name": global_key, "status": "success"
         })
-        return _ok({"deleted": f"{bot_key}/{prompt_key}"})
+        return _ok({"deleted": global_key})
 
 
 # ===========================================================================

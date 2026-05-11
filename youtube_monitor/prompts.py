@@ -131,7 +131,42 @@ def _build_yt_prompt(prefix_template: str, user_prompt: str,
 
 
 def _get_global_prompt() -> str:
-    """Read the global summarization prompt from config.yaml as fallback."""
-    from utils.helpers import load_config
-    cfg = load_config()
-    return cfg.get("youtube", {}).get("prompt", "") or DEFAULT_PROMPT
+    """Return the first YouTube prompt (the default) from the global prompts
+    table. Falls back to the legacy config.yaml `youtube.prompt`, then to the
+    hardcoded DEFAULT_PROMPT."""
+    try:
+        from utils.database import get_db
+        db = get_db()
+        prompts = db.get_prompts_by_type('youtube', owner_id=None)
+        if prompts:
+            first_key = next(iter(prompts))
+            text = prompts[first_key].get('text', '') if isinstance(prompts[first_key], dict) else prompts[first_key]
+            if text:
+                return text
+    except Exception:
+        pass
+    try:
+        from utils.helpers import load_config
+        cfg = load_config()
+        return cfg.get("youtube", {}).get("prompt", "") or DEFAULT_PROMPT
+    except Exception:
+        return DEFAULT_PROMPT
+
+
+def resolve_yt_prompt(prompt_key: str = None) -> str:
+    """Resolve a YouTube prompt_key to its text, falling back to the first
+    available youtube-type prompt when the key is missing or unknown."""
+    try:
+        from utils.database import get_db
+        db = get_db()
+        prompts = db.get_prompts_by_type('youtube', owner_id=None)
+        if prompt_key and prompt_key in prompts:
+            val = prompts[prompt_key]
+            return val.get('text', '') if isinstance(val, dict) else (val or '')
+        if prompts:
+            first_key = next(iter(prompts))
+            val = prompts[first_key]
+            return val.get('text', '') if isinstance(val, dict) else (val or '')
+    except Exception:
+        pass
+    return _get_global_prompt()

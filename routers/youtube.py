@@ -214,7 +214,7 @@ async def add_channel(request: Request):
     channel_id = data.get("channel_id", "").strip()
     channel_name = data.get("channel_name", "").strip() or None
     telegram_targets = data.get("telegram_targets") or []
-    prompt = (data.get("prompt") or "").strip() or None
+    prompt_key = (data.get("prompt_key") or "").strip() or None
 
     if not channel_id:
         return {"status": "error", "message": "channel_id is required"}
@@ -247,7 +247,7 @@ async def add_channel(request: Request):
     channel_data = {
         'channel_name': channel_name,
         'telegram_targets': telegram_targets,
-        'prompt': prompt,
+        'prompt_key': prompt_key,
         'min_duration_seconds': min_dur_sec,
         'max_duration_seconds': max_dur_sec,
         'title_must_include': data.get('title_must_include') or [],
@@ -283,7 +283,7 @@ async def update_channel(request: Request):
     channel_data = {
         'channel_name': data.get('channel_name'),
         'telegram_targets': data.get('telegram_targets') or [],
-        'prompt': data.get('prompt'),
+        'prompt_key': (data.get('prompt_key') or '').strip() or None,
         'min_duration_seconds': data.get('min_duration_seconds'),
         'max_duration_seconds': data.get('max_duration_seconds'),
         'title_must_include': data.get('title_must_include') or [],
@@ -534,7 +534,15 @@ async def add_manual_video(request: Request):
     data = await request.json()
     url = data.get("url", "").strip()
     telegram_target = data.get("telegram_target", "").strip() or None
-    prompt = (data.get("prompt") or "").strip() or None
+    # Manual video may pass either a free-form prompt (back-compat) or a key
+    # into the global youtube prompts.
+    raw_prompt = (data.get("prompt") or "").strip()
+    prompt_key = (data.get("prompt_key") or "").strip()
+    if prompt_key:
+        from youtube_monitor.prompts import resolve_yt_prompt
+        prompt = resolve_yt_prompt(prompt_key)
+    else:
+        prompt = raw_prompt or None
 
     if not url:
         return {"status": "error", "message": "url is required"}

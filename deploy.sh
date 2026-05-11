@@ -41,11 +41,12 @@ echo
 echo "==> Fetching origin..."
 git fetch origin "$BRANCH"
 
-echo "==> Checking out $BRANCH..."
-git checkout "$BRANCH"
-
-echo "==> Fast-forwarding to origin/$BRANCH..."
-git pull --ff-only origin "$BRANCH"
+# `checkout -B` creates the local branch if it doesn't exist, or resets it to
+# match origin/BRANCH if it does. Combined with `--track`, it's idempotent
+# and safe to rerun. This replaces a separate checkout + pull --ff-only and
+# also handles the "first deploy of a new branch" case.
+echo "==> Checking out $BRANCH (tracking origin/$BRANCH)..."
+git checkout -B "$BRANCH" --track "origin/$BRANCH"
 echo
 
 # ── 2. Install + build the React bundle ─────────────────────────────────────
