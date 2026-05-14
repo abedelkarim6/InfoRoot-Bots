@@ -128,9 +128,6 @@ export default function Sidebar() {
           </>
         )}
 
-        {(hasBots || youtubeOn) && (
-          <NavItem to="/prompts" icon="📝" label="Prompts" />
-        )}
 
         {youtubeOn && (
           <>
@@ -139,6 +136,7 @@ export default function Sidebar() {
             <NavItem to="/yt-videos" icon="📋" label="Youtube Dashboard" />
             <NavItem to="/yt-channels" icon="📺" label="Youtube Channels" />
             <NavItem to="/yt-keywords" icon="🔎" label="YouTube SEOs" />
+            <NavItem to="/youtube-prompts" icon="📝" label="Youtube Prompts" />
           </>
         )}
 
@@ -159,6 +157,7 @@ export default function Sidebar() {
           <>
             <div className="nav-separator" />
             <span className="nav-section-label">Admin</span>
+            <NavItem to="/prompts" icon="🔒" label="Admin Prompts" />
             <NavItem to="/accounts" icon="👥" label="Access & Plans" />
             <NavItem to="/tg-tester" icon="🧪" label="TG Tester" />
             <NavItem to="/logs" icon="📋" label="Logs" />

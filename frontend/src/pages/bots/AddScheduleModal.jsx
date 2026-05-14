@@ -7,6 +7,8 @@
  */
 
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useGlobalConfig } from '../../config/ConfigProvider';
@@ -34,7 +36,12 @@ export default function AddScheduleModal({
   const bot = config?.bots?.[botName];
   // Prompts are global; the summaries-tab prompts apply to every bot.
   const botPrompts = (prompts && prompts.summaries) || {};
-  const defaultSchedules = bot?.default_schedules || [];
+  // Default schedules are now global — pulled from /api/default-schedules.
+  const { data: defaultsRes } = useQuery({
+    queryKey: ['default-schedules'],
+    queryFn: () => api('/api/default-schedules')
+  });
+  const defaultSchedules = defaultsRes?.status === 'ok' ? defaultsRes.schedules || [] : [];
 
   const [form, setForm] = useState(() => emptyScheduleForm('hourly'));
   const [pickedDefaultIdx, setPickedDefaultIdx] = useState('');

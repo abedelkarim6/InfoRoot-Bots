@@ -704,6 +704,115 @@ class Database:
                 if _orphans > 0:
                     logger.info(f"[DB] Cleaned up {_orphans} orphan prompt(s) from deleted bots")
 
+            # Global default schedules (shared across all bots, owner-scoped).
+            # Replaces per-bot `bots.default_schedules` JSONB lists.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS default_schedules_global (
+                    id                       SERIAL PRIMARY KEY,
+                    owner_id                 INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    name                     TEXT NOT NULL,
+                    type                     TEXT NOT NULL DEFAULT 'hourly',
+                    prompt_key               TEXT,
+                    header                   TEXT,
+                    header_datetime          BOOLEAN DEFAULT FALSE,
+                    header_date_arabic       BOOLEAN DEFAULT FALSE,
+                    header_time_arabic       BOOLEAN DEFAULT FALSE,
+                    header_datetime_offset   INTEGER DEFAULT 0,
+                    minute                   INTEGER,
+                    hour                     INTEGER,
+                    hours                    INTEGER,
+                    minutes                  INTEGER,
+                    start_hour               INTEGER,
+                    start_minute             INTEGER,
+                    end_hour                 INTEGER,
+                    end_minute               INTEGER,
+                    telegram_targets         JSONB DEFAULT '[]',
+                    wait_time                INTEGER,
+                    bullet_points            BOOLEAN DEFAULT FALSE,
+                    bullet_points_count      INTEGER DEFAULT 0,
+                    created_at               TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ds_global_admin_idx
+                ON default_schedules_global(name) WHERE owner_id IS NULL
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ds_global_user_idx
+                ON default_schedules_global(name, owner_id) WHERE owner_id IS NOT NULL
+            """)
+
+            # One-time migration: pull each bot's default_schedules JSONB into
+            # the global table, prefixing the name with the bot's name to avoid
+            # collisions. Idempotent (skips rows that already exist).
+            cursor.execute("""
+                SELECT to_regclass('default_schedules_global') AS t
+            """)
+            if cursor.fetchone()['t']:
+                cursor.execute("""
+                    SELECT b.name, b.owner_id, b.default_schedules
+                    FROM bots b
+                    WHERE b.default_schedules IS NOT NULL
+                      AND jsonb_array_length(b.default_schedules) > 0
+                """)
+                _migrated = 0
+                for _row in cursor.fetchall():
+                    _bn = _row['name']
+                    _own = _row['owner_id']
+                    for _sch in (_row['default_schedules'] or []):
+                        if not isinstance(_sch, dict):
+                            continue
+                        _orig_name = _sch.get('name') or 'default'
+                        _global_name = f"{_bn}/{_orig_name}"
+                        cursor.execute("SAVEPOINT ds_seed")
+                        try:
+                            cursor.execute(
+                                """
+                                INSERT INTO default_schedules_global (
+                                    owner_id, name, type, prompt_key, header,
+                                    header_datetime, header_date_arabic, header_time_arabic,
+                                    header_datetime_offset,
+                                    minute, hour, hours, minutes,
+                                    start_hour, start_minute, end_hour, end_minute,
+                                    telegram_targets, wait_time,
+                                    bullet_points, bullet_points_count
+                                ) VALUES (
+                                    %s, %s, %s, %s, %s,
+                                    %s, %s, %s,
+                                    %s,
+                                    %s, %s, %s, %s,
+                                    %s, %s, %s, %s,
+                                    %s::jsonb, %s,
+                                    %s, %s
+                                )
+                                ON CONFLICT DO NOTHING
+                                """,
+                                (
+                                    _own, _global_name, _sch.get('type') or 'hourly',
+                                    _sch.get('prompt_key'), _sch.get('header'),
+                                    bool(_sch.get('header_datetime', False)),
+                                    bool(_sch.get('header_date_arabic', False)),
+                                    bool(_sch.get('header_time_arabic', False)),
+                                    int(_sch.get('header_datetime_offset') or 0),
+                                    _sch.get('minute'), _sch.get('hour'),
+                                    _sch.get('hours'), _sch.get('minutes'),
+                                    _sch.get('start_hour'), _sch.get('start_minute'),
+                                    _sch.get('end_hour'), _sch.get('end_minute'),
+                                    json.dumps(_sch.get('telegram_targets') or []),
+                                    _sch.get('wait_time'),
+                                    bool(_sch.get('bullet_points', False)),
+                                    int(_sch.get('bullet_points_count') or 0),
+                                ),
+                            )
+                            if cursor.rowcount:
+                                _migrated += 1
+                            cursor.execute("RELEASE SAVEPOINT ds_seed")
+                        except Exception as e:
+                            cursor.execute("ROLLBACK TO SAVEPOINT ds_seed")
+                            logger.warning(f"[DB] Skipped default schedule '{_global_name}': {e}")
+                if _migrated > 0:
+                    logger.info(f"[DB] Migrated {_migrated} default schedule(s) to global table")
+
             # Per-user bot inheritance configuration
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_bot_inheritance (

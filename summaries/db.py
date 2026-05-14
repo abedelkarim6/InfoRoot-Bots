@@ -2412,9 +2412,22 @@ class SummariesDB(Database):
                 topic_row = cursor.fetchone()
                 if topic_row:
                     topic_id = topic_row['id']
-                    cursor.execute("SELECT default_schedules FROM bots WHERE name = %s", (bot_name,))
+                    # Pull defaults from the GLOBAL table. Scope by the bot's
+                    # owner so admin bots see admin defaults and user bots see
+                    # their owner's defaults.
+                    cursor.execute("SELECT owner_id FROM bots WHERE name = %s", (bot_name,))
                     bot_row = cursor.fetchone()
-                    default_schedules = (bot_row['default_schedules'] if bot_row else None) or []
+                    _bot_owner = bot_row['owner_id'] if bot_row else None
+                    if _bot_owner is None:
+                        cursor.execute(
+                            "SELECT * FROM default_schedules_global WHERE owner_id IS NULL ORDER BY id"
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT * FROM default_schedules_global WHERE owner_id = %s ORDER BY id",
+                            (_bot_owner,),
+                        )
+                    default_schedules = [dict(r) for r in cursor.fetchall()]
                     for ds in default_schedules:
                         header = (ds.get('header') or '').replace('{topic_name}', topic_name)
                         cursor.execute("""
@@ -2806,6 +2819,153 @@ class SummariesDB(Database):
             return row['key'] if row else None
         finally:
             self._commit()
+
+    # ==================== Global Default Schedules ====================
+
+    _DS_FIELDS = (
+        'name', 'type', 'prompt_key', 'header',
+        'header_datetime', 'header_date_arabic', 'header_time_arabic',
+        'header_datetime_offset',
+        'minute', 'hour', 'hours', 'minutes',
+        'start_hour', 'start_minute', 'end_hour', 'end_minute',
+        'telegram_targets', 'wait_time',
+        'bullet_points', 'bullet_points_count',
+    )
+
+    def _ds_row_to_dict(self, row) -> dict:
+        d = dict(row)
+        # `telegram_targets` is JSONB → already a Python list when read.
+        if d.get('telegram_targets') is None:
+            d['telegram_targets'] = []
+        return d
+
+    def list_default_schedules(self, owner_id: int = None) -> list:
+        try:
+            cursor = self._get_cursor()
+            if owner_id is None:
+                cursor.execute(
+                    "SELECT * FROM default_schedules_global WHERE owner_id IS NULL ORDER BY id"
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM default_schedules_global WHERE owner_id = %s ORDER BY id",
+                    (owner_id,),
+                )
+            return [self._ds_row_to_dict(r) for r in cursor.fetchall()]
+        finally:
+            self._commit()
+
+    def add_default_schedule(self, data: dict, owner_id: int = None) -> int:
+        try:
+            cursor = self._get_cursor()
+            params = self._ds_params(data)
+            cursor.execute(
+                """
+                INSERT INTO default_schedules_global (
+                    owner_id, name, type, prompt_key, header,
+                    header_datetime, header_date_arabic, header_time_arabic,
+                    header_datetime_offset,
+                    minute, hour, hours, minutes,
+                    start_hour, start_minute, end_hour, end_minute,
+                    telegram_targets, wait_time,
+                    bullet_points, bullet_points_count
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s::jsonb, %s,
+                    %s, %s
+                )
+                RETURNING id
+                """,
+                (owner_id, *params),
+            )
+            row = cursor.fetchone()
+            return row['id'] if row else None
+        finally:
+            self._commit()
+
+    def update_default_schedule(self, ds_id: int, data: dict, owner_id: int = None) -> bool:
+        try:
+            cursor = self._get_cursor()
+            params = self._ds_params(data)
+            if owner_id is None:
+                cursor.execute(
+                    """
+                    UPDATE default_schedules_global SET
+                        name=%s, type=%s, prompt_key=%s, header=%s,
+                        header_datetime=%s, header_date_arabic=%s, header_time_arabic=%s,
+                        header_datetime_offset=%s,
+                        minute=%s, hour=%s, hours=%s, minutes=%s,
+                        start_hour=%s, start_minute=%s, end_hour=%s, end_minute=%s,
+                        telegram_targets=%s::jsonb, wait_time=%s,
+                        bullet_points=%s, bullet_points_count=%s
+                    WHERE id=%s AND owner_id IS NULL
+                    """,
+                    (*params, ds_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE default_schedules_global SET
+                        name=%s, type=%s, prompt_key=%s, header=%s,
+                        header_datetime=%s, header_date_arabic=%s, header_time_arabic=%s,
+                        header_datetime_offset=%s,
+                        minute=%s, hour=%s, hours=%s, minutes=%s,
+                        start_hour=%s, start_minute=%s, end_hour=%s, end_minute=%s,
+                        telegram_targets=%s::jsonb, wait_time=%s,
+                        bullet_points=%s, bullet_points_count=%s
+                    WHERE id=%s AND owner_id=%s
+                    """,
+                    (*params, ds_id, owner_id),
+                )
+            return cursor.rowcount > 0
+        finally:
+            self._commit()
+
+    def delete_default_schedule(self, ds_id: int, owner_id: int = None) -> bool:
+        try:
+            cursor = self._get_cursor()
+            if owner_id is None:
+                cursor.execute(
+                    "DELETE FROM default_schedules_global WHERE id=%s AND owner_id IS NULL",
+                    (ds_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM default_schedules_global WHERE id=%s AND owner_id=%s",
+                    (ds_id, owner_id),
+                )
+            return cursor.rowcount > 0
+        finally:
+            self._commit()
+
+    def _ds_params(self, data: dict) -> tuple:
+        """Order of params for INSERT/UPDATE (excluding owner_id and id)."""
+        return (
+            data.get('name') or 'default',
+            data.get('type') or 'hourly',
+            data.get('prompt_key'),
+            data.get('header'),
+            bool(data.get('header_datetime', False)),
+            bool(data.get('header_date_arabic', False)),
+            bool(data.get('header_time_arabic', False)),
+            int(data.get('header_datetime_offset') or 0),
+            data.get('minute'),
+            data.get('hour'),
+            data.get('hours'),
+            data.get('minutes'),
+            data.get('start_hour'),
+            data.get('start_minute'),
+            data.get('end_hour'),
+            data.get('end_minute'),
+            json.dumps(data.get('telegram_targets') or []),
+            data.get('wait_time'),
+            bool(data.get('bullet_points', False)),
+            int(data.get('bullet_points_count') or 0),
+        )
 
     # ==================== Dependency checks ====================
 

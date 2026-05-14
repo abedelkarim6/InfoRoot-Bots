@@ -18,9 +18,14 @@ module.exports = {
   apps: [
     {
       name: 'summariesbot',
-      script: 'app.py',
-      // venv-bound python so pip-installed packages (telethon, fastapi, etc.) are on path.
-      interpreter: './venv/bin/python',
+      // Run the venv's python with uvicorn as a module. This is the actual
+      // HTTP server entry point — `python app.py` alone would just import the
+      // module and exit without serving anything. Binding to 127.0.0.1 keeps
+      // the FastAPI process private; nginx (or another reverse proxy) is
+      // expected to listen on 80/443 and forward traffic to this port.
+      script: './venv/bin/python',
+      args: '-m uvicorn app:app --host 127.0.0.1 --port 8000',
+      interpreter: 'none',
       // Resolve cwd at start time — `pm2 start ecosystem.config.js` runs from the
       // repo root and PM2 records the absolute path, so subsequent restarts work
       // regardless of where you invoke `pm2 restart` from.

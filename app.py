@@ -52,6 +52,7 @@ from routers import auth, accounts, system, chatbot
 from routers.auth import validate_token, hash_password, get_request_user_id, is_admin_request
 # Summaries feature routers (moved to summaries/routers/)
 from summaries.routers import bot, telegram, prompts, rules, collection, topic, monitor, recycle_bin
+from summaries.routers import default_schedules as default_schedules_router
 from summaries.db import SummariesDB
 from utils.database import set_db_instance, get_db
 from utils.helpers import (
@@ -361,6 +362,7 @@ app.include_router(bot.router, prefix="/api", tags=["bot"])
 app.include_router(topic.router, prefix="/api", tags=["topic"])
 app.include_router(telegram.router, prefix="/api", tags=["telegram"])
 app.include_router(prompts.router, prefix="/api", tags=["prompts"])
+app.include_router(default_schedules_router.router, prefix="/api", tags=["default_schedules"])
 app.include_router(rules.router, prefix="/api", tags=["rules"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])

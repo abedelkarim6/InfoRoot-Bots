@@ -30,10 +30,26 @@ export default function BotList() {
   const { config } = useGlobalConfig();
   const bots = config?.bots || {};
   const [duplicateState, setDuplicateState] = useState(null); // { sourceName }
+  const navigate = useNavigate();
 
   return (
     <div className="page active" id="bots-page">
-      <PageHeader title="Bot Management" subtitle="Configure and manage your bots" />
+      <PageHeader title="Bot Management" subtitle="Configure and manage your bots">
+        <button
+          className="btn btn-secondary"
+          onClick={() => navigate('/summaries-prompts')}
+          title="Manage the global summaries prompt library"
+        >
+          📝 Prompts
+        </button>
+        <button
+          className="btn btn-secondary"
+          onClick={() => navigate('/default-schedules')}
+          title="Manage default schedule templates applied to every new topic"
+        >
+          📅 Default Schedules
+        </button>
+      </PageHeader>
 
       <CreateBotCard />
 

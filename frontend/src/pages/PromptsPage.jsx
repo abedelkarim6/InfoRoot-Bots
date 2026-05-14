@@ -1,20 +1,17 @@
 /**
- * Prompts — unified, global prompts page.
+ * Admin Prompts — admin-only fixed prompts.
  *
- * Two tabs: Summaries / YouTube. Each shows the list of prompts (key + text)
- * with add / edit / rename / delete. Prompts are global across all bots — when
- * a summary schedule (or a YouTube channel/keyword) references a prompt by
- * key, it picks the entry stored here.
- *
- * Admin-only "fixed" prompts (system prompt, fixed prefix, bullet points
- * suffix) live on the Summaries tab; YouTube fixed-prefix editors live on the
- * YouTube tab.
+ * Two sections: Summaries (system prompt, fixed prefix, bullet-points suffix)
+ * and YouTube (video + transcript fixed prefixes). User-managed prompt lists
+ * live elsewhere:
+ *   - Summaries user prompts → /summaries-prompts (button on the Bots page)
+ *   - YouTube  user prompts → /youtube-prompts  (sidebar entry)
  */
 
 import { useEffect, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { useApiMutation, useConfirmedMutation } from '../lib/useApiMutation';
+import { useApiMutation } from '../lib/useApiMutation';
 import { useDialogs } from '../dialogs/DialogsProvider';
 import { useAuth } from '../auth/AuthContext';
 import PageHeader from '../components/PageHeader';
@@ -29,11 +26,20 @@ export default function PromptsPage() {
   const { user } = useAuth();
   const isAdmin = !user || user.role === 'admin';
 
+  if (!isAdmin) {
+    return (
+      <div className="page active">
+        <PageHeader title="Admin Prompts" />
+        <p className="text-muted" style={{ padding: 20 }}>Admin only.</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="page active" id="prompts-page">
+    <div className="page active" id="admin-prompts-page">
       <PageHeader
-        title="Prompts"
-        subtitle="Global prompt library — shared across all bots (summaries) and channels/keywords (YouTube)"
+        title="Admin Prompts"
+        subtitle="Fixed prompts that wrap every user prompt — system role, prefix, bullet-points suffix, and YouTube prefixes."
       />
 
       <div className="bot-config-card">
@@ -48,241 +54,9 @@ export default function PromptsPage() {
             </button>
           ))}
         </div>
-        <div className="bot-config-body">
-          {tab === 'summaries' && <PromptsTab kind="summaries" isAdmin={isAdmin} />}
-          {tab === 'youtube'   && <PromptsTab kind="youtube"   isAdmin={isAdmin} />}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Per-tab body ──────────────────────────────────────────────────────────
-
-function PromptsTab({ kind, isAdmin }) {
-  const { data: allPrompts } = useQuery({
-    queryKey: ['prompts'],
-    queryFn: () => api('/api/prompts')
-  });
-  const prompts = (allPrompts && allPrompts[kind]) || {};
-  const keys = Object.keys(prompts);
-  const [addOpen, setAddOpen] = useState(false);
-
-  return (
-    <div style={{ padding: 12 }}>
-      <p className="text-muted" style={{ marginTop: 0 }}>
-        {kind === 'summaries'
-          ? 'Used by all summary schedules. Pick a prompt per schedule on the Bot detail page.'
-          : 'Used by YouTube channels & keyword trackers. Pick one per channel/keyword on those pages. The first prompt is the default.'}
-      </p>
-
-      {isAdmin && kind === 'summaries' && <SummariesFixedAdmin />}
-      {isAdmin && kind === 'youtube'   && <YoutubeFixedAdmin />}
-
-      {keys.length === 0 ? (
-        <p className="text-muted">No {kind} prompts yet. Click "Add Prompt" to create one.</p>
-      ) : (
-        keys.map((k) => (
-          <PromptCard
-            key={k}
-            kind={kind}
-            promptKey={k}
-            value={prompts[k]}
-            isFirst={k === keys[0]}
-          />
-        ))
-      )}
-
-      <button className="btn btn-secondary btn-sm mt-2" onClick={() => setAddOpen(true)}>
-        + Add Prompt
-      </button>
-
-      {addOpen && (
-        <AddPromptModal
-          kind={kind}
-          existingKeys={keys}
-          onClose={() => setAddOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── Single prompt card (rename / edit / delete) ───────────────────────────
-
-function PromptCard({ kind, promptKey, value, isFirst }) {
-  const initialText = value && typeof value === 'object' ? value.text || '' : value || '';
-  const [text, setText] = useState(initialText);
-  const { showAlert, showPrompt } = useDialogs();
-  const qc = useQueryClient();
-
-  useEffect(() => {
-    setText(initialText);
-  }, [initialText]);
-
-  const update = useApiMutation('/api/prompts/update', {
-    invalidate: ['prompts'],
-    successMsg: 'Prompt updated',
-    errorMsg: 'Failed to update prompt'
-  });
-
-  const remove = useApiMutation('/api/prompts/delete', {
-    invalidate: ['prompts'],
-    successMsg: 'Prompt deleted',
-    errorMsg: 'Failed to delete prompt',
-    onError: (res) => {
-      if (res?.message) showAlert(res.message, { title: 'Cannot Delete', icon: '⛔' });
-    }
-  });
-
-  const confirmDelete = useConfirmedMutation(remove, {
-    message: `Delete prompt "${promptKey}"?`,
-    title: 'Delete Prompt',
-    confirmLabel: 'Delete',
-    confirmClass: 'btn-danger'
-  });
-
-  function onCommit() {
-    if (text === initialText) return;
-    update.mutate({ key: promptKey, text, type: kind });
-  }
-
-  async function onRename() {
-    showPrompt('Rename Prompt', promptKey, async (newName) => {
-      const trimmed = (newName || '').trim();
-      if (!trimmed || trimmed === promptKey) return;
-
-      const all = qc.getQueryData(['prompts']);
-      const existing = (all && all[kind]) || {};
-      if (existing[trimmed]) {
-        showAlert(`Prompt "${trimmed}" already exists`, { icon: '⚠️' });
-        return;
-      }
-
-      // 3-step rename: create new, rewire references, delete old.
-      const add = await api('/api/prompts/update', { key: trimmed, text, type: kind });
-      if (add?.status !== 'ok') {
-        showAlert(add?.message || 'Failed to rename', { icon: '⚠️' });
-        return;
-      }
-      await api('/api/prompts/rename-cascade', {
-        old_key: promptKey,
-        new_key: trimmed,
-        type: kind
-      });
-      const del = await api('/api/prompts/delete', { key: promptKey, type: kind });
-      if (del?.status !== 'ok') {
-        showAlert(del?.message || 'Renamed, but old prompt could not be deleted.', { icon: '⚠️' });
-      }
-      qc.invalidateQueries({ queryKey: ['prompts'] });
-      qc.invalidateQueries({ queryKey: ['config'] });
-      qc.invalidateQueries({ queryKey: ['yt-channels'] });
-    });
-  }
-
-  return (
-    <div className="prompt-card">
-      <div className="prompt-card-header">
-        <h4 className="prompt-card-title">
-          {promptKey}
-          {kind === 'youtube' && isFirst && (
-            <span className="admin-badge" style={{ marginLeft: 8 }}>default</span>
-          )}
-        </h4>
-        <div className="prompt-card-actions">
-          <button className="btn-icon" onClick={onRename} title="Rename">✏️</button>
-          <button
-            className="btn-icon btn-danger"
-            onClick={() => confirmDelete({ key: promptKey, type: kind })}
-            title="Delete"
-            disabled={remove.isPending}
-          >🗑️</button>
-        </div>
-      </div>
-      <textarea
-        className="textarea"
-        rows={4}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={onCommit}
-        placeholder="Enter prompt text…"
-        disabled={update.isPending}
-      />
-    </div>
-  );
-}
-
-// ─── Add Prompt Modal ──────────────────────────────────────────────────────
-
-function AddPromptModal({ kind, existingKeys, onClose }) {
-  const [name, setName] = useState('');
-  const [text, setText] = useState('');
-  const { showAlert, showConfirm } = useDialogs();
-
-  const save = useApiMutation('/api/prompts/update', {
-    invalidate: ['prompts'],
-    successMsg: 'Prompt added',
-    errorMsg: 'Failed to add prompt',
-    onSuccess: onClose
-  });
-
-  function onSubmit() {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      showAlert('Please enter a prompt name', { icon: '✏️' });
-      return;
-    }
-    if (existingKeys.includes(trimmed)) {
-      showConfirm(
-        `Prompt "${trimmed}" already exists. Overwrite?`,
-        () => save.mutate({ key: trimmed, text, type: kind }),
-        { title: 'Overwrite Prompt', confirmLabel: 'Overwrite', confirmClass: 'btn-primary' }
-      );
-      return;
-    }
-    save.mutate({ key: trimmed, text, type: kind });
-  }
-
-  return (
-    <div
-      className="modal-overlay"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="modal-dialog">
-        <div className="modal-header">
-          <h3>Add {kind === 'youtube' ? 'YouTube' : 'Summaries'} Prompt</h3>
-          <button className="btn-icon" onClick={onClose}>×</button>
-        </div>
-        <div className="modal-body">
-          <div className="form-group">
-            <label className="form-label">Prompt Name</label>
-            <input
-              type="text"
-              className="input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={kind === 'youtube' ? 'e.g., interview, tech_review' : 'e.g., brief_update'}
-              autoFocus
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Prompt Text</label>
-            <textarea
-              className="textarea"
-              rows={6}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Enter the prompt text…"
-            />
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose} disabled={save.isPending}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" onClick={onSubmit} disabled={save.isPending}>
-            Save
-          </button>
+        <div className="bot-config-body" style={{ padding: 12 }}>
+          {tab === 'summaries' && <SummariesFixedAdmin />}
+          {tab === 'youtube'   && <YoutubeFixedAdmin />}
         </div>
       </div>
     </div>

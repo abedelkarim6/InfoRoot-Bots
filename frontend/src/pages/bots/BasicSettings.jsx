@@ -4,7 +4,9 @@
  * Includes:
  *   - Inline rename input + "✏️ Rename" button.
  *   - Minimum Messages number input.
- *   - Default Schedules list (full Add / Edit / Remove flow in DefaultSchedulesEditor).
+ *
+ * Default Schedules used to live here but are now global — managed on the
+ * "📅 Default Schedules" button at the top of the Bots list page.
  *
  * Source/target channels for the bot live behind the
  * "📡 Telegram Sources" / "📤 Telegram Destinations" buttons in the
@@ -16,7 +18,6 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { buildFullBotSavePayload } from './shared';
-import DefaultSchedulesEditor from './DefaultSchedulesEditor';
 
 export default function BasicSettings({ botName, bot }) {
   const [open, setOpen] = useState(true);
@@ -34,11 +35,12 @@ export default function BasicSettings({ botName, bot }) {
         <div className="collapsible-body">
           <InlineRename botName={botName} />
           <MinMessagesField botName={botName} bot={bot} />
-          <DefaultSchedulesEditor botName={botName} bot={bot} />
           <p className="text-muted" style={{ fontSize: 12, marginTop: 12 }}>
             Source &amp; target channels are managed via the
             <strong> 📡 Telegram Sources</strong> and
             <strong> 📤 Telegram Destinations</strong> buttons at the top of the page.
+            Default schedules are global — manage them on the
+            <strong> 📅 Default Schedules</strong> page (button at the top of the Bots list).
           </p>
         </div>
       </div>
