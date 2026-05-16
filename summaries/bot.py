@@ -451,6 +451,7 @@ async def generate_and_send_summary(job_data):
       (< 10, not yet interim-summarized), summarize them directly as well.
     """
     schedule_type = job_data.get('schedule_type')
+    schedule_id = job_data.get('schedule_id')
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
     prompt_key = job_data.get('prompt_key')
@@ -540,7 +541,8 @@ async def generate_and_send_summary(job_data):
 
         # ── Split messages: interim-covered vs. remaining raw ───────────────
         all_ids = [m['id'] for m in all_msgs]
-        interim_id_map = db.get_interim_ids_for_messages(all_ids, bot_name=bot_name, topic_name=topic_name)
+        interim_id_map = db.get_interim_ids_for_messages(
+            all_ids, bot_name=bot_name, topic_name=topic_name, schedule_id=schedule_id)
 
         # Collect interim IDs in the order their first message appears
         seen_interim_ids: set = set()
@@ -702,6 +704,7 @@ async def generate_and_send_summary(job_data):
                 message_ids=all_ids,
                 tokens_used=total_tokens,
                 thoughts=getattr(llm_client, 'last_thoughts', '') or None,
+                schedule_id=schedule_id,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -913,7 +916,8 @@ async def cleanup_message_backlog():
         # Build per-(bot_name, topic_name) cutoff.
         # Use the earliest window_start (furthest back in time) across all schedules
         # for that topic — a message is stale only if it's outside every window.
-        topic_cutoffs: dict = {}  # (bot_name, topic_name) -> datetime
+        topic_cutoffs: dict = {}       # (bot_name, topic_name) -> datetime
+        topic_schedule_ids: dict = {}  # (bot_name, topic_name) -> set of schedule ids
         for bot_name, bot_data in bots_cfg.items():
             for cat_data in bot_data.get('categories', {}).values():
                 for topic_name, topic_data in cat_data.get('topics', {}).items():
@@ -925,6 +929,9 @@ async def cleanup_message_backlog():
                         stype = schedule.get('type')
                         if not stype:
                             continue
+                        sid = schedule.get('id')
+                        if sid:
+                            topic_schedule_ids.setdefault((bot_name, topic_name), set()).add(sid)
                         job_data = {
                             'schedule_type':    stype,
                             'sch_minute':       schedule.get('minute'),
@@ -972,7 +979,12 @@ async def cleanup_message_backlog():
                 if cutoff is None:
                     continue  # no schedule configured for this pair — leave untouched
                 if msg_ts < cutoff:
-                    db.mark_as_summarized([msg['id']], 'interim', bot_name, topic_name, status='missed')
+                    # Mark the message missed in every schedule's own interim chain so
+                    # the per-schedule interim builders skip it (interims are no longer
+                    # a shared 'interim' chain — see check_and_run_interim_summary).
+                    for sid in topic_schedule_ids.get((bot_name, topic_name), ()):
+                        db.mark_as_summarized([msg['id']], f'interim:{sid}',
+                                              bot_name, topic_name, status='missed')
                     missed += 1
 
         if missed:
@@ -1029,8 +1041,17 @@ def _get_interim_lock(bot_name: str, topic_name: str) -> asyncio.Lock:
 async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     """
     Called after every message save.
-    Batch size is auto-derived from the topic's schedule: 26 − B for bullet-points schedules,
-    20 for non-bullet-points schedules. A per-topic lock prevents concurrent duplicate calls.
+
+    Builds rolling interim batches INDEPENDENTLY for each schedule on the topic.
+    Each schedule owns its own interim chain ('interim:{schedule_id}' message
+    tracking), its own rolling {final_interim} context, and its own batch size
+    (26 − B for bullet-points schedules, 20 otherwise). Per-schedule scoping is
+    what prevents one schedule window's content from leaking into the next:
+      • get_messages_for_interim excludes messages this schedule already finally
+        consumed → an interim batch can never straddle a fire boundary.
+      • get_latest_interim returns only UNSENT interims → the rolling chain resets
+        after each fire (which marks its interims sent).
+    A per-topic lock prevents concurrent duplicate calls.
     """
     lock = _get_interim_lock(bot_name, topic_name)
     if lock.locked():
@@ -1038,56 +1059,63 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     async with lock:
         try:
             schedules = db.get_schedules_for_topic(bot_name, topic_name)
-            # When a topic has multiple bullet-points schedules with different b counts,
-            # pick the LARGEST b → smallest batch (26 − b_max). The interim is one shared
-            # rolling summary across all schedules, so the batch must be small enough that
-            # the strictest schedule can still produce its bullet count from one batch.
-            bp_counts = [int(s.get('bullet_points_count') or 0)
-                         for s in schedules if s.get('bullet_points')]
-            b_count = max(bp_counts) if bp_counts else 0
-            if b_count:
-                batch_limit = max(1, 26 - b_count)
-            else:
-                batch_limit = 20
-            logger.info(
-                f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
-                f"| schedules={len(schedules)} | bp_counts={bp_counts} | b_used={b_count} "
-                f"| batch_limit={batch_limit}"
-            )
-            while True:
-                count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
-                if count < batch_limit:
-                    break
+            for sched in schedules:
+                sched_id   = sched.get('id')
+                sched_type = sched.get('type')
+                if not sched_id or not sched_type:
+                    continue
+                # speeches_interval doesn't use interims (generate_speech_buckets
+                # summarizes raw messages directly) — building them would be wasted work.
+                if sched_type == 'speeches_interval':
+                    continue
 
-                messages = db.get_messages_for_interim(bot_name, topic_name, limit=batch_limit)
-                if len(messages) < batch_limit:
-                    break
-
-                prompt_key    = _get_prompt_key_for_topic(bot_name, topic_name)
-                schedule_name = _get_schedule_name_for_topic(bot_name, topic_name)
-                texts   = [m['text'] for m in messages]
-                msg_ids = [m['id'] for m in messages]
-
-                # Rolling cumulative — driven entirely by the user's prompt template.
-                # The template's {final_interim} slot receives the previous interim text
-                # (empty string on first run); the template owns how that context is
-                # blended with {messages} so the output style matches the schedule's
-                # final output exactly.
-                prev_interim = db.get_latest_interim(bot_name, topic_name)
-                prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
-
-                prompt = get_summary_prompt(
-                    texts, bot_name, prompt_key,
-                    topic_name=topic_name, final_interim=prev_text, b=b_count
+                b_count = int(sched.get('bullet_points_count') or 0) if sched.get('bullet_points') else 0
+                batch_limit = max(1, 26 - b_count) if b_count else 20
+                prompt_key    = sched.get('prompt_key') or _get_prompt_key_for_topic(bot_name, topic_name)
+                schedule_name = sched.get('name')
+                logger.info(
+                    f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
+                    f"| schedule={schedule_name} (id={sched_id}) | b={b_count} | batch_limit={batch_limit}"
                 )
-                if b_count:
-                    prompt += '\n\n' + get_bullet_points_suffix(b_count)
 
-                summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+                while True:
+                    count = db.get_unsummarized_count_for_interim(
+                        bot_name, topic_name, sched_id, sched_type)
+                    if count < batch_limit:
+                        break
 
-                interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages), schedule_name=schedule_name)
-                db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name, interim_id=interim_id)
-                logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
+                    messages = db.get_messages_for_interim(
+                        bot_name, topic_name, sched_id, sched_type, limit=batch_limit)
+                    if len(messages) < batch_limit:
+                        break
+
+                    texts   = [m['text'] for m in messages]
+                    msg_ids = [m['id'] for m in messages]
+
+                    # Rolling cumulative — driven entirely by the user's prompt template.
+                    # The template's {final_interim} slot receives this schedule's previous
+                    # unsent interim text (empty on the first batch of a window); the
+                    # template owns how that context is blended with {messages}.
+                    prev_interim = db.get_latest_interim(bot_name, topic_name, sched_id)
+                    prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
+
+                    prompt = get_summary_prompt(
+                        texts, bot_name, prompt_key,
+                        topic_name=topic_name, final_interim=prev_text, b=b_count
+                    )
+                    if b_count:
+                        prompt += '\n\n' + get_bullet_points_suffix(b_count)
+
+                    summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+
+                    interim_id = db.save_interim_summary(
+                        bot_name, topic_name, summary_text, len(messages),
+                        schedule_name=schedule_name, schedule_id=sched_id)
+                    db.mark_as_summarized(
+                        msg_ids, f'interim:{sched_id}', bot_name, topic_name, interim_id=interim_id)
+                    logger.info(
+                        f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} "
+                        f"| schedule={schedule_name} | msgs={len(msg_ids)}")
         except Exception as e:
             logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
 
@@ -1153,6 +1181,7 @@ async def schedule_summaries():
                     job_id = f"sch:{schedule_id}" if schedule_id else f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                     job_data = {
                         'schedule_type': schedule_type,
+                        'schedule_id': schedule_id,
                         'bot_name': bot_name,
                         'topic_name': topic_name,
                         'category_name': category_name,

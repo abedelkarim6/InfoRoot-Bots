@@ -100,6 +100,42 @@ set_yt_db(yt_db)
 # Initialize YouTube feature — keys from config.yaml youtube section
 _yt_cfg = _cfg.get("youtube", {})
 init_keyword_search(youtube_data_api_key=_yt_cfg.get("data_api_key", ""))
+async def _yt_resolve_send_target(client, target):
+    """Resolve a stored Telegram target into an entity Telethon can send to.
+
+    The manual-video picker and channel config store `entity.id` — a bare
+    numeric channel id. `_yt_telegram_send` uses a freshly-connected client
+    whose entity cache is empty, so a numeric id raises "Cannot find any
+    entity corresponding to ...". We warm the cache from the userbot's dialog
+    list and fall back to an explicit PeerChannel for bare positive ids.
+    """
+    raw = str(target).strip()
+    if not raw:
+        raise RuntimeError("[YT-TG] Empty Telegram target")
+
+    # @username / t.me link — Telethon resolves these directly, no cache needed.
+    if not raw.lstrip('-').isdigit():
+        return raw
+
+    n = int(raw)
+    # Try direct resolution; if the cache is cold, warm it from dialogs and retry.
+    for attempt in range(2):
+        try:
+            return await client.get_entity(n)
+        except (ValueError, TypeError):
+            if attempt == 0:
+                try:
+                    await client.get_dialogs()
+                except Exception as e:
+                    logger.warning(f"[YT-TG] get_dialogs failed while resolving {raw}: {e}")
+
+    # A bare positive id is an unmarked channel id from the dialogs picker.
+    if n > 0:
+        from telethon.tl.types import PeerChannel
+        return await client.get_entity(PeerChannel(n))
+    raise RuntimeError(f"[YT-TG] Could not resolve Telegram target '{raw}'")
+
+
 async def _yt_telegram_send(target: str, text: str):
     """Send a Telegram message using a temporary Telethon client (userbot session)."""
     from telethon import TelegramClient
@@ -127,12 +163,16 @@ async def _yt_telegram_send(target: str, text: str):
         if not await client.is_user_authorized():
             raise RuntimeError("[YT-TG] Session is not authorized — regenerate string_session")
 
+        # Resolve the target to a concrete entity. A bare numeric channel id
+        # (what the dialogs picker stores) cannot be resolved by a cold client.
+        entity = await _yt_resolve_send_target(client, target)
+
         # Split into ≤4096-char chunks so long summaries don't get silently dropped
         chunk_size = 4096
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         for i, chunk in enumerate(chunks):
             try:
-                msg = await client.send_message(target, chunk, parse_mode='md')
+                msg = await client.send_message(entity, chunk, parse_mode='md')
             except (tg_errors.RPCError, ValueError) as md_err:
                 # The message was NOT delivered — either Telegram's server
                 # rejected the request (RPCError, e.g. bad markdown entities)
@@ -145,7 +185,7 @@ async def _yt_telegram_send(target: str, text: str):
                 # channel. Let it propagate so the worker logs a send failure
                 # instead of double-posting.
                 logger.warning(f"[YT-TG] Markdown send rejected ({md_err}), retrying as plain text")
-                msg = await client.send_message(target, chunk, parse_mode=None)
+                msg = await client.send_message(entity, chunk, parse_mode=None)
             if msg is None or not getattr(msg, 'id', None):
                 raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")
         logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")

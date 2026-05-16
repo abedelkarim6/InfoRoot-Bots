@@ -935,6 +935,14 @@ class Database:
             # Migrate: add schedule_name to topic_interim_summaries for display
             cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_name TEXT")
 
+            # Migrate: per-schedule interim scoping. Interims used to be a single rolling
+            # chain shared by every schedule on a topic, which leaked previous-window
+            # content into later windows. Each interim/summary now records the schedule
+            # that produced it; interim message-tracking rows use schedule_type
+            # 'interim:{schedule_id}' instead of the old shared 'interim'.
+            cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
+            cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
+
             # Indexes for monitor-page hot queries. All tabs paginate by
             # `timestamp DESC` and filter by bot_name/collection_name/keywords_found.
             # Without these, every Messages/Unclassified/Schedules/History load

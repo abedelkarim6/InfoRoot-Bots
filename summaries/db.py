@@ -162,8 +162,14 @@ class SummariesDB(Database):
 
     # ── Interim (rolling 25-message batch) summarization ─────────────────────
 
-    def get_unsummarized_count_for_interim(self, bot_name: str, topic_name: str) -> int:
-        """Count messages for (bot, topic) not yet consumed by the interim summarizer."""
+    def get_unsummarized_count_for_interim(self, bot_name: str, topic_name: str,
+                                           schedule_id: int, schedule_type: str) -> int:
+        """Count messages for (bot, topic) not yet consumed by THIS schedule's interim
+        chain and not already finally-consumed by this schedule's type.
+
+        Excluding finally-consumed (schedule_type) messages prevents an interim batch
+        from straddling a schedule fire — i.e. re-including messages a previous fire of
+        this schedule already sent as raw."""
         try:
             cursor = self._get_cursor()
             cursor.execute(
@@ -180,7 +186,7 @@ class SummariesDB(Database):
                          WHERE ms.message_id = m.id
                            AND ms.bot_name = %s
                            AND ms.topic_name = %s
-                           AND ms.schedule_type = 'interim'
+                           AND ms.schedule_type IN (%s, %s)
                      )""",
                 (
                     bot_name,
@@ -189,6 +195,7 @@ class SummariesDB(Database):
                     '%,' + topic_name + ',%',
                     '%,' + topic_name,
                     bot_name, topic_name,
+                    f'interim:{schedule_id}', schedule_type,
                 )
             )
             row = cursor.fetchone()
@@ -197,11 +204,13 @@ class SummariesDB(Database):
             self._commit()
 
     def get_messages_for_interim(self, bot_name: str, topic_name: str,
-                                limit: int = 25, after_dt=None) -> list:
-        """Get the oldest `limit` messages for (bot, topic) not yet interim-summarized.
-        If after_dt is provided, only messages with timestamp >= after_dt are returned
-        (used by scheduled summaries to stay within their own window without marking
-        out-of-window messages as missed, so wider-window schedules can still use them).
+                                 schedule_id: int, schedule_type: str,
+                                 limit: int = 25, after_dt=None) -> list:
+        """Get the oldest `limit` messages for (bot, topic) not yet consumed by THIS
+        schedule's interim chain ('interim:{schedule_id}') and not already finally
+        consumed by this schedule's type. See get_unsummarized_count_for_interim for
+        why the schedule_type exclusion matters (anti-straddle).
+        If after_dt is provided, only messages with timestamp >= after_dt are returned.
         """
         try:
             cursor = self._get_cursor()
@@ -220,7 +229,7 @@ class SummariesDB(Database):
                          WHERE ms.message_id = m.id
                            AND ms.bot_name = %s
                            AND ms.topic_name = %s
-                           AND ms.schedule_type = 'interim'
+                           AND ms.schedule_type IN (%s, %s)
                      )
                      {window_clause}
                    ORDER BY m.timestamp ASC
@@ -232,6 +241,7 @@ class SummariesDB(Database):
                     '%,' + topic_name + ',%',
                     '%,' + topic_name,
                     bot_name, topic_name,
+                    f'interim:{schedule_id}', schedule_type,
                     *([after_dt] if after_dt is not None else []),
                     limit,
                 )
@@ -284,16 +294,16 @@ class SummariesDB(Database):
 
     def save_interim_summary(self, bot_name: str, topic_name: str,
                              summary_text: str, message_count: int,
-                             schedule_name: str = None) -> int:
+                             schedule_name: str = None, schedule_id: int = None) -> int:
         """Insert a new interim summary and return its id."""
         try:
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO topic_interim_summaries
-                       (bot_name, topic_name, summary_text, message_count, schedule_name)
-                   VALUES (%s, %s, %s, %s, %s)
+                       (bot_name, topic_name, summary_text, message_count, schedule_name, schedule_id)
+                   VALUES (%s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (bot_name, topic_name, summary_text, message_count, schedule_name)
+                (bot_name, topic_name, summary_text, message_count, schedule_name, schedule_id)
             )
             row = cursor.fetchone()
             return row['id']
@@ -331,15 +341,25 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_latest_interim(self, bot_name: str, topic_name: str):
-        """Return the most recent interim summary for (bot, topic), or None."""
+    def get_latest_interim(self, bot_name: str, topic_name: str, schedule_id: int = None):
+        """Return the most recent UNSENT interim for (bot, topic), or None.
+
+        `sent_at IS NULL` makes the rolling {final_interim} chain reset after a schedule
+        fire (which marks its interims sent) — so a new window never inherits the
+        previous window's summary. When schedule_id is given, the lookup is scoped to
+        that schedule's own interim chain."""
         try:
             cursor = self._get_cursor()
+            extra, params = "", [bot_name, topic_name]
+            if schedule_id is not None:
+                extra = " AND schedule_id = %s"
+                params.append(schedule_id)
             cursor.execute(
-                """SELECT * FROM topic_interim_summaries
+                f"""SELECT * FROM topic_interim_summaries
                    WHERE bot_name = %s AND topic_name = %s
+                     AND sent_at IS NULL{extra}
                    ORDER BY id DESC LIMIT 1""",
-                (bot_name, topic_name)
+                params
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -347,27 +367,37 @@ class SummariesDB(Database):
             self._commit()
 
     def get_interim_ids_for_messages(self, message_ids: list,
-                                      bot_name: str = None, topic_name: str = None) -> dict:
+                                      bot_name: str = None, topic_name: str = None,
+                                      schedule_id: int = None) -> dict:
         """Return {message_id: interim_id} for messages that have an interim record.
-        Pass bot_name + topic_name to restrict to a specific topic's interims."""
+        Pass bot_name + topic_name to restrict to a specific topic's interims.
+        Pass schedule_id to restrict to one schedule's interim chain
+        ('interim:{schedule_id}'); when omitted, every interim chain is matched
+        (also matches legacy pre-per-schedule 'interim' rows)."""
         if not message_ids:
             return {}
         try:
             cursor = self._get_cursor()
+            params = []
+            if schedule_id is not None:
+                stype_clause = "ms.schedule_type = %s"
+                params.append(f'interim:{schedule_id}')
+            else:
+                stype_clause = "(ms.schedule_type = 'interim' OR ms.schedule_type LIKE 'interim:%%')"
+            params.append(message_ids)
             extra = ""
-            params = [message_ids]
             if bot_name is not None:
-                extra += " AND bot_name = %s"
+                extra += " AND ms.bot_name = %s"
                 params.append(bot_name)
             if topic_name is not None:
-                extra += " AND topic_name = %s"
+                extra += " AND ms.topic_name = %s"
                 params.append(topic_name)
             cursor.execute(
-                f"""SELECT message_id, interim_id
-                   FROM message_summarizations
-                   WHERE schedule_type = 'interim'
-                     AND interim_id IS NOT NULL
-                     AND message_id = ANY(%s){extra}""",
+                f"""SELECT ms.message_id, ms.interim_id
+                   FROM message_summarizations ms
+                   WHERE {stype_clause}
+                     AND ms.interim_id IS NOT NULL
+                     AND ms.message_id = ANY(%s){extra}""",
                 params
             )
             return {row['message_id']: row['interim_id'] for row in cursor.fetchall()}
@@ -467,7 +497,8 @@ class SummariesDB(Database):
             self._commit()
 
     def get_old_unsummarized_messages(self, before_dt) -> list:
-        """Return all messages older than before_dt that have no interim tracking record."""
+        """Return all messages older than before_dt that have no interim tracking record
+        in any schedule's interim chain ('interim' legacy or 'interim:{schedule_id}')."""
         try:
             cursor = self._get_cursor()
             cursor.execute(
@@ -476,7 +507,7 @@ class SummariesDB(Database):
                      AND m.bot_name IS NOT NULL
                      AND NOT EXISTS (
                          SELECT 1 FROM message_summarizations ms
-                         WHERE ms.message_id = m.id AND ms.schedule_type = 'interim'
+                         WHERE ms.message_id = m.id AND ms.schedule_type LIKE 'interim%%'
                      )""",
                 (before_dt,)
             )
@@ -490,17 +521,17 @@ class SummariesDB(Database):
                      summary_type: str, target_entity: str,
                      bot_name: str = None, topic_name: str = None,
                      message_ids: list = None, tokens_used: int = 0,
-                     thoughts: str = None) -> int:
+                     thoughts: str = None, schedule_id: int = None) -> int:
         try:
             """Save a generated summary and return its id."""
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id)
             )
             row = cursor.fetchone()
             return row['id']

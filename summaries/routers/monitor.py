@@ -137,7 +137,7 @@ def get_summary_composition(request: Request, id: int = Query(...)):
     try:
         cursor = db._get_cursor()
         allowed_bots = _get_allowed_bots(request)
-        cursor.execute("SELECT message_ids, bot_name, topic_name FROM summaries WHERE id = %s", (id,))
+        cursor.execute("SELECT message_ids, bot_name, topic_name, schedule_id FROM summaries WHERE id = %s", (id,))
         row = cursor.fetchone()
         if not row:
             return {'status': 'ok', 'interims': [], 'remaining_messages': []}
@@ -146,8 +146,9 @@ def get_summary_composition(request: Request, id: int = Query(...)):
         if not row['message_ids']:
             return {'status': 'ok', 'interims': [], 'remaining_messages': []}
         ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
-        summary_bot   = row['bot_name']
-        summary_topic = row['topic_name']
+        summary_bot      = row['bot_name']
+        summary_topic    = row['topic_name']
+        summary_sched_id = row['schedule_id']
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
     finally:
@@ -156,7 +157,8 @@ def get_summary_composition(request: Request, id: int = Query(...)):
     try:
         interim_id_map = db.get_interim_ids_for_messages(ids,
                                                           bot_name=summary_bot,
-                                                          topic_name=summary_topic)
+                                                          topic_name=summary_topic,
+                                                          schedule_id=summary_sched_id)
 
         seen: set = set()
         ordered_interim_ids: list = []
