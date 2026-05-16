@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, debounce, escapeHtml } from '../../lib/api';
+import { api, escapeHtml } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useAuth } from '../../auth/AuthContext';
@@ -37,12 +37,14 @@ export default function VideosPage() {
   // today; subsequent navigations honor whatever the URL says.
   const [filterStatus, setFilterStatus] = useUrlString('status', '');
   const [filterChannel, setFilterChannel] = useUrlString('ch', '');
+  const [filterKeyword, setFilterKeyword] = useUrlString('kw', '');
   const [filterSource, setFilterSource] = useUrlString('src', '');
   const [filterDateFrom, setFilterDateFrom] = useUrlString('from', '');
   const [filterDateTo, setFilterDateTo] = useUrlString('to', '');
   const filters = {
     status: filterStatus,
     channel: filterChannel,
+    keyword: filterKeyword,
     source: filterSource,
     dateFrom: filterDateFrom,
     dateTo: filterDateTo
@@ -52,12 +54,13 @@ export default function VideosPage() {
       const v = typeof next === 'function' ? next(filters) : next;
       setFilterStatus(v.status || '');
       setFilterChannel(v.channel || '');
+      setFilterKeyword(v.keyword || '');
       setFilterSource(v.source || '');
       setFilterDateFrom(v.dateFrom || '');
       setFilterDateTo(v.dateTo || '');
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterStatus, filterChannel, filterSource, filterDateFrom, filterDateTo]
+    [filterStatus, filterChannel, filterKeyword, filterSource, filterDateFrom, filterDateTo]
   );
 
   // Default the date range to today only on the very first visit (when no
@@ -79,7 +82,7 @@ export default function VideosPage() {
 
   // Reset page when filters change — uses a JSON-stringified key so we don't
   // depend on filters' object identity (rebuilt every render from URL state).
-  const filterKey = `${filterStatus}|${filterChannel}|${filterSource}|${filterDateFrom}|${filterDateTo}`;
+  const filterKey = `${filterStatus}|${filterChannel}|${filterKeyword}|${filterSource}|${filterDateFrom}|${filterDateTo}`;
   useEffect(() => {
     setPage(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,6 +95,7 @@ export default function VideosPage() {
     params.set('offset', String(offset));
     if (filters.status) params.set('status', filters.status);
     if (filters.channel) params.set('channel', filters.channel);
+    if (filters.keyword) params.set('keyword', filters.keyword);
     if (filters.source) params.set('source', filters.source);
     if (filters.dateFrom) params.set('date_from', filters.dateFrom);
     if (filters.dateTo) params.set('date_to', filters.dateTo);
@@ -112,7 +116,12 @@ export default function VideosPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const hasFilters =
-    filters.status || filters.channel || filters.source || filters.dateFrom || filters.dateTo;
+    filters.status ||
+    filters.channel ||
+    filters.keyword ||
+    filters.source ||
+    filters.dateFrom ||
+    filters.dateTo;
 
   // ── Mutations ────────────────────────────────────────────────
   const triggerProcess = useApiMutation('/api/youtube/queue/process', {
@@ -150,7 +159,14 @@ export default function VideosPage() {
   const processingCount = stats.processing || 0;
 
   function clearFilters() {
-    setFilters({ status: '', channel: '', source: '', dateFrom: '', dateTo: '' });
+    setFilters({
+      status: '',
+      channel: '',
+      keyword: '',
+      source: '',
+      dateFrom: '',
+      dateTo: ''
+    });
   }
 
   function setStatusFilter(status) {
@@ -344,22 +360,18 @@ function StatCard({ icon, label, value, active, onClick }) {
 // ─── Filter Bar ─────────────────────────────────────────────────────────────
 
 function FilterBar({ filters, onChange, hasFilters, onClear }) {
-  // Channel field is debounced — keep its draft locally
-  const [channelDraft, setChannelDraft] = useState(filters.channel);
-
-  // Keep draft in sync when external state changes (e.g. clearFilters)
-  useEffect(() => {
-    setChannelDraft(filters.channel);
-  }, [filters.channel]);
-
-  // Debounced handler propagates to parent state
-  const debouncedChange = useMemo(
-    () =>
-      debounce((v) => {
-        onChange((f) => ({ ...f, channel: v }));
-      }, 400),
-    [onChange]
-  );
+  // Channel + tracker (keyword) dropdowns are populated from the configured
+  // YouTube sources so the user picks rather than free-types.
+  const { data: channelsRes } = useQuery({
+    queryKey: ['yt-channels'],
+    queryFn: () => api('/api/youtube/channels')
+  });
+  const { data: keywordsRes } = useQuery({
+    queryKey: ['yt-keywords'],
+    queryFn: () => api('/api/youtube/keywords')
+  });
+  const channels = channelsRes?.status === 'ok' ? channelsRes.channels || [] : [];
+  const keywords = keywordsRes?.status === 'ok' ? keywordsRes.keywords || [] : [];
 
   return (
     <div className="dash-filter-bar">
@@ -397,18 +409,33 @@ function FilterBar({ filters, onChange, hasFilters, onClear }) {
       </div>
       <div className="dash-filter-group">
         <span className="dash-filter-label">📺 Channel</span>
-        <input
-          type="text"
-          className="input dash-filter-select"
-          style={{ width: 140 }}
-          placeholder="Filter…"
-          value={channelDraft}
-          onChange={(e) => {
-            const v = e.target.value;
-            setChannelDraft(v);
-            debouncedChange(v);
-          }}
-        />
+        <select
+          className="select dash-filter-select"
+          value={filters.channel}
+          onChange={(e) => onChange((f) => ({ ...f, channel: e.target.value }))}
+        >
+          <option value="">All Channels</option>
+          {channels.map((c) => (
+            <option key={c.channel_id} value={c.channel_id}>
+              {c.channel_name || c.channel_id}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="dash-filter-group">
+        <span className="dash-filter-label">🔍 Tracker</span>
+        <select
+          className="select dash-filter-select"
+          value={filters.keyword}
+          onChange={(e) => onChange((f) => ({ ...f, keyword: e.target.value }))}
+        >
+          <option value="">All Trackers</option>
+          {keywords.map((k) => (
+            <option key={k.id} value={String(k.id)}>
+              {k.keyword}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="dash-filter-group">
         <span className="dash-filter-label">🔧 Source</span>

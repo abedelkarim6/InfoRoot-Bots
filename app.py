@@ -103,6 +103,7 @@ init_keyword_search(youtube_data_api_key=_yt_cfg.get("data_api_key", ""))
 async def _yt_telegram_send(target: str, text: str):
     """Send a Telegram message using a temporary Telethon client (userbot session)."""
     from telethon import TelegramClient
+    from telethon import errors as tg_errors
     from telethon.sessions import StringSession
     tg_cfg = _cfg.get("telegram", {})
     # Prefer session stored in DB (set via Telegram setup page); fall back to config.yaml
@@ -132,9 +133,18 @@ async def _yt_telegram_send(target: str, text: str):
         for i, chunk in enumerate(chunks):
             try:
                 msg = await client.send_message(target, chunk, parse_mode='md')
-            except Exception as md_err:
-                # Markdown parse error — retry as plain text
-                logger.warning(f"[YT-TG] Markdown send failed ({md_err}), retrying as plain text")
+            except (tg_errors.RPCError, ValueError) as md_err:
+                # The message was NOT delivered — either Telegram's server
+                # rejected the request (RPCError, e.g. bad markdown entities)
+                # or Telethon's markdown parser failed client-side
+                # (ValueError). Both are safe to retry as plain text.
+                #
+                # Any OTHER exception (connection reset / timeout) is NOT
+                # caught here: the message may already have been delivered,
+                # and re-sending it is what duplicated summaries in the
+                # channel. Let it propagate so the worker logs a send failure
+                # instead of double-posting.
+                logger.warning(f"[YT-TG] Markdown send rejected ({md_err}), retrying as plain text")
                 msg = await client.send_message(target, chunk, parse_mode=None)
             if msg is None or not getattr(msg, 'id', None):
                 raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")

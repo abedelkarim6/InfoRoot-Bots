@@ -124,6 +124,7 @@ export default function Sidebar() {
             <span className="nav-section-label">Summaries</span>
             <NavItem to="/dashboard" icon="📊" label="Summaries Dashboard" />
             <NavItem to="/bots" icon="🤖" label="Summaries Bots" badge={Object.keys(bots).length} />
+            <NavItem to="/seos" icon="🔍" label="SEOs" />
             <NavItem to="/monitor" icon="📡" label="Schedules Monitor" />
           </>
         )}

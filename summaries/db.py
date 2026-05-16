@@ -760,9 +760,9 @@ class SummariesDB(Database):
 
     def get_recent_messages(self, limit: int = 200, offset: int = 0, allowed_bot_names: list = None,
                             topic: str = None, bot_name: str = None, days: int = None,
-                            source: str = None):
+                            source: str = None, search: str = None):
         try:
-            """Returns the most recent messages with optional filters for topic, bot, days, source."""
+            """Returns the most recent messages with optional filters for topic, bot, days, source, search."""
             cursor = self._get_cursor()
             clauses = ["collection_name IS NOT NULL AND collection_name != ''"]
             params = []
@@ -779,6 +779,9 @@ class SummariesDB(Database):
             if source:
                 clauses.append("channel_username ILIKE %s")
                 params.append(f"%{source}%")
+            if search:
+                clauses.append("text ILIKE %s")
+                params.append(f"%{search}%")
             if days:
                 clauses.append("timestamp >= NOW() - (%s * INTERVAL '1 day')")
                 params.append(days)

@@ -620,6 +620,24 @@ class YouTubeDB:
                     r[k] = r[k].isoformat()
         return rows
 
+    def claim_queue_item(self, queue_id: int) -> bool:
+        """Atomically transition a queue item pending → processing.
+
+        Returns True only if this caller won the claim; False if another run
+        already claimed it (or it is no longer 'pending'). Prevents the same
+        video being summarized — and sent to Telegram — twice when the
+        scheduler and a manual trigger process overlapping batches.
+        """
+        cursor = self._get_cursor()
+        cursor.execute("""
+            UPDATE yt_video_queue
+            SET status = 'processing', updated_at = NOW()
+            WHERE id = %s AND status = 'pending'
+        """, (queue_id,))
+        won = cursor.rowcount == 1
+        self.connection.commit()
+        return won
+
     def update_queue_status(self, queue_id: int, status: str, error_log: str = None):
         cursor = self._get_cursor()
         processed = datetime.utcnow() if status in ('done', 'failed') else None
@@ -933,7 +951,8 @@ class YouTubeDB:
 
     def get_videos_unified(self, limit: int = 50, offset: int = 0,
                            status_filter: str = None, channel_filter: str = None,
-                           source_filter: str = None, date_from: str = None,
+                           source_filter: str = None, keyword_filter: str = None,
+                           date_from: str = None,
                            date_to: str = None,
                            yt_ch_ids=None, kw_ids=None, user_id=None):
         """Return queue items joined with their summaries in one unified view with pagination.
@@ -958,8 +977,14 @@ class YouTubeDB:
             clauses.append("q.status = %s")
             params.append(status_filter)
         if channel_filter:
-            clauses.append("COALESCE(ch.channel_name, s.channel_name, sv.channel_id) ILIKE %s")
-            params.append(f"%{channel_filter}%")
+            clauses.append("q.source_channel_id = %s")
+            params.append(channel_filter)
+        if keyword_filter:
+            try:
+                clauses.append("q.source_keyword_id = %s")
+                params.append(int(keyword_filter))
+            except (TypeError, ValueError):
+                clauses.pop()
         if source_filter:
             clauses.append("s.transcript_source = %s")
             params.append(source_filter)

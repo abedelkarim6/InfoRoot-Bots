@@ -654,6 +654,7 @@ async def get_videos_unified(
     status: str = Query(None),
     channel: str = Query(None),
     source: str = Query(None),
+    keyword: str = Query(None),
     limit: int = Query(50),
     offset: int = Query(0),
     date_from: str = Query(None),
@@ -665,6 +666,7 @@ async def get_videos_unified(
     result = db.get_videos_unified(
         limit=limit, offset=offset, status_filter=status,
         channel_filter=channel, source_filter=source,
+        keyword_filter=keyword,
         date_from=date_from, date_to=date_to,
         yt_ch_ids=yt_ch_ids, kw_ids=kw_ids, user_id=uid,
     )

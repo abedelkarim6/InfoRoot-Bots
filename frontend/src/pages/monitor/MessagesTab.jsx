@@ -3,10 +3,12 @@
  * (default) or flat-table view (toggle).
  *
  * Pagination: load 50 at a time, accumulating into a single in-component list
- * so filters apply across all loaded pages.
+ * so filters apply across all loaded pages. The text search is server-side —
+ * it spans the whole DB and the matches are re-paginated, instead of just
+ * hiding non-matching rows on the pages already loaded.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, debounce, fmtLBN } from '../../lib/api';
 import MultiSelect from './MultiSelect';
 import ExportColumnsModal from './ExportColumnsModal';
@@ -38,20 +40,36 @@ export default function MessagesTab() {
 
   const debouncedSetSearch = useMemo(() => debounce((v) => setSearch(v), 220), []);
 
-  // Initial load + 30s silent refresh.
+  // Keep the latest search term reachable from the interval callback (which is
+  // set up once and would otherwise close over a stale value).
+  const searchRef = useRef(search);
+  searchRef.current = search;
+
+  // Reload page 1 from the server whenever the (debounced) search term changes.
+  // Search is server-side so it scans the whole DB and the matches re-paginate.
   useEffect(() => {
     loadPage(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  // 30s silent refresh of the first page.
+  useEffect(() => {
     const id = setInterval(() => silentRefresh(), 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function messagesUrl(off) {
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(off) });
+    const q = searchRef.current.trim();
+    if (q) params.set('search', q);
+    return `/api/monitor/messages?${params.toString()}`;
+  }
+
   async function loadPage(append) {
     setLoading(true);
     setError(null);
-    const res = await api(
-      `/api/monitor/messages?limit=${PAGE_SIZE}&offset=${append ? offset : 0}`
-    );
+    const res = await api(messagesUrl(append ? offset : 0));
     if (res.status !== 'ok') {
       setError(res.message || 'Unknown error');
       setLoading(false);
@@ -66,7 +84,7 @@ export default function MessagesTab() {
   }
 
   async function silentRefresh() {
-    const res = await api(`/api/monitor/messages?limit=${PAGE_SIZE}&offset=0`);
+    const res = await api(messagesUrl(0));
     if (res?.status !== 'ok') return;
     const newMsgs = res.messages || [];
     if (!newMsgs.length) return;
@@ -116,12 +134,12 @@ export default function MessagesTab() {
           .map((t) => t.trim())
           .some((t) => selTopics.has(t))
       );
-    const q = search.trim().toLowerCase();
-    if (q) out = out.filter((m) => (m.preview || '').toLowerCase().includes(q));
+    // Text search is applied server-side (see loadPage) so it spans the whole
+    // DB — not just loaded pages — and is not re-filtered here.
     if (dateFrom) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) >= dateFrom);
     if (dateTo) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) <= dateTo);
     return out;
-  }, [messages, selColls, selChannels, selTopics, search, dateFrom, dateTo]);
+  }, [messages, selColls, selChannels, selTopics, dateFrom, dateTo]);
 
   return (
     <>
@@ -196,7 +214,11 @@ export default function MessagesTab() {
 
       {!error && !loading && !filtered.length && (
         <p className="mon-empty">
-          {messages.length ? 'No messages match the filters.' : 'No messages in DB yet.'}
+          {search.trim()
+            ? 'No messages match your search.'
+            : messages.length
+            ? 'No messages match the filters.'
+            : 'No messages in DB yet.'}
         </p>
       )}
 

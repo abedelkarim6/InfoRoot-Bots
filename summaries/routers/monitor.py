@@ -188,11 +188,13 @@ def get_monitor_messages(
     request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    search: str = Query(default=None),
 ):
     db = get_db()
     try:
         allowed_bots = _get_allowed_bots(request)
-        messages = db.get_recent_messages(limit=limit, offset=offset, allowed_bot_names=allowed_bots)
+        messages = db.get_recent_messages(
+            limit=limit, offset=offset, allowed_bot_names=allowed_bots, search=search)
 
         id_to_username = {}
         for msg in messages:

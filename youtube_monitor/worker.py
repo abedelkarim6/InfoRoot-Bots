@@ -170,6 +170,14 @@ async def process_queue_item(queue_item: dict) -> bool:
     video_id = queue_item['video_id']
     telegram_target = queue_item.get('telegram_target')
 
+    # Atomically claim the item (pending → processing). If another run — e.g.
+    # the scheduler and a manual /queue/process trigger picking overlapping
+    # batches — already claimed it, bail out. Without this the same video gets
+    # summarized and sent to Telegram twice.
+    if not db.claim_queue_item(queue_id):
+        logger.info(f"[YT-WORKER] Skipping {video_id} — queue item {queue_id} already claimed by another run")
+        return False
+
     # Check if the source channel/keyword is still active before spending API credits
     source_channel_id = queue_item.get('source_channel_id')
     source_keyword_id = queue_item.get('source_keyword_id')
@@ -188,9 +196,6 @@ async def process_queue_item(queue_item: dict) -> bool:
 
     # Per-item prompt from the queue row, fall back to global config prompt
     user_prompt = queue_item.get('prompt') or _get_global_prompt()
-
-    # Mark as processing
-    db.update_queue_status(queue_id, 'processing')
 
     # Fetch metadata for all tiers
     meta = _fetch_video_metadata(video_id)

@@ -296,9 +296,11 @@ function HistoryRow({ run, onShowComposition, onViewSummary, onViewError }) {
 // ────────────────────────────────────────────────────────────────────────────
 
 function CompositionPanel({ summaryId, onBack }) {
+  const { showAlert } = useDialogs();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showExport, setShowExport] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -323,6 +325,17 @@ function CompositionPanel({ summaryId, onBack }) {
   const remaining = data?.remaining_messages || [];
   const lastIdx = interims.length - 1;
 
+  // Flatten every source message (per interim + remaining) for CSV export.
+  const exportRows = useMemo(() => {
+    const out = [];
+    interims.forEach((interim, idx) => {
+      const num = interim.interim_number ?? idx + 1;
+      (interim.messages || []).forEach((m) => out.push({ ...m, interimLabel: `Interim #${num}` }));
+    });
+    remaining.forEach((m) => out.push({ ...m, interimLabel: 'Remaining' }));
+    return out;
+  }, [interims, remaining]);
+
   return (
     <div className="sum-msg-page">
       <div className="sum-msg-page-header">
@@ -330,6 +343,15 @@ function CompositionPanel({ summaryId, onBack }) {
           ‹ Back to History
         </button>
         <h3 style={{ margin: 0, fontSize: 15 }}>Summary Composition</h3>
+        <button
+          className="btn btn-secondary btn-sm"
+          style={{ marginLeft: 'auto' }}
+          onClick={() => setShowExport(true)}
+          disabled={!exportRows.length}
+          title="Export all source messages of this summary to CSV"
+        >
+          ⬇ Export
+        </button>
       </div>
 
       {loading && <p className="mon-empty">Loading…</p>}
@@ -370,6 +392,18 @@ function CompositionPanel({ summaryId, onBack }) {
             </div>
           )}
         </>
+      )}
+
+      {showExport && (
+        <ExportColumnsModal
+          tabName="comp_messages"
+          onClose={() => setShowExport(false)}
+          onConfirm={(keys) => {
+            const res = downloadCsv('comp_messages', exportRows, keys);
+            setShowExport(false);
+            if (!res.ok) showAlert(res.reason, { title: 'Export', icon: '⚠️' });
+          }}
+        />
       )}
     </div>
   );

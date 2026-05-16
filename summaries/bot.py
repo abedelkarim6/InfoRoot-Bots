@@ -1355,21 +1355,35 @@ async def run_bot():
                 await client.run_until_disconnected()
                 logger.warning("[RECONNECT] Disconnected from Telegram. Reconnecting in 15s...")
 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
+                # NOTE: asyncio.CancelledError is a BaseException (not Exception)
+                # in Python 3.8+, so it is NOT caught here — it propagates out of
+                # the loop, runs the `finally` cleanup, and bubbles up to the
+                # supervisor so `stop_bot_task()` can actually stop the task.
                 logger.error(f"[RECONNECT] Connection error: {e}. Retrying in 30s...")
 
             await asyncio.sleep(15)
 
+    except asyncio.CancelledError:
+        logger.info("[MAIN] Bot run cancelled — shutting down cleanly.")
+        raise  # propagate so the supervisor task truly stops
     except KeyboardInterrupt:
         pass
     finally:
-        # app.py owns the db lifecycle — do NOT call db.close() here
+        # app.py owns the db lifecycle — do NOT call db.close() here.
+        # Each step is guarded so one failure can't block the others — a
+        # leftover non-daemon thread or hung await here is what orphans the
+        # process and keeps port 8000 held after Ctrl+C.
+        if watcher_task is not None and not watcher_task.done():
+            watcher_task.cancel()
         if client:
             try:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=10)
             except Exception:
                 pass
         if SCHEDULER and SCHEDULER.running:
-            SCHEDULER.shutdown()
+            try:
+                # wait=False — never block shutdown on an in-flight job.
+                SCHEDULER.shutdown(wait=False)
+            except Exception:
+                pass
