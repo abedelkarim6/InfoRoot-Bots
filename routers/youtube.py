@@ -18,6 +18,7 @@ from youtube_monitor.websub import (
     process_websub_notification,
     verify_signature as _verify_websub_sig,
     _get_websub_secret as _websub_secret,
+    _get_default_targets,
 )
 from youtube_monitor.keyword_search import run_keyword_search, run_all_keyword_searches
 from youtube_monitor.worker import process_pending_queue, process_queue_item
@@ -532,8 +533,11 @@ async def delete_blocked_keyword(request: Request):
 async def add_manual_video(request: Request):
     """Manually add a YouTube video URL to be summarized."""
     data = await request.json()
-    url = data.get("url", "").strip()
-    telegram_target = data.get("telegram_target", "").strip() or None
+    url = (data.get("url") or "").strip()
+    # The frontend sends telegram_target: null when "Use default targets" is
+    # selected — `.get(key, "")` returns None (key present), not the default,
+    # so `.strip()` on None must be guarded.
+    telegram_target = (data.get("telegram_target") or "").strip() or None
     # Manual video may pass either a free-form prompt (back-compat) or a key
     # into the global youtube prompts.
     raw_prompt = (data.get("prompt") or "").strip()
@@ -552,14 +556,26 @@ async def add_manual_video(request: Request):
         return {"status": "error", "message": "Could not extract video ID from URL"}
 
     db = get_yt_db()
-    reason = db.is_video_already_queued_or_summarized(video_id)
+    # Pass `prompt` so the "already summarized" check is scoped to
+    # (video_id, prompt_hash) — re-adding the same video with a different
+    # prompt is allowed. A 'failed'/errored queue row never blocks (only
+    # 'pending'/'processing'/summarized do).
+    reason = db.is_video_already_queued_or_summarized(video_id, prompt=prompt)
     if reason:
         return {"status": "error", "message": f"Video {video_id} is {reason}"}
 
     added_by = get_request_user_id(request)  # None for admin (legacy token)
     db.mark_video_seen(video_id, title=None, channel_id=None, source='manual')
-    queue_id = db.enqueue_video(video_id, telegram_target=telegram_target, prompt=prompt,
-                                added_by_user_id=added_by)
+
+    # No explicit target → fall back to the global default targets, enqueuing
+    # one queue row per target (same behavior as websub/keyword monitoring).
+    targets = [telegram_target] if telegram_target else (_get_default_targets() or [None])
+    queue_id = None
+    for tgt in targets:
+        qid = db.enqueue_video(video_id, telegram_target=tgt, prompt=prompt,
+                               added_by_user_id=added_by)
+        if qid and queue_id is None:
+            queue_id = qid
 
     return {"status": "ok", "video_id": video_id, "queue_id": queue_id}
 
