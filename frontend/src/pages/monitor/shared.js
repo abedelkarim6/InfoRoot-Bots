@@ -98,18 +98,22 @@ export function scheduleFiresPerDay(sch) {
   if (type === 'interval_hourly') {
     const hours = sch.hours ?? 1;
     if (sch.end_hour != null && sch.end_minute != null) {
-      const startH = sch.start_hour ?? 0;
-      const windowH = sch.end_hour - startH;
-      return Math.max(1, Math.floor(windowH / hours));
+      // Inclusive endpoint: the fire AT end time still passes the backend
+      // time-window gate, so the count is intervals + 1 (matches
+      // getUpcomingFires24h and the bot's actual fire series).
+      const startMins = (sch.start_hour ?? 0) * 60 + (sch.start_minute ?? 0);
+      const endMins = sch.end_hour * 60 + sch.end_minute;
+      return Math.max(1, Math.floor((endMins - startMins) / (hours * 60)) + 1);
     }
     return Math.max(1, Math.floor(24 / hours));
   }
   if (type === 'interval_minutes') {
     const mins = sch.minutes ?? 1;
     if (sch.end_hour != null && sch.end_minute != null) {
+      // Inclusive endpoint — see interval_hourly note above.
       const startMins = (sch.start_hour ?? 0) * 60 + (sch.start_minute ?? 0);
       const endMins = sch.end_hour * 60 + sch.end_minute;
-      return Math.max(1, Math.floor((endMins - startMins) / mins));
+      return Math.max(1, Math.floor((endMins - startMins) / mins) + 1);
     }
     return Math.max(1, Math.floor(1440 / mins));
   }
