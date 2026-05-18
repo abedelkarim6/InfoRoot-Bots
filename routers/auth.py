@@ -19,6 +19,7 @@ import logging
 
 from utils.helpers import load_config
 from utils.database import get_db
+from routers.keycloak_auth import verify_keycloak_jwt, is_keycloak_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,13 @@ def validate_token(token: str, user_agent: str = "", ip_address: str = "") -> bo
     """Validate token expiry; log (but do not reject) UA/subnet drift for anomaly detection."""
     if not token:
         return False
+    # Keycloak JWT path — three dot-separated parts. If a token looks like a JWT
+    # and Keycloak is configured, verify against the realm's JWKS. On first
+    # successful verify we synthesize a native-token entry so all downstream
+    # helpers (get_token_user_id, is_admin_request, audit log) keep working.
+    if token not in _tokens and token.count(".") == 2 and is_keycloak_enabled():
+        if _adopt_keycloak_token(token, user_agent, ip_address):
+            return True
     expiry = _tokens.get(token)
     if expiry is None:
         return False
@@ -83,6 +91,67 @@ def validate_token(token: str, user_agent: str = "", ip_address: str = "") -> bo
                 f"[AUTH] Token {token[:8]}… used with drifted binding: "
                 f"ua {binding['ua']}→{new_ua}, subnet {binding['ip_subnet']}→{new_subnet}"
             )
+    return True
+
+
+def _adopt_keycloak_token(token: str, user_agent: str = "", ip_address: str = "") -> bool:
+    """Verify a Keycloak JWT and adopt it into the native-token tables so the rest
+    of the auth system (get_token_user_id, is_admin_request, audit, etc.) works
+    unchanged. Returns True on success.
+
+    User mapping: `preferred_username` in the JWT must match a DB user. If no
+    DB user exists yet, one is auto-created with role='user' so per-user
+    features (bot inheritance, AI usage) have a row to attach to. The
+    config-admin username is mapped to role='admin'.
+    """
+    claims = verify_keycloak_jwt(token)
+    if not claims:
+        return False
+    exp = claims.get("exp")
+    if not exp or exp <= time.time():
+        return False
+    username = (
+        claims.get("preferred_username")
+        or claims.get("email")
+        or claims.get("sub")
+    )
+    if not username:
+        return False
+
+    db = get_db()
+    user_id: Optional[int] = None
+    try:
+        user = db.get_user_by_username(username)
+        if user:
+            user_id = user["id"]
+        else:
+            # Auto-provision so per-user features have a row. Role defaults to
+            # 'user'; the config-admin gets 'admin'. password_hash is set to a
+            # never-matching sentinel — these users can only sign in via Keycloak.
+            cfg_admin = (load_config().get("admin", {}) or {}).get("username", "")
+            role = "admin" if username == cfg_admin else "user"
+            user_id = db.create_user(username, password_hash="!keycloak!")
+            if role == "admin":
+                try:
+                    db._get_cursor().execute(
+                        "UPDATE users SET role = %s WHERE id = %s", (role, user_id)
+                    )
+                    db._commit()
+                except Exception as e:
+                    logger.warning(f"[KEYCLOAK] failed to set admin role for {username}: {e}")
+            logger.info(f"[KEYCLOAK] auto-provisioned DB user '{username}' (id={user_id}, role={role})")
+    except Exception as e:
+        logger.warning(f"[KEYCLOAK] DB user lookup/create failed for '{username}': {e}")
+        return False
+
+    # Adopt with the JWT's own expiry so we don't outlive Keycloak's session.
+    _tokens[token] = float(exp)
+    _token_users[token] = user_id
+    _token_bindings[token] = {
+        "ua": _ua_hash(user_agent),
+        "ip_subnet": _ip_subnet(ip_address),
+    }
+    _cleanup_expired()
     return True
 
 

@@ -48,8 +48,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 # System routers (auth, user management — unchanged location)
-from routers import auth, accounts, system, chatbot
+from routers import auth, accounts, system
 from routers.auth import validate_token, hash_password, get_request_user_id, is_admin_request
+
+# Chatbot router pulls in agno / google-genai which currently break on
+# Python 3.14 due to a private-module path mismatch inside agno. Make the
+# import optional so the rest of the app (auth, summaries, YouTube) can
+# still boot; the chat endpoints just go missing until the deps are fixed.
+try:
+    from routers import chatbot
+    _chatbot_available = True
+except Exception as _chatbot_import_err:
+    logger.warning(f"[CHATBOT] disabled — import failed: {_chatbot_import_err}")
+    chatbot = None
+    _chatbot_available = False
 # Summaries feature routers (moved to summaries/routers/)
 from summaries.routers import bot, telegram, prompts, rules, collection, topic, monitor, recycle_bin
 from summaries.routers import default_schedules as default_schedules_router
@@ -270,25 +282,30 @@ async def lifespan(app):
     yt_scheduler.add_job(_purge_recycle_bin, IntervalTrigger(hours=12),
                          id='recycle_bin_purge', replace_existing=True)
 
-    # Chatbot suggestion refresh — runs once at startup, then every hour
-    from chatbot.service import refresh_suggestions as _refresh_suggestions
+    # Chatbot suggestion refresh — runs once at startup, then every hour.
+    # Skipped when the chatbot import failed at module load (agno / google-genai
+    # dependency issue); the rest of the scheduler still runs.
+    _refresh_suggestions_job = None
+    if _chatbot_available:
+        from chatbot.service import refresh_suggestions as _refresh_suggestions
 
-    async def _refresh_suggestions_job():
-        try:
-            await _refresh_suggestions(db)
-            logger.info("[CHATBOT] Suggestions refreshed")
-        except Exception as e:
-            logger.warning(f"[CHATBOT] Suggestion refresh failed: {e}")
+        async def _refresh_suggestions_job():
+            try:
+                await _refresh_suggestions(db)
+                logger.info("[CHATBOT] Suggestions refreshed")
+            except Exception as e:
+                logger.warning(f"[CHATBOT] Suggestion refresh failed: {e}")
 
-    yt_scheduler.add_job(_refresh_suggestions_job, IntervalTrigger(hours=1),
-                         id='chatbot_suggestions', replace_existing=True)
+        yt_scheduler.add_job(_refresh_suggestions_job, IntervalTrigger(hours=1),
+                             id='chatbot_suggestions', replace_existing=True)
 
     yt_scheduler.start()
     logger.info("[YT-SCHEDULER] YouTube auto-processing scheduler started")
 
     # Warm the suggestion cache immediately at startup (non-blocking)
     import asyncio
-    asyncio.create_task(_refresh_suggestions_job())
+    if _refresh_suggestions_job is not None:
+        asyncio.create_task(_refresh_suggestions_job())
 
     yield
 
@@ -347,13 +364,16 @@ async def security_headers(request: Request, call_next):
 # Mounted last so /api/* and /youtube/websub/* routers always win.
 # ---------------------------------------------------------------------------
 _REACT_DIR = os.path.join(os.path.dirname(__file__), "static_react")
-if not os.path.isdir(_REACT_DIR):
-    raise RuntimeError(
-        f"[REACT] React build missing at {_REACT_DIR}. "
-        "Run `cd frontend && npm run build` before starting the server."
+_REACT_BUILD_PRESENT = os.path.isdir(_REACT_DIR)
+if _REACT_BUILD_PRESENT:
+    app.mount("/static_react", StaticFiles(directory=_REACT_DIR), name="static_react")
+    logger.info(f"[REACT] Serving React build from {_REACT_DIR}")
+else:
+    logger.warning(
+        f"[REACT] No build at {_REACT_DIR} — running in API-only mode. "
+        "Start the Vite dev server (`cd frontend && npm run dev`) to use the UI, "
+        "or `npm run build` to produce a bundle for FastAPI to serve."
     )
-app.mount("/static_react", StaticFiles(directory=_REACT_DIR), name="static_react")
-logger.info(f"[REACT] Serving React build from {_REACT_DIR}")
 
 # Include routers
 app.include_router(system.router, prefix="/api", tags=["system"])
@@ -369,8 +389,9 @@ app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(recycle_bin.router, prefix="/api", tags=["recycle_bin"])
 app.include_router(accounts.router, prefix="/api", tags=["accounts"])
 
-# Agent chatbot
-app.include_router(chatbot.router, prefix="/api", tags=["chatbot"])
+# Agent chatbot — only when the optional import above succeeded
+if _chatbot_available:
+    app.include_router(chatbot.router, prefix="/api", tags=["chatbot"])
 
 # YouTube monitor routes (API endpoints under /api/youtube/*)
 app.include_router(youtube_router, prefix="/api", tags=["youtube"])
@@ -440,17 +461,17 @@ def get_config(request: Request):
 # ---------------------------------------------------------------------------
 _REACT_INDEX = os.path.join(_REACT_DIR, "index.html")
 
+if _REACT_BUILD_PRESENT:
 
-@app.get("/")
-def react_root():
-    return FileResponse(_REACT_INDEX)
+    @app.get("/")
+    def react_root():
+        return FileResponse(_REACT_INDEX)
 
-
-@app.get("/{full_path:path}")
-def react_spa(full_path: str):
-    # Defensive: never swallow API or websub paths if a router happened to
-    # mismatch (shouldn't, since those routes are registered above and
-    # FastAPI matches in order, but cheap to belt-and-brace).
-    if full_path.startswith("api/") or full_path.startswith("youtube/websub"):
-        return JSONResponse({"detail": "Not Found"}, status_code=404)
-    return FileResponse(_REACT_INDEX)
+    @app.get("/{full_path:path}")
+    def react_spa(full_path: str):
+        # Defensive: never swallow API or websub paths if a router happened to
+        # mismatch (shouldn't, since those routes are registered above and
+        # FastAPI matches in order, but cheap to belt-and-brace).
+        if full_path.startswith("api/") or full_path.startswith("youtube/websub"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return FileResponse(_REACT_INDEX)
