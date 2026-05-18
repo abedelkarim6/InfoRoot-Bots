@@ -184,7 +184,13 @@ class YouTubeDB:
         _ensure_col('yt_channels', 'min_view_count', 'INTEGER', '0')
         _ensure_col('yt_channels', 'language', 'TEXT')
         _ensure_col('yt_channels', 'upload_type', 'TEXT')
+        # WebSub callback URL used at subscribe time — lets the background
+        # renewal job re-subscribe without depending on config.yaml.
+        _ensure_col('yt_channels', 'websub_callback_url', 'TEXT')
         _ensure_col('yt_summaries', 'prompt_hash', 'TEXT')
+        # Gemini 2.5 extended-thinking reasoning trace, captured when the
+        # YouTube thinking toggle is on (yt_gemini_thinking setting).
+        _ensure_col('yt_summaries', 'thoughts', 'TEXT')
 
         # Reference into the global prompts table (type='youtube'). NULL means
         # "use the first available YouTube prompt" — see prompts.resolve_yt_prompt.
@@ -292,7 +298,29 @@ class YouTubeDB:
         cursor.execute("DELETE FROM yt_channels WHERE channel_id = %s", (channel_id,))
         self.connection.commit()
 
-    def update_websub_status(self, channel_id: str, subscribed_at, expires_at):
+    def update_websub_status(self, channel_id: str, subscribed_at, expires_at,
+                             callback_url=None):
+        """Persist WebSub subscription state. When `callback_url` is given it is
+        also stored so the renewal job can re-subscribe without config.yaml."""
+        cursor = self._get_cursor()
+        if callback_url:
+            cursor.execute("""
+                UPDATE yt_channels
+                SET websub_subscribed_at = %s, websub_expires_at = %s,
+                    websub_callback_url = %s
+                WHERE channel_id = %s
+            """, (subscribed_at, expires_at, callback_url, channel_id))
+        else:
+            cursor.execute("""
+                UPDATE yt_channels
+                SET websub_subscribed_at = %s, websub_expires_at = %s
+                WHERE channel_id = %s
+            """, (subscribed_at, expires_at, channel_id))
+        self.connection.commit()
+
+    def update_websub_expiry(self, channel_id: str, subscribed_at, expires_at):
+        """Update only the subscription timestamps — used by the hub
+        verification callback once the REAL granted lease is known."""
         cursor = self._get_cursor()
         cursor.execute("""
             UPDATE yt_channels
@@ -1048,17 +1076,18 @@ class YouTubeDB:
                      published_at, transcript_source: str, summary_text: str,
                      telegram_target: str = None,
                      duration_secs: int = None, input_tokens: int = None, output_tokens: int = None,
-                     prompt: str = None):
+                     prompt: str = None, thoughts: str = None):
         prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
-                 telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash, thoughts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
-              telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash))
+              telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
+              thoughts or None))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']

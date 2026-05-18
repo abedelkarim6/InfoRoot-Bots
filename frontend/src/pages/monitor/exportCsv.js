@@ -73,11 +73,12 @@ export const EXPORT_COLS = {
   ],
   comp_messages: [
     { key: 'interim', label: 'Interim' },
+    { key: 'kind', label: 'Row Type' },
     { key: 'time', label: 'Time' },
     { key: 'channel', label: 'Channel' },
     { key: 'topics', label: 'Topics' },
     { key: 'keywords', label: 'Keywords' },
-    { key: 'preview', label: 'Message' }
+    { key: 'preview', label: 'Message / Interim Output' }
   ]
 };
 
@@ -230,6 +231,8 @@ export function buildRowValues(tabName, row, colDefs) {
       switch (c.key) {
         case 'interim':
           return row.interimLabel || '';
+        case 'kind':
+          return row.kind || 'Message';
         case 'time':
           return row.timestamp ? fmtLBN(row.timestamp) : '';
         case 'channel':

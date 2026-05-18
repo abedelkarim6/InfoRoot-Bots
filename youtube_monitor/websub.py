@@ -63,7 +63,9 @@ def verify_signature(body: bytes, signature_header: str) -> bool:
 WEBSUB_HUB = "https://pubsubhubbub.appspot.com/subscribe"
 YOUTUBE_TOPIC_BASE = "https://www.youtube.com/xml/feeds/videos.xml?channel_id="
 
-# Subscription lease is ~10 days; we renew every 9
+# Lease we REQUEST from the hub. YouTube's hub ignores this and grants its own
+# (~5 days) — the real value is read back in handle_verification. Renewal runs
+# every 4 days (see renew_websub.py / app.py) to stay under the real lease.
 LEASE_SECONDS = 9 * 24 * 3600
 
 
@@ -90,10 +92,15 @@ async def subscribe_channel(channel_id: str, callback_url: str, secret: str = No
     if resp.status_code in (202, 204):
         db = get_yt_db()
         now = datetime.utcnow()
+        # NOTE: expires_at here is provisional — it assumes the requested
+        # LEASE_SECONDS. The hub's verification callback overwrites it with the
+        # REAL granted lease (see handle_verification). The callback_url is
+        # persisted so the renewal job can re-subscribe without config.yaml.
         db.update_websub_status(
             channel_id,
             subscribed_at=now,
             expires_at=now + timedelta(seconds=LEASE_SECONDS),
+            callback_url=callback_url,
         )
         logger.info(f"[WEBSUB] Subscription request accepted for {channel_id}")
         return True
@@ -116,12 +123,47 @@ async def unsubscribe_channel(channel_id: str, callback_url: str):
     return resp.status_code in (202, 204)
 
 
+def _channel_id_from_topic(topic: str) -> str:
+    """Extract the YouTube channel_id from a topic feed URL."""
+    if not topic:
+        return ""
+    m = re.search(r"channel_id=([^&]+)", topic)
+    return m.group(1) if m else ""
+
+
 def handle_verification(mode: str, topic: str, challenge: str, lease_seconds: str = None):
     """
     Handle the WebSub hub verification GET request.
-    Returns the challenge string to confirm subscription.
+
+    The hub IGNORES the lease we request in subscribe_channel and grants its
+    own (YouTube's hub typically gives ~5 days). It reports the REAL granted
+    lease here in `hub.lease_seconds` — so this is the only place the true
+    expiry is known. We persist it to the DB so renewal scheduling is accurate.
+
+    Returns the challenge string to confirm the subscription.
     """
-    logger.info(f"[WEBSUB] Verification: mode={mode}, topic={topic}")
+    logger.info(f"[WEBSUB] Verification: mode={mode}, topic={topic}, "
+                f"lease_seconds={lease_seconds}")
+
+    if mode == "subscribe" and lease_seconds:
+        channel_id = _channel_id_from_topic(topic)
+        try:
+            lease = int(lease_seconds)
+        except (TypeError, ValueError):
+            lease = 0
+        if channel_id and lease > 0:
+            try:
+                now = datetime.utcnow()
+                real_expiry = now + timedelta(seconds=lease)
+                get_yt_db().update_websub_expiry(
+                    channel_id, subscribed_at=now, expires_at=real_expiry)
+                logger.info(
+                    f"[WEBSUB] Real lease for {channel_id}: {lease}s "
+                    f"(~{lease / 86400:.1f}d) — expires {real_expiry.isoformat()}")
+            except Exception as e:
+                logger.error(f"[WEBSUB] Failed to store real lease for "
+                              f"{channel_id}: {e}")
+
     return challenge
 
 

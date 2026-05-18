@@ -650,6 +650,41 @@ async def save_fixed_prefix(request: Request):
     return {"status": "ok"}
 
 
+# ── Gemini Thinking (YouTube) ────────────────────────────────────
+# Independent of the summaries feature's `gemini_thinking` setting so YouTube
+# summarization can use Gemini 2.5 extended reasoning on its own.
+
+@router.get("/gemini-thinking")
+async def get_yt_gemini_thinking(request: Request):
+    """Return the current YouTube Gemini thinking toggle. Admin only."""
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    from utils.database import get_db
+    val = get_db().get_setting("yt_gemini_thinking") or {}
+    return {
+        "status": "ok",
+        "enabled": bool(val.get("enabled", False)),
+        # -1 = dynamic (model decides), 0 = off, positive = max thinking tokens.
+        "budget": int(val.get("budget", -1)),
+    }
+
+
+@router.post("/gemini-thinking")
+async def set_yt_gemini_thinking(request: Request):
+    """Update the YouTube Gemini thinking toggle. Admin only."""
+    if not is_admin_request(request):
+        return {"status": "error", "message": "Admin only"}
+    data = await request.json()
+    enabled = bool(data.get("enabled", False))
+    try:
+        budget = int(data.get("budget", -1))
+    except (TypeError, ValueError):
+        budget = -1
+    from utils.database import get_db
+    get_db().set_setting("yt_gemini_thinking", {"enabled": enabled, "budget": budget})
+    return {"status": "ok", "enabled": enabled, "budget": budget}
+
+
 @router.post("/default-targets/save")
 async def save_default_targets(request: Request):
     from utils.helpers import load_config, save_config

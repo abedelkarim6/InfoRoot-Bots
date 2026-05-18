@@ -216,6 +216,8 @@ export default function VideosPage() {
         <DefaultTargetsCard />
       </div>
 
+      {isAdmin && <YtThinkingCard />}
+
       {/* Daily budget */}
       <div className="yt-daily-budget">
         <div className="yt-budget-row">
@@ -454,6 +456,130 @@ function FilterBar({ filters, onChange, hasFilters, onClear }) {
           ✕ Clear
         </button>
       )}
+    </div>
+  );
+}
+
+// ─── YouTube Thinking Toggle ────────────────────────────────────────────────
+//
+// Gemini 2.5 extended reasoning for YouTube summarization. Independent of the
+// summaries feature's toggle — backed by the `yt_gemini_thinking` setting.
+// When ON, the reasoning trace is captured and stored on each yt_summaries row.
+
+function YtThinkingCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['yt-gemini-thinking'],
+    queryFn: () => api('/api/youtube/gemini-thinking')
+  });
+
+  // Optimistic local state — flips immediately, synced from server data.
+  const [localEnabled, setLocalEnabled] = useState(false);
+  const [localBudget, setLocalBudget] = useState(-1);
+  useEffect(() => {
+    if (data?.status === 'ok') {
+      setLocalEnabled(!!data.enabled);
+      setLocalBudget(Number.isFinite(data.budget) ? data.budget : -1);
+    }
+  }, [data?.status, data?.enabled, data?.budget]);
+
+  const update = useApiMutation('/api/youtube/gemini-thinking', {
+    invalidate: ['yt-gemini-thinking'],
+    successMsg: 'Thinking setting updated',
+    errorMsg: 'Failed to update thinking setting',
+    onError: () => {
+      if (data?.status === 'ok') {
+        setLocalEnabled(!!data.enabled);
+        setLocalBudget(Number.isFinite(data.budget) ? data.budget : -1);
+      }
+    }
+  });
+
+  const enabled = localEnabled;
+  const budget = localBudget;
+
+  function setEnabled(next) {
+    setLocalEnabled(next);
+    update.mutate({ enabled: next, budget });
+  }
+  function setBudget(next) {
+    setLocalBudget(next);
+    update.mutate({ enabled, budget: next });
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: '1.25rem' }}>
+      <div className="card-header" style={{ gap: '.75rem' }}>
+        <span style={{ fontSize: '1.1rem' }}>🧠</span>
+        <strong>Extended Thinking</strong>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+          Gemini 2.5 reasoning mode
+        </span>
+      </div>
+      <div className="card-body" style={{ padding: '1rem 1.25rem' }}>
+        <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-muted)' }}>
+          When on, Gemini may spend extra tokens internally reasoning before producing
+          each video summary. Improves quality for complex prompts but increases token
+          usage. The reasoning trace is saved with the summary (👁️ View summary).
+        </p>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={isLoading || update.isPending}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
+            <span className="toggle-slider" />
+          </label>
+          <strong style={{ fontSize: 13 }}>
+            {enabled ? 'Thinking enabled' : 'Thinking disabled'}
+          </strong>
+        </div>
+
+        {enabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Budget:</span>
+            <select
+              className="select"
+              value={budget === -1 ? 'dynamic' : budget === 0 ? 'off' : 'custom'}
+              disabled={update.isPending}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'dynamic') setBudget(-1);
+                else if (v === 'off') setBudget(0);
+                else setBudget(Math.max(1, budget > 0 ? budget : 1024));
+              }}
+              style={{ width: 200 }}
+            >
+              <option value="dynamic">Dynamic (model decides)</option>
+              <option value="off">Off (no thinking tokens)</option>
+              <option value="custom">Custom cap</option>
+            </select>
+            {budget > 0 && (
+              <input
+                type="number"
+                className="input"
+                min="1"
+                step="128"
+                value={budget}
+                disabled={update.isPending}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n > 0) setBudget(n);
+                }}
+                style={{ width: 130 }}
+                title="Max thinking tokens per call"
+              />
+            )}
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {budget === -1 && '−1 = model self-regulates how much to think.'}
+              {budget === 0 && '0 = thinking is suppressed (same as toggle off).'}
+              {budget > 0 && 'Hard cap on thinking tokens per request.'}
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1015,6 +1141,13 @@ function VideoRow({ item, isAdmin }) {
     const res = await api(`/api/youtube/summaries/${item.summary_id}`);
     if (res?.status !== 'ok') return showNotification('Failed to load summary.', 'error');
     const s = res.summary;
+    const thoughtsBlock = s.thoughts
+      ? `
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer;font-weight:600;">🧠 Thinking trace</summary>
+        <div class="yt-summary-text" style="white-space:pre-wrap;margin-top:8px;max-height:40vh;overflow-y:auto;color:var(--text-muted);">${escapeHtml(s.thoughts)}</div>
+      </details>`
+      : '';
     const html = `
       <div class="yt-summary-meta" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <span>📺 ${escapeHtml(s.channel_name || '—')}</span>
@@ -1023,6 +1156,7 @@ function VideoRow({ item, isAdmin }) {
         <span>🔗 <a href="https://youtube.com/watch?v=${escapeHtml(s.video_id)}" target="_blank" rel="noopener">${escapeHtml(s.video_id)}</a></span>
       </div>
       <div class="yt-summary-text" style="white-space:pre-wrap;">${escapeHtml(s.summary_text || '')}</div>
+      ${thoughtsBlock}
     `;
     showAlert(html, { title: s.title || 'Summary', icon: '👁️' });
   }

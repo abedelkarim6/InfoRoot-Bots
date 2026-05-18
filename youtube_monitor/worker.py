@@ -62,12 +62,69 @@ def _extract_tokens(response) -> tuple[int, int]:
     return 0, 0
 
 
-_YT_LABELS = types.GenerateContentConfig(labels={"service": "youtube"})
+def _resolve_yt_thinking_config():
+    """Read the admin's `yt_gemini_thinking` setting and translate it into a
+    `types.ThinkingConfig` — or `None` when thinking is disabled.
+
+    Separate from the summaries feature's `gemini_thinking` so YouTube can be
+    toggled independently. When enabled we set `include_thoughts=True` so the
+    response carries the reasoning trace, which is stored on the summary row.
+    """
+    try:
+        from utils.database import get_db
+        cfg = get_db().get_setting("yt_gemini_thinking") or {}
+        if not cfg.get("enabled"):
+            return None
+        budget = cfg.get("budget", -1)
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            budget = -1
+        return types.ThinkingConfig(thinking_budget=budget, include_thoughts=True)
+    except Exception as e:
+        logger.warning(f"[YT-WORKER] thinking config lookup failed: {e}")
+        return None
 
 
-def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int]:
+def _split_response_parts(response) -> tuple[str, str]:
+    """Split a generate_content response into (answer_text, thoughts_text).
+
+    With `include_thoughts=True`, Vertex returns multiple parts and marks
+    reasoning parts with `part.thought == True`. Models/SDKs that don't
+    surface thoughts return a single part — `thoughts_text` is then empty.
+    """
+    answer_chunks, thought_chunks = [], []
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            parts = getattr(getattr(candidates[0], "content", None), "parts", None) or []
+            for p in parts:
+                txt = getattr(p, "text", None)
+                if not txt:
+                    continue
+                (thought_chunks if getattr(p, "thought", False) else answer_chunks).append(txt)
+    except Exception:
+        pass
+    answer = "".join(answer_chunks).strip()
+    thoughts = "\n\n".join(thought_chunks).strip()
+    if not answer:
+        answer = (getattr(response, "text", "") or "").strip()
+    return answer, thoughts
+
+
+def _yt_gen_config() -> types.GenerateContentConfig:
+    """Build the Gemini config for a YouTube summarization call — service
+    labels plus the thinking config when the YouTube thinking toggle is on."""
+    kwargs = {"labels": {"service": "youtube"}}
+    thinking_cfg = _resolve_yt_thinking_config()
+    if thinking_cfg is not None:
+        kwargs["thinking_config"] = thinking_cfg
+    return types.GenerateContentConfig(**kwargs)
+
+
+def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int, str]:
     """Strategy 1: Send YouTube URL directly to Vertex AI Gemini for native video understanding.
-    Returns (summary_text, input_tokens, output_tokens)."""
+    Returns (summary_text, input_tokens, output_tokens, thoughts)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
@@ -78,15 +135,16 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
                 types.Part(text=prompt),
             ]
         ),
-        config=_YT_LABELS,
+        config=_yt_gen_config(),
     )
     inp, out = _extract_tokens(response)
-    return response.text.strip(), inp, out
+    answer, thoughts = _split_response_parts(response)
+    return answer, inp, out, thoughts
 
 
-def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int]:
+def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int, str]:
     """Strategy 2: Fetch transcript via youtube-transcript-api, send text to Gemini.
-    Returns (summary_text, input_tokens, output_tokens)."""
+    Returns (summary_text, input_tokens, output_tokens, thoughts)."""
     from youtube_transcript_api import YouTubeTranscriptApi
 
     ytt_api = YouTubeTranscriptApi()
@@ -113,10 +171,11 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int
     response = _gemini_client.models.generate_content(
         model='gemini-2.5-flash',
         contents={'text': final_prompt},
-        config=_YT_LABELS,
+        config=_yt_gen_config(),
     )
     inp, out = _extract_tokens(response)
-    return response.text.strip(), inp, out
+    answer, thoughts = _split_response_parts(response)
+    return answer, inp, out, thoughts
 
 
 # Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
@@ -246,6 +305,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     transcript_source = None
     inp_tokens = 0
     out_tokens = 0
+    thoughts = ''  # Gemini reasoning trace — populated when thinking is enabled
 
     # Strategy 1: Gemini native video (URL) — best quality, sees/hears actual content
     # Guard: skip if daily 8-hour video quota is exhausted
@@ -262,7 +322,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     try:
         if not _video_allowed:
             raise RuntimeError("Daily video-hour quota reached")
-        summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
+        summary_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
             loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
         )
@@ -286,7 +346,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Strategy 2: Transcript text → Gemini (fallback — no video quota used)
     if not summary_text:
         try:
-            summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
+            summary_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
                 loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript),
                 timeout=_ITEM_TIMEOUT_SECS,
             )
@@ -326,6 +386,7 @@ async def process_queue_item(queue_item: dict) -> bool:
         input_tokens=inp_tokens or None,
         output_tokens=out_tokens or None,
         prompt=user_prompt,
+        thoughts=thoughts or None,
     )
 
     # Send via Telegram if target is set and sender is available

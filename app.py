@@ -283,6 +283,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 async def lifespan(app):
     """Auto-start the bot on server startup, start YouTube scheduler, stop on shutdown."""
     import asyncio
+    from datetime import datetime, timedelta
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
     from youtube_monitor.worker import process_pending_queue
@@ -301,12 +302,23 @@ async def lifespan(app):
     yt_scheduler.add_job(run_due_keyword_searches, IntervalTrigger(minutes=5),
                          id='yt_keyword_search', replace_existing=True)
 
-    # Renew WebSub subscriptions every 9 days
+    # Renew WebSub subscriptions every 4 days. YouTube's hub grants ~5-day
+    # leases, so renewal must run well inside that window. Scheduled
+    # unconditionally — each channel re-subscribes to the callback URL it was
+    # subscribed with (persisted in yt_channels.websub_callback_url); the
+    # config callback_url is only a fallback for channels with none stored.
     cb_url = _yt_cfg.get("callback_url", "").rstrip("/")
-    if cb_url:
-        full_cb = f"{cb_url}/youtube/websub/callback"
-        yt_scheduler.add_job(renew_all_subscriptions, IntervalTrigger(days=9),
-                             args=[full_cb], id='yt_websub_renew', replace_existing=True)
+    fallback_cb = f"{cb_url}/youtube/websub/callback" if cb_url else ""
+    if not fallback_cb:
+        logger.warning("[WEBSUB] youtube.callback_url is not set in config.yaml "
+                        "— renewal relies on per-channel stored callback URLs; "
+                        "channels subscribed before this feature won't renew.")
+    # First run ~3 min after startup so already-expired subscriptions recover
+    # without waiting a full 4-day cycle, then every 4 days thereafter.
+    yt_scheduler.add_job(renew_all_subscriptions, IntervalTrigger(days=4),
+                         args=[fallback_cb], id='yt_websub_renew',
+                         replace_existing=True,
+                         next_run_time=datetime.now() + timedelta(minutes=3))
 
     # Weekly queue cleanup
     yt_scheduler.add_job(run_cleanup, IntervalTrigger(weeks=1),

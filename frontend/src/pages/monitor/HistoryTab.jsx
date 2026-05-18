@@ -325,14 +325,25 @@ function CompositionPanel({ summaryId, onBack }) {
   const remaining = data?.remaining_messages || [];
   const lastIdx = interims.length - 1;
 
-  // Flatten every source message (per interim + remaining) for CSV export.
+  // Flatten every interim (rolling output + source messages) and remaining
+  // messages for CSV export. Each interim emits one "Output" row carrying its
+  // rolling summary text, followed by its "Message" source rows.
   const exportRows = useMemo(() => {
     const out = [];
     interims.forEach((interim, idx) => {
       const num = interim.interim_number ?? idx + 1;
-      (interim.messages || []).forEach((m) => out.push({ ...m, interimLabel: `Interim #${num}` }));
+      const label = `Interim #${num}`;
+      out.push({
+        interimLabel: label,
+        kind: 'Output',
+        timestamp: interim.created_at || null,
+        preview: interim.summary_text || ''
+      });
+      (interim.messages || []).forEach((m) =>
+        out.push({ ...m, interimLabel: label, kind: 'Message' })
+      );
     });
-    remaining.forEach((m) => out.push({ ...m, interimLabel: 'Remaining' }));
+    remaining.forEach((m) => out.push({ ...m, interimLabel: 'Remaining', kind: 'Message' }));
     return out;
   }, [interims, remaining]);
 
