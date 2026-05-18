@@ -1,18 +1,17 @@
-// Token storage key — must match the legacy key so an existing logged-in
-// session in localStorage continues to work after the React migration.
-const TOKEN_KEY = 'auth_token';
+import { getAccessToken, ensureFreshToken } from './keycloak';
 
+// Token accessors kept on the same exported surface so existing callers
+// (AuthContext, etc.) keep compiling. Tokens are now sourced from the
+// Keycloak singleton — localStorage holds only the refresh/id tokens that
+// keycloak-js manages, not the access token.
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
+  return getAccessToken();
 }
 
-export function setToken(token) {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
-}
+// setToken / clearToken are no-ops in the Keycloak world — kept so existing
+// imports don't break. Login/logout go through the Keycloak helpers instead.
+export function setToken() {}
+export function clearToken() {}
 
 // Hook for the AuthContext to handle 401s globally (logout + redirect).
 let _onUnauthorized = null;
@@ -25,10 +24,10 @@ export function setUnauthorizedHandler(fn) {
  *   - GET when body is undefined, POST otherwise
  *   - JSON in / JSON out
  *   - Always returns a parsed body (even on errors) shaped like { status, ... }
- *   - Auto-attaches Bearer token for /api/* paths
- *   - On 401, triggers the global unauthorized handler (which clears the token
- *     and routes to /login), then returns a never-resolving promise so callers
- *     don't continue with a logged-out state.
+ *   - Refreshes the Keycloak access token before each /api/* call (silent if
+ *     still valid) and attaches it as a Bearer header.
+ *   - On 401, triggers the global unauthorized handler (which logs out via
+ *     Keycloak and routes to /login), then returns a never-resolving promise.
  */
 export async function api(path, body) {
   const options = {
@@ -38,7 +37,8 @@ export async function api(path, body) {
   if (body) options.body = JSON.stringify(body);
 
   if (path.startsWith('/api/')) {
-    const token = getToken();
+    await ensureFreshToken(30);
+    const token = getAccessToken();
     if (token) options.headers.Authorization = `Bearer ${token}`;
   }
 
