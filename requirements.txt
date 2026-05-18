@@ -11,6 +11,7 @@ agno
 # psycopg2
 psycopg2-binary # for ubuntu users, if you face issues with psycopg2, try installing this package instead
 sqlalchemy
+PyJWT[crypto]>=2.8.0
 
 annotated-doc==0.0.4
 annotated-types==0.7.0
