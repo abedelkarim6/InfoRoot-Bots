@@ -30,7 +30,7 @@ export default function MessagesTab() {
   const [showExport, setShowExport] = useState(false);
 
   // Filters — URL-backed
-  const [selColls, setSelColls] = useUrlSet('coll');
+  const [selBots, setSelBots] = useUrlSet('bot');
   const [selChannels, setSelChannels] = useUrlSet('ch');
   const [selTopics, setSelTopics] = useUrlSet('topic');
   const [search, setSearch] = useUrlString('q', '');
@@ -97,8 +97,8 @@ export default function MessagesTab() {
   }
 
   // Dynamic dropdown values from loaded messages.
-  const allColls = useMemo(
-    () => uniqueSorted(messages.map((m) => m.collection).filter(Boolean)),
+  const allBots = useMemo(
+    () => uniqueSorted(messages.map((m) => m.bot_name).filter(Boolean)),
     [messages]
   );
   const allChannels = useMemo(
@@ -125,7 +125,7 @@ export default function MessagesTab() {
 
   const filtered = useMemo(() => {
     let out = messages;
-    if (selColls.size) out = out.filter((m) => selColls.has(m.collection || ''));
+    if (selBots.size) out = out.filter((m) => selBots.has(m.bot_name || ''));
     if (selChannels.size) out = out.filter((m) => selChannels.has(`@${m.channel_username}`));
     if (selTopics.size)
       out = out.filter((m) =>
@@ -139,16 +139,16 @@ export default function MessagesTab() {
     if (dateFrom) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) >= dateFrom);
     if (dateTo) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) <= dateTo);
     return out;
-  }, [messages, selColls, selChannels, selTopics, dateFrom, dateTo]);
+  }, [messages, selBots, selChannels, selTopics, dateFrom, dateTo]);
 
   return (
     <>
       <div className="mon-filter-bar">
         <MultiSelect
-          label="All Collections"
-          values={allColls}
-          selected={selColls}
-          onChange={setSelColls}
+          label="All Bots"
+          values={allBots}
+          selected={selBots}
+          onChange={setSelBots}
         />
         <MultiSelect
           label="All Channels"
@@ -316,8 +316,8 @@ function FlatTable({ messages }) {
                   <td>
                     <Tags value={m.keywords_found} />
                   </td>
-                  <td className="mon-ellipsis" title={m.preview || ''}>
-                    {m.preview || ''}
+                  <td title={m.preview || ''}>
+                    <div className="mon-ellipsis">{m.preview || ''}</div>
                   </td>
                 </tr>
               );
@@ -378,8 +378,8 @@ function GroupedView({ messages }) {
                         <td>
                           <Tags value={m.keywords_found} />
                         </td>
-                        <td className="mon-ellipsis" title={m.preview || ''}>
-                          {m.preview || ''}
+                        <td title={m.preview || ''}>
+                          <div className="mon-ellipsis">{m.preview || ''}</div>
                         </td>
                       </tr>
                     ))}

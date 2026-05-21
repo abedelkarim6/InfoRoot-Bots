@@ -178,21 +178,55 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int
     return answer, inp, out, thoughts
 
 
-# Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
+# Per-strategy processing timeout (seconds). Gemini video can be slow but
+# rarely > 3 min. Two strategies run sequentially in the worst case so the
+# outer scheduler budget below has to accommodate both.
 _ITEM_TIMEOUT_SECS = 180
+# Outer budget for one full queue item: both strategies + Telegram send +
+# safety buffer. The previous value (_ITEM_TIMEOUT_SECS + 30 = 210s) was
+# tighter than the inner budgets and could cancel mid-delivery, producing
+# duplicate sends after stuck-row reset.
+_OUTER_ITEM_TIMEOUT_SECS = 2 * _ITEM_TIMEOUT_SECS + 60  # 420s
 
 
 
 def _fetch_video_metadata(video_id: str) -> dict:
-    """Fetch video snippet from YouTube Data API for metadata fallback."""
+    """Fetch video snippet from YouTube Data API for metadata fallback.
+
+    Returns {} on quota exhaustion or any other API error — metadata is
+    optional, both summarization strategies (Gemini video URL and transcript
+    fetch) can run without it. Without this guard, a `quotaExceeded` 403
+    aborts the whole queue item and is reported as a generic failure even
+    though the actual summarization paths don't use the Data API quota."""
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
     from youtube_monitor import yt_memory_cache
     api_key = _youtube_data_api_key
     if not api_key:
         logger.warning("[YT-WORKER] youtube.data_api_key not set — cannot fetch metadata")
         return {}
     youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
-    resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
+    try:
+        resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
+    except HttpError as e:
+        # quotaExceeded is the common case; surface it specifically so logs
+        # are obvious. Any other HttpError also degrades to "no metadata".
+        reason = ""
+        try:
+            reason = (e.error_details or [{}])[0].get('reason', '')
+        except Exception:
+            pass
+        if e.resp.status == 403 and 'quota' in (reason or str(e)).lower():
+            logger.warning(f"[YT-WORKER] YouTube Data API quota exceeded — "
+                            f"proceeding without metadata for {video_id}")
+        else:
+            logger.warning(f"[YT-WORKER] YouTube Data API error for {video_id} "
+                            f"({e.resp.status} {reason}) — proceeding without metadata")
+        return {}
+    except Exception as e:
+        logger.warning(f"[YT-WORKER] Unexpected metadata fetch error for {video_id}: {e} "
+                        f"— proceeding without metadata")
+        return {}
     items = resp.get('items', [])
     if items:
         item = items[0]
@@ -306,6 +340,8 @@ async def process_queue_item(queue_item: dict) -> bool:
     inp_tokens = 0
     out_tokens = 0
     thoughts = ''  # Gemini reasoning trace — populated when thinking is enabled
+    strat1_err = None  # Gemini native-video reason-for-failure
+    strat2_err = None  # Transcript reason-for-failure
 
     # Strategy 1: Gemini native video (URL) — best quality, sees/hears actual content
     # Guard: skip if daily 8-hour video quota is exhausted
@@ -321,7 +357,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     loop = asyncio.get_event_loop()
     try:
         if not _video_allowed:
-            raise RuntimeError("Daily video-hour quota reached")
+            raise RuntimeError("Daily Gemini video-hour quota reached")
         summary_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
             loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
@@ -335,8 +371,10 @@ async def process_queue_item(queue_item: dict) -> bool:
         except Exception:
             pass
     except asyncio.TimeoutError:
+        strat1_err = f"timed out after {_ITEM_TIMEOUT_SECS}s"
         logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
     except Exception as e:
+        strat1_err = str(e) or e.__class__.__name__
         delay = _is_rate_limited(e)
         if delay:
             logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
@@ -358,18 +396,26 @@ async def process_queue_item(queue_item: dict) -> bool:
             except Exception:
                 pass
         except asyncio.TimeoutError:
+            strat2_err = f"timed out after {_ITEM_TIMEOUT_SECS}s"
             logger.warning(f"[YT-WORKER] Strategy 2 (transcript) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
         except Exception as e:
+            strat2_err = str(e) or e.__class__.__name__
             delay = _is_rate_limited(e)
             if delay:
                 logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
                 await asyncio.sleep(delay)
             logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id}: {e}")
 
-    # All strategies exhausted — mark as failed so user can retry
+    # All strategies exhausted — mark as failed so user can retry. Keep both
+    # per-strategy reasons in the error_log so the UI can show what actually
+    # broke instead of the generic "both failed" string.
     if not summary_text:
-        reason = 'No transcript available (gemini video and transcript API both failed)'
-        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}: {reason}")
+        reason = (
+            "Both summarization strategies failed.\n"
+            f"  - Gemini video: {strat1_err or 'unknown'}\n"
+            f"  - Transcript:   {strat2_err or 'unknown'}"
+        )
+        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}")
         db.update_queue_status(queue_id, 'failed', error_log=reason)
         return False
 
@@ -389,19 +435,43 @@ async def process_queue_item(queue_item: dict) -> bool:
         thoughts=thoughts or None,
     )
 
-    # Send via Telegram if target is set and sender is available
-    if telegram_target and _telegram_send_fn:
-        try:
-            await _telegram_send_fn(telegram_target, summary_text)
-            db.mark_telegram_sent(summary_id)
-            logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
-        except Exception as e:
-            logger.error(f"[YT-WORKER] Telegram send FAILED for {video_id} → {telegram_target}: {e}", exc_info=True)
-    elif telegram_target and not _telegram_send_fn:
-        logger.warning(f"[YT-WORKER] No Telegram send function registered — skipping send for {video_id}")
+    # Telegram delivery — wrapped in asyncio.shield() so a cancellation of
+    # process_pending_queue's outer wait_for cannot split the send from the
+    # post-send DB updates. Without the shield, cancellation between
+    # _telegram_send_fn() succeeding and update_queue_status('done') leaves
+    # the row stuck 'processing' → reset_stuck_processing_items flips it to
+    # 'pending' → next tick re-processes and re-sends. That was the duplicate
+    # outcome bug.
+    #
+    # was_telegram_sent() is a second defence: if a previous (potentially
+    # stuck-then-retried) run already delivered this (video, target), don't
+    # send again — just flip statuses and move on.
+    async def _deliver_and_close():
+        if telegram_target and _telegram_send_fn:
+            if db.was_telegram_sent(video_id, telegram_target):
+                logger.info(f"[YT-WORKER] Skipping Telegram send for {video_id} → "
+                            f"{telegram_target}: already delivered to this target "
+                            f"(idempotency check)")
+                db.mark_telegram_sent(summary_id)
+            else:
+                try:
+                    await _telegram_send_fn(telegram_target, summary_text)
+                    db.mark_telegram_sent(summary_id)
+                    logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
+                except Exception as e:
+                    logger.error(f"[YT-WORKER] Telegram send FAILED for {video_id} → "
+                                  f"{telegram_target}: {e}", exc_info=True)
+        elif telegram_target and not _telegram_send_fn:
+            logger.warning(f"[YT-WORKER] No Telegram send function registered — "
+                            f"skipping send for {video_id}")
+        db.update_queue_status(queue_id, 'done')
 
-    # Mark done
-    db.update_queue_status(queue_id, 'done')
+    try:
+        await asyncio.shield(_deliver_and_close())
+    except asyncio.CancelledError:
+        logger.warning(f"[YT-WORKER] Outer cancellation arrived while delivering "
+                        f"{video_id}; shielded delivery is finishing in the background")
+        raise
     return True
 
 
@@ -429,12 +499,12 @@ async def process_pending_queue():
             db.update_queue_status(item['id'], 'failed', error_log='Max attempts reached')
             continue
         try:
-            success = await asyncio.wait_for(process_queue_item(item), timeout=_ITEM_TIMEOUT_SECS + 30)
+            success = await asyncio.wait_for(process_queue_item(item), timeout=_OUTER_ITEM_TIMEOUT_SECS)
             if success:
                 processed += 1
         except asyncio.TimeoutError:
             logger.error(f"[YT-WORKER] Item {item['video_id']} timed out in scheduler")
-            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_ITEM_TIMEOUT_SECS + 30}s')
+            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_OUTER_ITEM_TIMEOUT_SECS}s')
         except Exception as e:
             logger.error(f"[YT-WORKER] Unhandled error processing {item['video_id']}: {e}")
             db.update_queue_status(item['id'], 'failed', error_log=str(e))

@@ -6,6 +6,7 @@ for YouTube channel monitoring.
 import logging
 import hashlib
 import hmac
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 

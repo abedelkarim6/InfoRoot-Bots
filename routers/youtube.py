@@ -746,11 +746,16 @@ async def retry_queue_item(request: Request):
 async def _run_queue_item_bg(queue_id: int, item: dict):
     """Background wrapper: enforces a per-item timeout and writes a final
     status row even if process_queue_item itself crashes."""
+    # Must accommodate both summarization strategies (180s each) + Telegram
+    # send. Matches the scheduler's outer budget in worker._OUTER_ITEM_TIMEOUT_SECS.
+    from youtube_monitor.worker import _OUTER_ITEM_TIMEOUT_SECS
     try:
-        await asyncio.wait_for(process_queue_item(item), timeout=200)
+        await asyncio.wait_for(process_queue_item(item), timeout=_OUTER_ITEM_TIMEOUT_SECS)
     except asyncio.TimeoutError:
         try:
-            get_yt_db().update_queue_status(queue_id, 'failed', error_log='Processing timed out (200s)')
+            get_yt_db().update_queue_status(
+                queue_id, 'failed',
+                error_log=f'Processing timed out ({_OUTER_ITEM_TIMEOUT_SECS}s)')
         except Exception as e:
             logger.error(f"[YT-PROCESS-ONE-BG] timeout-update failed for {queue_id}: {e}")
     except Exception as e:

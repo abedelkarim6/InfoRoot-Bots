@@ -155,7 +155,9 @@ export default function SchedulesTab({ data, isLoading }) {
         <ScheduleTimeline
           fires={fires}
           nowMs={nowMs}
-          onShowPending={(p) => setPendingKey(`${p.botName}::${p.topicName}::${p.schedType}`)}
+          onShowPending={(p) =>
+            setPendingKey(`${p.botName}::${p.topicName}::${p.schedType}`, { history: 'push' })
+          }
         />
       )}
 

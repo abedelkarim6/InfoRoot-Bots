@@ -1097,6 +1097,20 @@ class YouTubeDB:
         cursor.execute("UPDATE yt_summaries SET telegram_sent = TRUE WHERE id = %s", (summary_id,))
         self.connection.commit()
 
+    def was_telegram_sent(self, video_id: str, telegram_target: str) -> bool:
+        """Idempotency check — has this (video, target) pair already been
+        Telegram-delivered? Used by the worker to avoid re-sending when a
+        previously-stuck queue row gets reprocessed."""
+        if not video_id or not telegram_target:
+            return False
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT 1 FROM yt_summaries
+            WHERE video_id = %s AND telegram_target = %s AND telegram_sent = TRUE
+            LIMIT 1
+        """, (video_id, str(telegram_target)))
+        return cursor.fetchone() is not None
+
     def get_summaries(self, limit: int = 100, channel_name: str = None,
                       transcript_source: str = None, telegram_sent: str = None,
                       date_from: str = None, date_to: str = None,

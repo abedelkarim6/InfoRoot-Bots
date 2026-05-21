@@ -7,12 +7,24 @@
  *   - the browser back button moves between views inside a page
  *   - URLs are shareable / bookmarkable
  *
- * All updates use `{ replace: true }` so typing in a filter doesn't spam
- * history entries — only the *current* state lives in the URL.
+ * Setters default to `{ replace: true }` so typing in a filter doesn't spam
+ * history entries. Pass `{ history: 'push' }` to the setter for transitions
+ * the user should be able to undo with the browser back button — opening a
+ * drill-down panel, switching tabs, etc.
+ *
+ *   setSummaryId(2161, { history: 'push' }); // back closes the drill-down
+ *   setSearch(value);                         // filter typing — silent replace
  */
 
 import { useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+
+// Resolve the {replace} flag passed to react-router's setSearchParams from
+// the optional second arg on every hook setter. Default is replace so
+// filter/search inputs don't pollute history.
+function _shouldReplace(opts) {
+  return (opts && opts.history === 'push') ? false : true;
+}
 
 /**
  * String-valued URL param.
@@ -28,7 +40,7 @@ export function useUrlString(key, defaultValue = '') {
   const value = raw == null ? defaultValue : raw;
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const v = typeof next === 'function' ? next(params.get(key) ?? defaultValue) : next;
       if (v == null || v === '' || v === defaultValue) {
@@ -36,7 +48,7 @@ export function useUrlString(key, defaultValue = '') {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -53,7 +65,7 @@ export function useUrlBool(key) {
   const value = searchParams.get(key) === '1';
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const v = typeof next === 'function' ? next(params.get(key) === '1') : next;
       if (v) {
@@ -61,7 +73,7 @@ export function useUrlBool(key) {
       } else {
         params.delete(key);
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );
@@ -87,7 +99,7 @@ export function useUrlSet(key) {
   );
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const prev = new Set(
         (params.get(key) || '').split(',').filter(Boolean)
@@ -99,7 +111,7 @@ export function useUrlSet(key) {
       } else {
         params.set(key, arr.join(','));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );
@@ -118,7 +130,7 @@ export function useUrlInt(key, defaultValue = 0) {
   const value = Number.isFinite(parsed) ? parsed : defaultValue;
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const prevRaw = params.get(key);
       const prev = prevRaw == null ? defaultValue : (parseInt(prevRaw, 10) || defaultValue);
@@ -128,7 +140,7 @@ export function useUrlInt(key, defaultValue = 0) {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -155,14 +167,14 @@ export function useUrlJson(key) {
   }, [raw]);
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       if (next == null) {
         params.delete(key);
       } else {
         params.set(key, encodeURIComponent(JSON.stringify(next)));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );

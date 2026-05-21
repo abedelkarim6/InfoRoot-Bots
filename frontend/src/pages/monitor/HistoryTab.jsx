@@ -197,7 +197,7 @@ export default function HistoryTab() {
                 <HistoryRow
                   key={r.id ?? i}
                   run={r}
-                  onShowComposition={(id) => setSummaryId(id)}
+                  onShowComposition={(id) => setSummaryId(id, { history: 'push' })}
                   onViewSummary={viewSummary}
                   onViewError={viewError}
                 />

@@ -78,7 +78,9 @@ export default function MonitorPage() {
   });
 
   function setTab(t) {
-    setSearchParams({ tab: t }, { replace: true });
+    // Push so browser back navigates between tabs. The initial URL backfill
+    // above still uses replace — that's a URL-cleanup, not a user navigation.
+    setSearchParams({ tab: t });
   }
 
   const data = monitor.data?.status === 'ok' ? monitor.data : null;

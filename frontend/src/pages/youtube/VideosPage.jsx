@@ -27,6 +27,43 @@ import { estimateCost, timeAgo, todayISODate } from './shared';
 
 const PAGE_SIZE = 50;
 
+// Map known YouTube worker error patterns to short, human-readable labels.
+// Returns { label, icon } when matched, or null to fall back to the raw text.
+function friendlyYtError(err) {
+  if (!err) return null;
+  const s = String(err);
+  const low = s.toLowerCase();
+  if (low.includes('quotaexceeded') || (low.includes('quota') && low.includes('exceed')))
+    return { icon: '📊', label: 'YouTube Data API daily quota exceeded' };
+  if (low.includes('gemini video-hour quota') || low.includes('video-hour quota'))
+    return { icon: '⏱️', label: 'Daily Gemini video-hour quota reached' };
+  if (low.includes('scheduler timeout') || low.includes('processing timed out'))
+    return { icon: '⏳', label: 'Processing timed out — try Retry' };
+  if (low.includes('both summarization strategies failed'))
+    return { icon: '🚫', label: 'Both summarization strategies failed (see details below)' };
+  if (low.includes('no transcript available'))
+    return { icon: '🚫', label: 'No transcript available and Gemini video failed' };
+  if (low.includes('429') || low.includes('resource_exhausted'))
+    return { icon: '🐢', label: 'Gemini rate-limited (429)' };
+  if (low.includes('source channel inactive'))
+    return { icon: '⏸️', label: 'Skipped — source channel is inactive' };
+  if (low.includes('source keyword inactive'))
+    return { icon: '⏸️', label: 'Skipped — source keyword is inactive' };
+  if (low.includes('max attempts reached'))
+    return { icon: '🔁', label: 'Max retry attempts reached' };
+  if (low.includes('reset from stuck processing state'))
+    return { icon: '♻️', label: 'Recovered from stuck processing — will retry' };
+  if (low.includes('video too short'))
+    return { icon: '📏', label: 'Skipped — video shorter than channel minimum' };
+  if (low.includes('video too long'))
+    return { icon: '📏', label: 'Skipped — video longer than channel maximum' };
+  if (low.includes('not enough views'))
+    return { icon: '👁️', label: 'Skipped — below channel minimum view count' };
+  if (low.includes('cannot find any entity'))
+    return { icon: '📮', label: 'Telegram target not reachable from this account' };
+  return null;
+}
+
 export default function VideosPage() {
   const { isAdmin } = useAuth();
   const qc = useQueryClient();
@@ -193,9 +230,6 @@ export default function VideosPage() {
           />
           Auto-refresh
         </label>
-        <button className="btn btn-danger btn-sm" onClick={clearAllConfirm}>
-          🗑️ Clear All
-        </button>
         <button
           className="btn btn-secondary"
           onClick={() => triggerProcess.mutate({})}
@@ -208,6 +242,9 @@ export default function VideosPage() {
           onClick={() => qc.invalidateQueries({ queryKey: ['yt-videos'] })}
         >
           🔄 Refresh
+        </button>
+        <button className="btn btn-danger" onClick={clearAllConfirm}>
+          🗑️ Clear All
         </button>
       </PageHeader>
 
@@ -1165,14 +1202,24 @@ function VideoRow({ item, isAdmin }) {
     const res = await api(`/api/youtube/queue/${item.id}`);
     if (res?.status !== 'ok') return showNotification('Failed to load details.', 'error');
     const it = res.item;
+    const friendly = friendlyYtError(it.error_log);
+    const friendlyBlock = friendly
+      ? `<div style="margin-bottom:10px;padding:8px 12px;border-left:3px solid var(--error);background:rgba(239,68,68,0.08);border-radius:4px;font-weight:600;">
+           ${friendly.icon} ${escapeHtml(friendly.label)}
+         </div>`
+      : '';
     const html = `
       <div class="yt-summary-meta" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <span>📊 ${escapeHtml(it.status)} (${it.attempts} attempts)</span>
         <span>🔗 <a href="https://youtube.com/watch?v=${escapeHtml(it.video_id)}" target="_blank" rel="noopener">${escapeHtml(it.video_id)}</a></span>
       </div>
-      <div><strong>Error:</strong>
-        <div class="yt-summary-text" style="max-height:40vh;color:var(--error);white-space:pre-wrap;">${escapeHtml(it.error_log || 'No error details')}</div>
-      </div>
+      ${friendlyBlock}
+      <details ${friendly ? '' : 'open'}>
+        <summary style="cursor:pointer;color:var(--text-muted);font-size:0.9em;">
+          ${friendly ? 'Show technical details' : 'Error details'}
+        </summary>
+        <div class="yt-summary-text" style="max-height:40vh;color:var(--error);white-space:pre-wrap;margin-top:8px;">${escapeHtml(it.error_log || 'No error details')}</div>
+      </details>
     `;
     showAlert(html, { title: it.video_title || it.video_id, icon: '⚠️' });
   }
