@@ -11,6 +11,12 @@ const THEME_KEY = 'theme';
 const COLLAPSED_KEY = 'sidebar-collapsed';
 const WIDTH_KEY     = 'sidebar-width';
 
+// Logo link target. Overridable per-environment via a gitignored .env.local on
+// the server (VITE_SITE_URL=...). The fallback below is the staging URL, so a
+// code push never changes what production renders — prod's .env.local wins at
+// build time. Mirrors the import.meta.env pattern in lib/keycloak.js.
+const SITE_URL = import.meta.env.VITE_SITE_URL || 'https://stg.ibahsoun.com';
+
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem(THEME_KEY, theme);
@@ -97,7 +103,7 @@ export default function Sidebar() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="sidebar-title-wrap">
             <p className="version version-ai">AI</p>
-            <a href="https://stg.ibahsoun.com" className="sidebar-logo-link">
+            <a href={SITE_URL} className="sidebar-logo-link">
               <img src="/static_react/logo_dark.png" alt="Inforoot" className="sidebar-logo sidebar-logo-dark" />
               <img src="/static_react/logo_light.png" alt="Inforoot" className="sidebar-logo sidebar-logo-light" />
             </a>
