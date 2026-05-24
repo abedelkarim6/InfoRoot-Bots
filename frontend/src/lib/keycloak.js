@@ -1,13 +1,9 @@
 import Keycloak from 'keycloak-js';
 
-// Keep these defaults aligned with the whatsapp_app realm so both SPAs share
-// the same Keycloak SSO session. Override per-environment via Vite env vars.
+// Same realm as whatsapp_app so logging into one signs you into the other.
 const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8180';
-const KEYCLOAK_REALM = import.meta.env.VITE_KEYCLOAK_REALM || 'inforoot';
-const KEYCLOAK_CLIENT_ID = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'inforoot-web';
-
-const REFRESH_TOKEN_KEY = 'kc_refresh_token';
-const ID_TOKEN_KEY = 'kc_id_token';
+const KEYCLOAK_REALM = import.meta.env.VITE_KEYCLOAK_REALM || 'info-root-local';
+const KEYCLOAK_CLIENT_ID = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'web-spa';
 
 export const keycloak = new Keycloak({
   url: KEYCLOAK_URL,
@@ -17,52 +13,32 @@ export const keycloak = new Keycloak({
 
 let initPromise = null;
 
+/**
+ * Initialize Keycloak with onLoad: 'login-required'.
+ *
+ * If there is no active session, keycloak-js redirects the browser straight to
+ * the Keycloak login page. React never mounts in that state, so we don't need
+ * any custom redirect logic in components — by the time React renders, the
+ * user is authenticated.
+ *
+ * On the OAuth callback (?code=…&state=…), keycloak-js consumes the params,
+ * exchanges the code for tokens, and resolves init() with authenticated=true.
+ * It also schedules silent refreshes via onTokenExpired below.
+ */
 export function initKeycloak() {
   if (initPromise) return initPromise;
-
-  initPromise = keycloak
-    .init({
-      onLoad: 'check-sso',
-      pkceMethod: 'S256',
-      checkLoginIframe: false,
-      refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY) ?? undefined,
-      idToken: localStorage.getItem(ID_TOKEN_KEY) ?? undefined,
-    })
-    .then((authenticated) => {
-      if (authenticated) persistTokens();
-      return authenticated;
-    })
-    .catch((err) => {
-      console.error('Keycloak init failed:', err);
-      clearPersistedTokens();
-      return false;
-    });
-
-  keycloak.onAuthSuccess = persistTokens;
-  keycloak.onAuthRefreshSuccess = persistTokens;
-  keycloak.onAuthLogout = clearPersistedTokens;
+  initPromise = keycloak.init({
+    onLoad: 'login-required',
+    pkceMethod: 'S256',
+    checkLoginIframe: false,
+  }).catch((err) => {
+    console.error('Keycloak init failed:', err);
+    return false;
+  });
   keycloak.onTokenExpired = () => {
-    keycloak.updateToken(30).catch(() => {
-      clearPersistedTokens();
-      keycloak.login();
-    });
+    keycloak.updateToken(30).catch(() => keycloak.login());
   };
-
   return initPromise;
-}
-
-function persistTokens() {
-  if (keycloak.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, keycloak.refreshToken);
-  if (keycloak.idToken) localStorage.setItem(ID_TOKEN_KEY, keycloak.idToken);
-}
-
-function clearPersistedTokens() {
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(ID_TOKEN_KEY);
-}
-
-export function isAuthenticated() {
-  return !!keycloak.authenticated;
 }
 
 export function getAccessToken() {
@@ -74,22 +50,12 @@ export async function ensureFreshToken(minValiditySeconds = 30) {
   try {
     await keycloak.updateToken(minValiditySeconds);
   } catch {
-    clearPersistedTokens();
     await keycloak.login();
     return undefined;
   }
   return keycloak.token;
 }
 
-export function login(redirectUri = window.location.origin + '/') {
-  return keycloak.login({ redirectUri });
-}
-
-export function logout(redirectUri = window.location.origin + '/login') {
-  clearPersistedTokens();
+export function logout(redirectUri = window.location.origin + '/') {
   return keycloak.logout({ redirectUri });
-}
-
-export function getUsername() {
-  return keycloak.tokenParsed?.preferred_username;
 }

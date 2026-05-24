@@ -3,8 +3,6 @@ import { QueryClientProvider } from '@tanstack/react-query';
 
 import { AuthProvider } from './auth/AuthContext';
 import ProtectedRoute from './auth/ProtectedRoute';
-import LoginPage from './auth/LoginPage';
-import RegisterPage from './auth/RegisterPage';
 import { DialogsProvider } from './dialogs/DialogsProvider';
 import { ConfigProvider } from './config/ConfigProvider';
 import { queryClient } from './lib/queryClient';
@@ -47,8 +45,9 @@ export default function App() {
         <AuthProvider>
           <DialogsProvider>
             <Routes>
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/register" element={<RegisterPage />} />
+              {/* /login and /register are gone — authentication is handled by
+                  Keycloak. ProtectedRoute triggers the redirect to the Keycloak
+                  hosted login page directly. */}
               <Route path="/terms" element={<LegalPage kind="terms" />} />
               <Route path="/privacy" element={<LegalPage kind="privacy" />} />
               {/* /app/* — legacy basename. Redirect anything that still uses it to root. */}

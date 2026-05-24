@@ -26,8 +26,10 @@ export function setUnauthorizedHandler(fn) {
  *   - Always returns a parsed body (even on errors) shaped like { status, ... }
  *   - Refreshes the Keycloak access token before each /api/* call (silent if
  *     still valid) and attaches it as a Bearer header.
- *   - On 401, triggers the global unauthorized handler (which logs out via
- *     Keycloak and routes to /login), then returns a never-resolving promise.
+ *   - On 401, triggers the global unauthorized handler (which clears local
+ *     auth state; ProtectedRoute then triggers a fresh Keycloak login flow).
+ *     Returns a never-resolving promise so callers don't continue with a
+ *     logged-out state.
  */
 export async function api(path, body) {
   const options = {
