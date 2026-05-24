@@ -164,7 +164,10 @@ init_worker(
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    _OPEN = {"/login", "/api/auth/login", "/favicon.ico"}
+    # Public endpoints — no auth required. Native /api/auth/login is gone now
+    # (Keycloak handles login), but the diagnostic endpoint stays open so the
+    # SPA / curl can sanity-check the realm without a token.
+    _OPEN = {"/favicon.ico", "/api/_debug/keycloak"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -173,12 +176,12 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if path.startswith("/youtube/websub/"):
             return await call_next(request)
 
-        # Page requests and static files pass through freely.
-        # auth.js in the browser handles the /login redirect client-side.
+        # Page requests and static files pass through freely. SPA-side
+        # ProtectedRoute triggers the Keycloak redirect for unauth'd users.
         if not path.startswith("/api/") or path in self._OPEN:
             return await call_next(request)
 
-        # Only API routes are protected server-side.
+        # Only /api/* is protected server-side, and only via Keycloak JWTs.
         auth_header = request.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
@@ -206,9 +209,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         try:
             path = request.url.path
             method = request.method
-            if method in _AUDIT_MUTATING and path.startswith("/api/") and path not in (
-                "/api/auth/login",  # already handled below
-            ):
+            if method in _AUDIT_MUTATING and path.startswith("/api/"):
                 from routers.auth import (
                     _get_bearer, validate_token, get_token_user_id,
                 )
@@ -217,9 +218,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                 username = "anonymous"
                 if token and validate_token(token):
                     user_id = get_token_user_id(token)
-                    if user_id is None:
-                        username = "admin(legacy)"
-                    else:
+                    if user_id is not None:
                         try:
                             u = get_db().get_user_by_id(user_id)
                             username = (u or {}).get("username", f"uid:{user_id}")
@@ -231,11 +230,6 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     f"[AUDIT] user={username} uid={user_id} ip={ip} "
                     f"{method} {path} -> {response.status_code}"
                 )
-            elif path == "/api/auth/login" and method == "POST":
-                fwd = request.headers.get("X-Forwarded-For", "")
-                ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
-                outcome = "ok" if response.status_code == 200 else f"fail({response.status_code})"
-                _audit_logger.info(f"[AUDIT] login ip={ip} -> {outcome}")
         except Exception as exc:
             _audit_logger.warning(f"[AUDIT] middleware error: {exc}")
         return response
