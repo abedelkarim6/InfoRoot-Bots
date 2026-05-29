@@ -1,0 +1,131 @@
+# Compose loads ./.env automatically for ${VAR} substitution below.
+# Each app service additionally reads its own apps/<app>/.env via env_file,
+# and the `environment:` block overrides keys that must point at the
+# in-cluster service hostnames (postgres, redis, telegram-api, whatsapp-api)
+# instead of the localhost values typically found in dev .env files.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_web_new}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-whatsapp_web_new}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  keycloak-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME:?KC_DB_NAME must be set in .env}
+      POSTGRES_USER: ${KC_DB_USER:?KC_DB_USER must be set in .env}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?KC_DB_PASSWORD must be set in .env}
+    ports:
+      - "${KC_DB_PORT:-5433}:5432"
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KC_DB_USER} -d ${KC_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    # `start-dev` auto-runs `build` with the current env on each boot, so
+    # KC_DB=postgres / KC_HEALTH_ENABLED / KC_METRICS_ENABLED take effect
+    # without a separate `kc.sh build` step. For production, switch to
+    # `start --optimized` and bake these options at image-build time.
+    # `--import-realm` reads every JSON under /opt/keycloak/data/import on
+    # boot and creates any realm that does not already exist (no-op if the
+    # `inforoot` realm is already provisioned). See keycloak/README.md.
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # External DB credentials (sourced from root .env; never hardcoded)
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      # Bootstrap admin (use only for first start; rotate via console afterwards)
+      KEYCLOAK_ADMIN: ${KC_ADMIN_USER:?KC_ADMIN_USER must be set in .env}
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?KC_ADMIN_PASSWORD must be set in .env}
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      # NOTE: To run Keycloak behind a reverse proxy in production, add
+      # `KC_PROXY_HEADERS: xforwarded` (or `forwarded`) here. Keycloak rejects
+      # an empty string, so do NOT define the var with a fallback like
+      # `${KC_PROXY_HEADERS:-}` — set it explicitly or omit it.
+    ports:
+      - "${KC_PORT:-8180}:8080"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  app:
+    # FastAPI backend + the built React SPA, both served on port 8000.
+    # See Dockerfile for the multi-stage build (Node → Python).
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Build-time SPA env. In dev you'll usually edit these via .env so
+        # both the SPA build and the runtime pick up the same Keycloak URL.
+        VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8180}
+        VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inforoot}
+        VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-aibot}
+    environment:
+      # Runtime env. KEYCLOAK_ISSUER must exactly match the `iss` claim in
+      # tokens — that's the URL the *browser* sees, so localhost:8180 even
+      # though backends reach Keycloak in-cluster as keycloak:8080.
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8180/realms/inforoot}
+      # Override so the JWKS fetch uses the in-cluster hostname; otherwise
+      # the container would try to resolve `localhost` (= itself).
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/inforoot/protocol/openid-connect/certs
+      # DB DSN points at the in-cluster postgres service. load_config() in
+      # utils/helpers.py picks this up and overrides config.yaml.
+      DATABASE_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-summariesbotdb}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # Mount config.yaml so secrets stay on the host and edits don't require
+      # rebuilding the image. Comment out if you'd rather bake config.yaml in.
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  keycloak-db-data:

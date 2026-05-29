@@ -1,0 +1,51 @@
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Node build artefacts (rebuilt inside the image)
+frontend/node_modules/
+frontend/dist/
+static_react/
+
+# Local logs, dumps, backups — never want these in the image
+logs/
+*.log
+*.bak
+*.tar.gz
+summariesbotdb.bak
+dump.rdb
+whatsapp_web_raed.backup
+web-dist-staging.tar.gz
+
+# IDE / VCS noise
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local env files — NEVER bake credentials into the image. Compose passes the
+# values at runtime via environment: / env_file:.
+.env
+.env.local
+.env.*.local
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# Docs and scripts not needed by the runtime
+*.md
+deployment/
+e2e/
+tests/
+get_bbox.js
