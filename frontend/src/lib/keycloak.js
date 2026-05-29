@@ -2,8 +2,8 @@ import Keycloak from 'keycloak-js';
 
 // Same realm as whatsapp_app so logging into one signs you into the other.
 const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8180';
-const KEYCLOAK_REALM = import.meta.env.VITE_KEYCLOAK_REALM || 'info-root-local';
-const KEYCLOAK_CLIENT_ID = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'web-spa';
+const KEYCLOAK_REALM = import.meta.env.VITE_KEYCLOAK_REALM || 'inforoot';
+const KEYCLOAK_CLIENT_ID = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'aibot';
 
 export const keycloak = new Keycloak({
   url: KEYCLOAK_URL,

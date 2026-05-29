@@ -1,0 +1,52 @@
+{
+  "realm": "inforoot",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "sslRequired": "external",
+  "roles": {
+    "realm": [
+      {
+        "name": "user",
+        "description": "Baseline role required for every protected backend endpoint (telegram-api, whatsapp-api)."
+      },
+      {
+        "name": "admin",
+        "description": "Required for destructive whatsapp-api operations: POST /logout, /qr/refresh, /reconnect."
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "aibot",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "http://localhost:8000/*",
+        "http://localhost:5173/*",
+        "http://localhost:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8000",
+        "http://localhost:5173",
+        "http://localhost:8080"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      }
+    }
+  ]
+}

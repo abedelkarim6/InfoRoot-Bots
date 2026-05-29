@@ -190,6 +190,12 @@ def load_config(force_reload: bool = False):
         if force_reload or _config_cache is None or mtime != _config_mtime:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 _config_cache = yaml.safe_load(f) or {}
+            # DATABASE_DSN env var overrides config.yaml's database.dsn — lets
+            # the same image run in Docker (DSN points at the `postgres`
+            # service hostname) without editing config.yaml.
+            dsn_override = os.environ.get("DATABASE_DSN")
+            if dsn_override:
+                _config_cache.setdefault("database", {})["dsn"] = dsn_override
             _config_mtime = mtime
         return copy.deepcopy(_config_cache)
 
