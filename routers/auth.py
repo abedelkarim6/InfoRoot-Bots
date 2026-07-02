@@ -194,62 +194,70 @@ def debug_keycloak():
 
 @router.get("/auth/me")
 def me(request: Request):
-    token = _get_bearer(request)
-    if not token:
-        return JSONResponse({"error": "Token missing"}, status_code=401)
-    if not validate_token(token):
-        return JSONResponse({"error": "Invalid token"}, status_code=401)
-    user_id = get_token_user_id(token)
-    if user_id is None:
-        return JSONResponse({"error": "No DB user mapping for token"}, status_code=403)
-    db = get_db()
-    user = db.get_user_by_id(user_id)
-    if not user:
-        return JSONResponse({"error": "User not found"}, status_code=404)
+    try:
+        token = _get_bearer(request)
+        if not token:
+            return JSONResponse({"error": "Token missing"}, status_code=401)
+        if not validate_token(token):
+            return JSONResponse({"error": "Invalid token"}, status_code=401)
+        user_id = get_token_user_id(token)
+        if user_id is None:
+            return JSONResponse({"error": "No DB user mapping for token"}, status_code=403)
+        db = get_db()
+        user = db.get_user_by_id(user_id)
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
 
-    has_bot_access = bool(
-        user.get("bots_on")
-        or db.get_user_bot_inheritances(user["id"])
-        or db.get_owned_bots_config(user["id"])
-    )
-    plan = db.get_plan_for_user(user["id"]) if user.get("ai_plan_id") else None
+        has_bot_access = bool(
+            user.get("bots_on")
+            or db.get_user_bot_inheritances(user["id"])
+            or db.get_owned_bots_config(user["id"])
+        )
+        plan = db.get_plan_for_user(user["id"]) if user.get("ai_plan_id") else None
 
-    return {
-        "user_id": user["id"],
-        "username": user["username"],
-        "role": user["role"],
-        "is_active": user["is_active"],
-        "bots_on": bool(user.get("bots_on")),
-        "youtube_on": user["youtube_on"],
-        "yt_chat_on": bool(user.get("yt_chat_on")),
-        "agents_on": user["agents_on"],
-        "sys_bot_on": bool(user.get("sys_bot_on")),
-        "telegram_phone": user.get("telegram_phone"),
-        "telegram_session": user.get("telegram_session"),
-        "created_at": str(user["created_at"]) if user.get("created_at") else None,
-        "has_bot_access": has_bot_access,
-        "ai_plan": {
-            "id": plan["id"],
-            "name": plan["name"],
-            "monthly_limit": plan["monthly_limit"],
-            "description": plan.get("description", ""),
-        } if plan else None,
-    }
+        return {
+            "user_id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+            "is_active": user["is_active"],
+            "bots_on": bool(user.get("bots_on")),
+            "youtube_on": user["youtube_on"],
+            "yt_chat_on": bool(user.get("yt_chat_on")),
+            "agents_on": user["agents_on"],
+            "sys_bot_on": bool(user.get("sys_bot_on")),
+            "telegram_phone": user.get("telegram_phone"),
+            "telegram_session": user.get("telegram_session"),
+            "created_at": str(user["created_at"]) if user.get("created_at") else None,
+            "has_bot_access": has_bot_access,
+            "ai_plan": {
+                "id": plan["id"],
+                "name": plan["name"],
+                "monthly_limit": plan["monthly_limit"],
+                "description": plan.get("description", ""),
+            } if plan else None,
+        }
+    except Exception as e:
+        logger.exception("[AUTH] /auth/me failed")
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/me/ai-usage")
 def me_ai_usage(request: Request):
     """Return current month's AI usage + plan for the authenticated user."""
-    token = _get_bearer(request)
-    if not token or not validate_token(token):
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
-    user_id = get_token_user_id(token)
-    if user_id is None:
-        return JSONResponse({"error": "No DB user mapping for token"}, status_code=403)
-    db = get_db()
-    if not db.get_user_by_id(user_id):
-        return JSONResponse({"error": "User not found"}, status_code=404)
-    return db.get_ai_usage_with_plan(user_id)
+    try:
+        token = _get_bearer(request)
+        if not token or not validate_token(token):
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+        user_id = get_token_user_id(token)
+        if user_id is None:
+            return JSONResponse({"error": "No DB user mapping for token"}, status_code=403)
+        db = get_db()
+        if not db.get_user_by_id(user_id):
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        return db.get_ai_usage_with_plan(user_id)
+    except Exception as e:
+        logger.exception("[AUTH] /me/ai-usage failed")
+        return {"status": "error", "message": str(e)}
 
 
 # ── Pending Telegram OTP sessions ────────────────
@@ -263,47 +271,51 @@ class TelegramSendCodeRequest(BaseModel):
 
 @router.post("/auth/telegram/send-code")
 async def telegram_send_code(req: TelegramSendCodeRequest, request: Request):
-    user_id = get_request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "Not authenticated."}, status_code=401)
-
-    # Normalise to E.164: keep leading + and digits only
-    phone = re.sub(r'[^\d+]', '', req.phone.strip())
-    if not phone.startswith('+'):
-        phone = '+' + phone
-
-    cfg    = load_config()
-    tg_cfg = cfg.get("telegram", {})
-
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-
-    client = TelegramClient(StringSession(), int(tg_cfg["api_id"]), tg_cfg["api_hash"])
-    await client.connect()
-
     try:
-        result = await client.send_code_request(phone)
-    except Exception as e:
-        logger.error(f"[TG-REG] send_code_request failed for {phone}: {e}")
-        await client.disconnect()
-        return JSONResponse({"error": f"Failed to send code: {e}"}, status_code=400)
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"error": "Not authenticated."}, status_code=401)
 
-    # Disconnect any previous pending session for this phone
-    old = _pending_tg.get(phone)
-    if old:
+        # Normalise to E.164: keep leading + and digits only
+        phone = re.sub(r'[^\d+]', '', req.phone.strip())
+        if not phone.startswith('+'):
+            phone = '+' + phone
+
+        cfg    = load_config()
+        tg_cfg = cfg.get("telegram", {})
+
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        client = TelegramClient(StringSession(), int(tg_cfg["api_id"]), tg_cfg["api_hash"])
+        await client.connect()
+
         try:
-            await old["client"].disconnect()
-        except Exception:
-            pass
+            result = await client.send_code_request(phone)
+        except Exception as e:
+            logger.error(f"[TG-REG] send_code_request failed for {phone}: {e}")
+            await client.disconnect()
+            return JSONResponse({"error": f"Failed to send code: {e}"}, status_code=400)
 
-    _pending_tg[phone] = {
-        "client":   client,
-        "hash":     result.phone_code_hash,
-        "user_id":  user_id,
-        "needs_2fa": False,
-    }
+        # Disconnect any previous pending session for this phone
+        old = _pending_tg.get(phone)
+        if old:
+            try:
+                await old["client"].disconnect()
+            except Exception:
+                pass
 
-    return {"status": "ok", "message": "Verification code sent to your Telegram app."}
+        _pending_tg[phone] = {
+            "client":   client,
+            "hash":     result.phone_code_hash,
+            "user_id":  user_id,
+            "needs_2fa": False,
+        }
+
+        return {"status": "ok", "message": "Verification code sent to your Telegram app."}
+    except Exception as e:
+        logger.exception("[AUTH] /auth/telegram/send-code failed")
+        return {"status": "error", "message": str(e)}
 
 
 class TelegramVerifyCodeRequest(BaseModel):
@@ -313,37 +325,41 @@ class TelegramVerifyCodeRequest(BaseModel):
 
 @router.post("/auth/telegram/verify-code")
 async def telegram_verify_code(req: TelegramVerifyCodeRequest):
-    phone = re.sub(r'[^\d+]', '', req.phone.strip())
-    if not phone.startswith('+'):
-        phone = '+' + phone
-    pending = _pending_tg.get(phone)
-    if not pending:
-        return JSONResponse({"error": "No pending verification for this phone. Send a code first."}, status_code=400)
-
-    from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError
-
-    client = pending["client"]
     try:
-        await client.sign_in(phone, req.code, phone_code_hash=pending["hash"])
+        phone = re.sub(r'[^\d+]', '', req.phone.strip())
+        if not phone.startswith('+'):
+            phone = '+' + phone
+        pending = _pending_tg.get(phone)
+        if not pending:
+            return JSONResponse({"error": "No pending verification for this phone. Send a code first."}, status_code=400)
 
-        session_str = client.session.save()
-        await client.disconnect()
+        from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError
 
-        db = get_db()
-        db.update_user_telegram(pending["user_id"], phone, session_str)
-        del _pending_tg[phone]
+        client = pending["client"]
+        try:
+            await client.sign_in(phone, req.code, phone_code_hash=pending["hash"])
 
-        return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
+            session_str = client.session.save()
+            await client.disconnect()
 
-    except SessionPasswordNeededError:
-        pending["needs_2fa"] = True
-        return {"status": "needs_2fa", "message": "Two-factor authentication required."}
+            db = get_db()
+            db.update_user_telegram(pending["user_id"], phone, session_str)
+            del _pending_tg[phone]
 
-    except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-        return JSONResponse({"error": "Invalid or expired code. Please try again."}, status_code=400)
+            return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
 
+        except SessionPasswordNeededError:
+            pending["needs_2fa"] = True
+            return {"status": "needs_2fa", "message": "Two-factor authentication required."}
+
+        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+            return JSONResponse({"error": "Invalid or expired code. Please try again."}, status_code=400)
+
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.exception("[AUTH] /auth/telegram/verify-code failed")
+        return {"status": "error", "message": str(e)}
 
 
 class Telegram2FARequest(BaseModel):
@@ -353,33 +369,37 @@ class Telegram2FARequest(BaseModel):
 
 @router.post("/auth/telegram/verify-2fa")
 async def telegram_verify_2fa(req: Telegram2FARequest):
-    phone = re.sub(r'[^\d+]', '', req.phone.strip())
-    if not phone.startswith('+'):
-        phone = '+' + phone
-    pending = _pending_tg.get(phone)
-    if not pending or not pending.get("needs_2fa"):
-        return JSONResponse({"error": "No pending 2FA verification."}, status_code=400)
-
-    from telethon.errors import PasswordHashInvalidError
-
-    client = pending["client"]
     try:
-        await client.sign_in(password=req.password)
+        phone = re.sub(r'[^\d+]', '', req.phone.strip())
+        if not phone.startswith('+'):
+            phone = '+' + phone
+        pending = _pending_tg.get(phone)
+        if not pending or not pending.get("needs_2fa"):
+            return JSONResponse({"error": "No pending 2FA verification."}, status_code=400)
 
-        session_str = client.session.save()
-        await client.disconnect()
+        from telethon.errors import PasswordHashInvalidError
 
-        db = get_db()
-        db.update_user_telegram(pending["user_id"], phone, session_str)
-        del _pending_tg[phone]
+        client = pending["client"]
+        try:
+            await client.sign_in(password=req.password)
 
-        return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
+            session_str = client.session.save()
+            await client.disconnect()
 
-    except PasswordHashInvalidError:
-        return JSONResponse({"error": "Incorrect 2FA password. Please try again."}, status_code=400)
+            db = get_db()
+            db.update_user_telegram(pending["user_id"], phone, session_str)
+            del _pending_tg[phone]
 
+            return {"status": "ok", "message": "Telegram account linked successfully.", "session_string": session_str}
+
+        except PasswordHashInvalidError:
+            return JSONResponse({"error": "Incorrect 2FA password. Please try again."}, status_code=400)
+
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        logger.exception("[AUTH] /auth/telegram/verify-2fa failed")
+        return {"status": "error", "message": str(e)}
 
 
 # ── Profile (Telegram session + Gemini projects) ─────────────────────────────
@@ -392,22 +412,30 @@ class UpdateSessionRequest(BaseModel):
 @router.post("/auth/profile/update-session")
 def update_session(req: UpdateSessionRequest, request: Request):
     """Directly set a telegram session string for the current user."""
-    user_id = get_request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "Not authenticated."}, status_code=401)
-    if not req.session_string.strip():
-        return JSONResponse({"error": "Session string cannot be empty."}, status_code=400)
-    get_db().update_user_telegram(user_id, req.phone.strip() or None, req.session_string.strip())
-    return {"status": "ok"}
+    try:
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"error": "Not authenticated."}, status_code=401)
+        if not req.session_string.strip():
+            return JSONResponse({"error": "Session string cannot be empty."}, status_code=400)
+        get_db().update_user_telegram(user_id, req.phone.strip() or None, req.session_string.strip())
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[AUTH] /auth/profile/update-session failed")
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/auth/profile/disconnect-telegram")
 def disconnect_telegram(request: Request):
-    user_id = get_request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "Not authenticated."}, status_code=401)
-    get_db().update_user_telegram(user_id, None, None)
-    return {"status": "ok"}
+    try:
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"error": "Not authenticated."}, status_code=401)
+        get_db().update_user_telegram(user_id, None, None)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[AUTH] /auth/profile/disconnect-telegram failed")
+        return {"status": "error", "message": str(e)}
 
 
 class ProfileGeminiProjectsRequest(BaseModel):
@@ -418,12 +446,16 @@ class ProfileGeminiProjectsRequest(BaseModel):
 
 @router.post("/auth/profile/gemini-keys")
 def profile_update_gemini_keys(req: ProfileGeminiProjectsRequest, request: Request):
-    user_id = get_request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
-    db = get_db()
-    p1 = req.gemini_project_bots.strip()    if req.gemini_project_bots    else None
-    p2 = req.gemini_project_youtube.strip() if req.gemini_project_youtube else None
-    p3 = req.gemini_project_agents.strip()  if req.gemini_project_agents  else None
-    db.update_user(user_id, gemini_project_bots=p1, gemini_project_youtube=p2, gemini_project_agents=p3)
-    return {"status": "ok"}
+    try:
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+        db = get_db()
+        p1 = req.gemini_project_bots.strip()    if req.gemini_project_bots    else None
+        p2 = req.gemini_project_youtube.strip() if req.gemini_project_youtube else None
+        p3 = req.gemini_project_agents.strip()  if req.gemini_project_agents  else None
+        db.update_user(user_id, gemini_project_bots=p1, gemini_project_youtube=p2, gemini_project_agents=p3)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[AUTH] /auth/profile/gemini-keys failed")
+        return {"status": "error", "message": str(e)}

@@ -26,6 +26,7 @@ import {
   TypeSelect,
   TypeSpecificFields,
   HeaderDatetimeFields,
+  BulletPointsFields,
   TelegramTargetsField,
   PromptSelect
 } from './bots/ScheduleFormFields';
@@ -243,6 +244,7 @@ function DefaultScheduleModal({ isAdd, existing, onClose, onSave, saving }) {
           </div>
 
           <HeaderDatetimeFields form={form} setForm={setForm} />
+          <BulletPointsFields form={form} setForm={setForm} />
           <TelegramTargetsField form={form} setForm={setForm} />
         </div>
         <div className="modal-footer">

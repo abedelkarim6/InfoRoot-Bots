@@ -3,6 +3,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import SysBotDrawer from './sysbot/SysBotDrawer';
 import NotificationBell from './NotificationBell';
+import ErrorBoundary from '../components/ErrorBoundary';
 
 const CHAT_PATHS = new Set(['/yt-chat', '/agent-chat']);
 
@@ -19,7 +20,9 @@ export default function AppShell() {
       <Sidebar />
       <main className="main-content">
         <NotificationBell />
-        <Outlet />
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       {/* Floating System Bot — visible only when user.sys_bot_on is true */}
       <SysBotDrawer />

@@ -31,159 +31,188 @@ def _get_request_owner_id(request: Request):
 
 @router.post("/bot/enable")
 async def enable_bot(request: Request):
-    existing = getattr(request.app.state, 'bot_task', None)
-    if existing and not existing.done():
-        return {"status": "Bot already running"}
-    start_bot_task(request.app.state)
-    return {"status": "Bot started"}
+    try:
+        existing = getattr(request.app.state, 'bot_task', None)
+        if existing and not existing.done():
+            return {"status": "Bot already running"}
+        start_bot_task(request.app.state)
+        return {"status": "Bot started"}
+    except Exception as e:
+        logger.exception("[BOT] enable_bot failed")
+        return {"status": "error", "message": str(e)}
 
 @router.post("/bot/disable")
 async def disable_bot(request: Request):
-    stopped = await stop_bot_task(request.app.state)
-    if stopped:
-        return {"status": "Bot stopped"}
-    return {"status": "Bot is not running"}
+    try:
+        stopped = await stop_bot_task(request.app.state)
+        if stopped:
+            return {"status": "Bot stopped"}
+        return {"status": "Bot is not running"}
+    except Exception as e:
+        logger.exception("[BOT] disable_bot failed")
+        return {"status": "error", "message": str(e)}
 
 @router.post("/bot/reload")
 async def reload_bot(request: Request):
     """Restart the bot task (config reload)."""
-    await stop_bot_task(request.app.state)
-    start_bot_task(request.app.state)
-    return {"status": "bot_restarted"}
+    try:
+        await stop_bot_task(request.app.state)
+        start_bot_task(request.app.state)
+        return {"status": "bot_restarted"}
+    except Exception as e:
+        logger.exception("[BOT] reload_bot failed")
+        return {"status": "error", "message": str(e)}
 
 @router.get("/bots")
 def list_bots(request: Request):
-    db = get_db()
-    if is_admin_request(request):
-        return db.get_all_bots_config()
-    user_id = get_request_user_id(request)
-    return db.get_filtered_bots_config(user_id) if user_id else {}
+    try:
+        db = get_db()
+        if is_admin_request(request):
+            return db.get_all_bots_config()
+        user_id = get_request_user_id(request)
+        return db.get_filtered_bots_config(user_id) if user_id else {}
+    except Exception as e:
+        logger.exception("[BOT] list_bots failed")
+        return {"status": "error", "message": str(e)}
 
 @router.post("/bot/save")
 def save_bot(request: Request, data: dict = Body(...)):
-    name = data.get('name')
-    if not name:
-        return {"status": "error", "message": "Missing bot name"}
+    try:
+        name = data.get('name')
+        if not name:
+            return {"status": "error", "message": "Missing bot name"}
 
-    create_only = bool(data.get('create_only'))
-    db = get_db()
+        create_only = bool(data.get('create_only'))
+        db = get_db()
 
-    if is_admin_request(request):
-        # Admin path: operate on admin-managed bots
-        all_bots = db.get_all_bots_config()
-        existing = all_bots.get(name, {})
-        is_new   = name not in all_bots
-        if not is_new and create_only:
-            return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
-        if not is_new and not _can_modify_bot(request, name):
-            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-        owner_id = None
-    else:
-        # User path: operate on this user's own bots (each user has their own namespace)
-        user_id   = get_request_user_id(request)
-        if not user_id:
-            return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
-        user_bots = db.get_owned_bots_config(user_id)
-        existing  = user_bots.get(name, {})
-        is_new    = name not in user_bots
-        if not is_new and create_only:
-            return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
-        if not is_new and not _can_modify_bot(request, name):
-            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-        owner_id = user_id
+        if is_admin_request(request):
+            # Admin path: operate on admin-managed bots
+            all_bots = db.get_all_bots_config()
+            existing = all_bots.get(name, {})
+            is_new   = name not in all_bots
+            if not is_new and create_only:
+                return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
+            if not is_new and not _can_modify_bot(request, name):
+                return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+            owner_id = None
+        else:
+            # User path: operate on this user's own bots (each user has their own namespace)
+            user_id   = get_request_user_id(request)
+            if not user_id:
+                return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+            user_bots = db.get_owned_bots_config(user_id)
+            existing  = user_bots.get(name, {})
+            is_new    = name not in user_bots
+            if not is_new and create_only:
+                return JSONResponse({"status": "error", "message": "A bot with this name already exists. Please choose a different name."}, status_code=409)
+            if not is_new and not _can_modify_bot(request, name):
+                return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+            owner_id = user_id
 
-    db.save_bot(name, {
-        'enabled': data.get('enabled', existing.get('enabled', True)),
-        'collections': data.get('collections', existing.get('collections', [])),
-        'minimum_messages': data.get('minimum_messages', existing.get('minimum_messages', 5)),
-        'rules': data.get('rules', existing.get('rules', {'remove': [], 'replace': []})),
-        'default_schedules': data.get('default_schedules', existing.get('default_schedules', [])),
-    }, owner_id=owner_id)
-    return {"status": "updated", "name": name}
+        db.save_bot(name, {
+            'enabled': data.get('enabled', existing.get('enabled', True)),
+            'collections': data.get('collections', existing.get('collections', [])),
+            'minimum_messages': data.get('minimum_messages', existing.get('minimum_messages', 5)),
+            'rules': data.get('rules', existing.get('rules', {'remove': [], 'replace': []})),
+            'default_schedules': data.get('default_schedules', existing.get('default_schedules', [])),
+        }, owner_id=owner_id)
+        return {"status": "updated", "name": name}
+    except Exception as e:
+        logger.exception("[BOT] save_bot failed")
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/bot/delete")
 def delete_bot(request: Request, data: dict = Body(...)):
-    name = data.get('name')
-    if not name:
-        return {"status": "error", "message": "Missing bot name"}
+    try:
+        name = data.get('name')
+        if not name:
+            return {"status": "error", "message": "Missing bot name"}
 
-    if not _can_modify_bot(request, name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+        if not _can_modify_bot(request, name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
-    db = get_db()
-    owner_id = _get_request_owner_id(request)
+        db = get_db()
+        owner_id = _get_request_owner_id(request)
 
-    # Snapshot before deletion for recycle bin
-    if owner_id is None:
-        bot_data = db.get_all_bots_config().get(name)
-    else:
-        bot_data = db.get_owned_bots_config(owner_id).get(name)
-    if bot_data:
-        snapshot = {**bot_data, 'name': name}
-        snapshot['prompts'] = db.get_bot_prompts(name)
-        db.recycle_bin_add('bot', name, snapshot, owner_id=owner_id)
+        # Snapshot before deletion for recycle bin
+        if owner_id is None:
+            bot_data = db.get_all_bots_config().get(name)
+        else:
+            bot_data = db.get_owned_bots_config(owner_id).get(name)
+        if bot_data:
+            snapshot = {**bot_data, 'name': name}
+            snapshot['prompts'] = db.get_bot_prompts(name)
+            db.recycle_bin_add('bot', name, snapshot, owner_id=owner_id)
 
-    if db.delete_bot(name, owner_id=owner_id):
-        return {"status": "ok"}
-    return {"status": "error", "message": "Bot not found"}
+        if db.delete_bot(name, owner_id=owner_id):
+            return {"status": "ok"}
+        return {"status": "error", "message": "Bot not found"}
+    except Exception as e:
+        logger.exception("[BOT] delete_bot failed")
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/bot/duplicate")
 def duplicate_bot(request: Request, data: dict = Body(...)):
-    source_name = data.get('source_name')
-    new_name    = data.get('new_name')
-    options     = data.get('options')  # optional granular include dict
-
-    if not source_name or not new_name:
-        return {"status": "error", "message": "Missing source_name or new_name"}
-
-    if not new_name.replace('_', '').replace(' ', '').isalnum():
-        return {"status": "error", "message": "Invalid bot name format"}
-
-    if not _can_modify_bot(request, source_name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
-
-    db = get_db()
-    owner_id = _get_request_owner_id(request)
-
     try:
-        db.duplicate_bot(source_name, new_name, owner_id=owner_id, options=options)
-        return {"status": "ok", "new_name": new_name}
-    except ValueError as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=409)
+        source_name = data.get('source_name')
+        new_name    = data.get('new_name')
+        options     = data.get('options')  # optional granular include dict
+
+        if not source_name or not new_name:
+            return {"status": "error", "message": "Missing source_name or new_name"}
+
+        if not new_name.replace('_', '').replace(' ', '').isalnum():
+            return {"status": "error", "message": "Invalid bot name format"}
+
+        if not _can_modify_bot(request, source_name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+        db = get_db()
+        owner_id = _get_request_owner_id(request)
+
+        try:
+            db.duplicate_bot(source_name, new_name, owner_id=owner_id, options=options)
+            return {"status": "ok", "new_name": new_name}
+        except ValueError as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=409)
     except Exception as e:
-        logger.error(f"duplicate_bot failed: {e}", exc_info=True)
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        logger.exception("[BOT] duplicate_bot failed")
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/bot/rename")
 def rename_bot(request: Request, data: dict = Body(...)):
-    old_name = data.get('old_name')
-    new_name = data.get('new_name')
+    try:
+        old_name = data.get('old_name')
+        new_name = data.get('new_name')
 
-    if not old_name or not new_name:
-        return {"status": "error", "message": "Missing old_name or new_name"}
+        if not old_name or not new_name:
+            return {"status": "error", "message": "Missing old_name or new_name"}
 
-    if not new_name.replace('_', '').replace(' ', '').isalnum():
-        return {"status": "error", "message": "Invalid bot name format"}
+        if not new_name.replace('_', '').replace(' ', '').isalnum():
+            return {"status": "error", "message": "Invalid bot name format"}
 
-    if not _can_modify_bot(request, old_name):
-        return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+        if not _can_modify_bot(request, old_name):
+            return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
-    db = get_db()
-    owner_id = _get_request_owner_id(request)
+        db = get_db()
+        owner_id = _get_request_owner_id(request)
 
-    if owner_id is None:
-        bots = db.get_all_bots_config()
-    else:
-        bots = db.get_owned_bots_config(owner_id)
+        if owner_id is None:
+            bots = db.get_all_bots_config()
+        else:
+            bots = db.get_owned_bots_config(owner_id)
 
-    if old_name not in bots:
-        return {"status": "error", "message": "Bot not found"}
-    if new_name in bots and new_name != old_name:
-        return {"status": "error", "message": "New name already exists"}
+        if old_name not in bots:
+            return {"status": "error", "message": "Bot not found"}
+        if new_name in bots and new_name != old_name:
+            return {"status": "error", "message": "New name already exists"}
 
-    if db.rename_bot(old_name, new_name, owner_id=owner_id):
-        return {"status": "ok", "old_name": old_name, "new_name": new_name}
-    return {"status": "error", "message": "Rename failed"}
+        if db.rename_bot(old_name, new_name, owner_id=owner_id):
+            return {"status": "ok", "old_name": old_name, "new_name": new_name}
+        return {"status": "error", "message": "Rename failed"}
+    except Exception as e:
+        logger.exception("[BOT] rename_bot failed")
+        return {"status": "error", "message": str(e)}

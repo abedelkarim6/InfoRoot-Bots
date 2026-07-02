@@ -19,7 +19,7 @@ from utils.database import get_db
 from utils.openai_client import OpenAIClient
 from utils.gemini_client import GeminiClient
 from summaries.prompts import get_summary_prompt, get_bullet_points_suffix
-from utils.helpers import load_config, setup_logging, categorizer
+from utils.helpers import load_config, categorizer
 
 import datetime
 from zoneinfo import ZoneInfo
@@ -54,10 +54,23 @@ db = None
 llm_client = None
 API_ID = None
 API_HASH = None
-STRING_SESSION = None
 
 SCHEDULER = None
 client: TelegramClient = None  # Set in run_bot()
+
+
+def get_bot_client():
+    """Return the long-running userbot TelegramClient (or None if not started yet).
+
+    Other parts of the app (e.g. the YouTube worker's Telegram sender) reuse this
+    single connected client instead of opening a second connection on the same
+    session string. Telethon explicitly warns against running one session from two
+    concurrent clients — sharing this one client avoids that and the duplicate-send
+    issues it caused. The client runs on the main event loop (started via
+    asyncio.create_task in start_bot_task), so it is safe to call from any other
+    coroutine on that same loop.
+    """
+    return client
 
 # Pre-resolved map: numeric_channel_id → [collection_names]
 # Built at startup and rebuilt on every config change.
@@ -266,9 +279,12 @@ async def read_channel_messages(event):
             if skipped:
                 continue
 
-            # Replace rules: build per-bot replaced text
+            # Replace rules: inline bot rules first, then pairs from any attached
+            # reusable replace groups (enabled groups + enabled pairs only).
+            bot_cfg = bots_cfg.get(bot_name, {}) or {}
             replaced_text = text
-            for rule in bot_cfg_rules.get('replace', []):
+            replace_rules = list(bot_cfg_rules.get('replace', [])) + list(bot_cfg.get('replace_group_pairs', []))
+            for rule in replace_rules:
                 match_word = rule.get('match')
                 repl = rule.get('replace_with', '')
                 if not match_word:
@@ -572,6 +588,12 @@ async def generate_and_send_summary(job_data):
         BATCH = 25
         total_tokens = 0
         summary_text = ''
+        empty_retry_attempts = 0
+        MAX_EMPTY_RETRIES = 2
+        # Multi-model A/B test (admin opt-in). When compare models are configured,
+        # each is run on the same input as the primary; primary is what's sent.
+        model_outputs = {}        # {model_name: text} — populated only when comparing
+        primary_model_used = None
 
         if not remaining_msgs:
             # Pure interim path: the latest interim already represents the full
@@ -597,50 +619,110 @@ async def generate_and_send_summary(job_data):
             # matches the schedule's bullet config.
             rem_texts = [m['text'] for m in remaining_msgs]
 
-            if len(rem_texts) <= BATCH:
-                prompt = get_summary_prompt(
-                    rem_texts, bot_name, prompt_key,
-                    topic_name=topic_name, final_interim=last_interim_text, b=b
+            async def _gen_one(gen_fn):
+                """Produce a summary from the current remaining-message batch using
+                gen_fn (a model's generate_summary). Returns (text, tokens, retries).
+
+                Mirrors the single-batch vs chunked logic and the empty-retry loop
+                so every compared model sees identical inputs — a fair A/B."""
+                _tokens = 0
+                _text = ''
+                _retries = 0
+                for attempt in range(MAX_EMPTY_RETRIES + 1):
+                    if len(rem_texts) <= BATCH:
+                        prompt = get_summary_prompt(
+                            rem_texts, bot_name, prompt_key,
+                            topic_name=topic_name, final_interim=last_interim_text, b=b
+                        )
+                        if bullet_points and b:
+                            prompt += '\n\n' + get_bullet_points_suffix(b)
+                        s, tk = await _run_with_retry(gen_fn, prompt)
+                        _tokens += tk
+                        _text = (s or '').strip()
+                    else:
+                        # Rare: > BATCH remaining messages. Roll the {final_interim}
+                        # forward through each chunk so the cumulative chain is
+                        # preserved, then apply bullet_points_suffix only on the LAST.
+                        rolling_text = last_interim_text
+                        chunks = [rem_texts[i:i + BATCH] for i in range(0, len(rem_texts), BATCH)]
+                        for idx, chunk in enumerate(chunks, 1):
+                            is_last = (idx == len(chunks))
+                            p = get_summary_prompt(
+                                chunk, bot_name, prompt_key,
+                                topic_name=topic_name, final_interim=rolling_text, b=b
+                            )
+                            if is_last and bullet_points and b:
+                                p += '\n\n' + get_bullet_points_suffix(b)
+                            s, tk = await _run_with_retry(gen_fn, p)
+                            _tokens += tk
+                            if (s or '').strip():
+                                rolling_text = s.strip()
+                        _text = (rolling_text or '').strip()
+                        # Only counts as empty if it never advanced past the interim.
+                        if _text == (last_interim_text or '').strip():
+                            _text = ''
+
+                    if _text:
+                        break
+                    if attempt < MAX_EMPTY_RETRIES:
+                        _retries = attempt + 1
+                return _text, _tokens, _retries
+
+            # ── Primary model: this is what gets sent to Telegram ────────────
+            summary_text, ptk, empty_retry_attempts = await _gen_one(llm_client.generate_summary)
+            total_tokens += ptk
+            if not summary_text and empty_retry_attempts:
+                logger.warning(
+                    f"[RETRY] AI returned empty summary after {empty_retry_attempts} "
+                    f"retries | Bot={bot_name} | Topic={topic_name}"
                 )
-                if bullet_points and b:
-                    prompt += '\n\n' + get_bullet_points_suffix(b)
-                summary_text, tk = await _run_with_retry(llm_client.generate_summary, prompt)
-                total_tokens += tk
-                summary_text = (summary_text or '').strip()
-            else:
-                # Rare: > BATCH remaining messages. Roll the {final_interim} forward
-                # through each chunk so the cumulative chain is preserved, then
-                # apply bullet_points_suffix only on the LAST chunk's call.
-                rolling_text = last_interim_text
-                chunks = [rem_texts[i:i + BATCH] for i in range(0, len(rem_texts), BATCH)]
-                for idx, chunk in enumerate(chunks, 1):
-                    is_last = (idx == len(chunks))
-                    p = get_summary_prompt(
-                        chunk, bot_name, prompt_key,
-                        topic_name=topic_name, final_interim=rolling_text, b=b
-                    )
-                    if is_last and bullet_points and b:
-                        p += '\n\n' + get_bullet_points_suffix(b)
-                    s, tk = await _run_with_retry(llm_client.generate_summary, p)
-                    total_tokens += tk
-                    if (s or '').strip():
-                        rolling_text = s.strip()
-                summary_text = rolling_text
+
+            # ── Compare models: run the same input through each, store only ───
+            #    (admin opt-in; zero cost when no compare models are configured).
+            if summary_text and isinstance(llm_client, GeminiClient):
+                try:
+                    from utils.gemini_models import get_gemini_compare_models, get_gemini_model
+                    compare_models = get_gemini_compare_models()
+                    if compare_models:
+                        primary_model_used = get_gemini_model()
+                        model_outputs[primary_model_used] = summary_text
+                        for cm in compare_models:
+                            try:
+                                alt_client = GeminiClient(
+                                    project=llm_client.project,
+                                    location=llm_client.location,
+                                    model=cm,
+                                    user_id=getattr(llm_client, 'user_id', None),
+                                )
+                                alt_text, atk, _ = await _gen_one(alt_client.generate_summary)
+                                total_tokens += atk
+                                if alt_text:
+                                    model_outputs[cm] = alt_text
+                                logger.info(
+                                    f"[COMPARE] {cm} done | Bot={bot_name} | "
+                                    f"Topic={topic_name} | len={len(alt_text or '')}"
+                                )
+                            except Exception as ce:
+                                logger.warning(
+                                    f"[COMPARE] model {cm} failed | Bot={bot_name} | "
+                                    f"Topic={topic_name}: {ce}"
+                                )
+                except Exception as e:
+                    logger.warning(f"[COMPARE] multi-model comparison skipped: {e}")
 
         if not summary_text:
-            logger.warning(f"[SKIP] AI returned empty summary | Bot={bot_name} | Topic={topic_name}")
+            retry_suffix = f" (retried {MAX_EMPTY_RETRIES} times)" if empty_retry_attempts else ""
+            logger.warning(
+                f"[SKIP] AI returned empty summary{retry_suffix} | Bot={bot_name} | Topic={topic_name}"
+            )
             db.log_schedule_run(
                 bot_name=bot_name, topic_name=topic_name, schedule_type=schedule_type,
                 status='failed', message_count=total_msg_count,
-                error_text="AI returned empty summary"
+                error_text=f"AI returned empty summary{retry_suffix}"
             )
             return
 
         logger.info(f"[AI] LLM done | Bot={bot_name} | Topic={topic_name} | summary_len={len(summary_text)} | tokens={total_tokens}")
-
-        if not summary_text.strip():
-            logger.warning(f"[SKIP] AI returned empty summary | Bot={bot_name} | Topic={topic_name}")
-            return
 
         # ── Resolve target channels ──────────────────────────────────────────
         schedule_targets = [t for t in job_data.get('telegram_targets', []) if t]
@@ -702,6 +784,8 @@ async def generate_and_send_summary(job_data):
                 message_ids=all_ids,
                 tokens_used=total_tokens,
                 thoughts=getattr(llm_client, 'last_thoughts', '') or None,
+                model_outputs=model_outputs or None,
+                primary_model=primary_model_used,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -1029,8 +1113,13 @@ def _get_interim_lock(bot_name: str, topic_name: str) -> asyncio.Lock:
 async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     """
     Called after every message save.
-    Batch size is auto-derived from the topic's schedule: 26 − B for bullet-points schedules,
-    20 for non-bullet-points schedules. A per-topic lock prevents concurrent duplicate calls.
+
+    Each schedule of the topic keeps its OWN rolling interim chain, keyed by the
+    schedule's id ('interim:{schedule_id}'). The DB helpers
+    (get_unsummarized_count_for_interim / get_messages_for_interim) need both the
+    schedule id and its concrete type so a batch never straddles a schedule fire.
+    Batch size per schedule: 26 − B for bullet-points schedules, 20 otherwise.
+    A per-topic lock prevents concurrent duplicate runs.
     """
     lock = _get_interim_lock(bot_name, topic_name)
     if lock.locked():
@@ -1038,58 +1127,86 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
     async with lock:
         try:
             schedules = db.get_schedules_for_topic(bot_name, topic_name)
-            # When a topic has multiple bullet-points schedules with different b counts,
-            # pick the LARGEST b → smallest batch (26 − b_max). The interim is one shared
-            # rolling summary across all schedules, so the batch must be small enough that
-            # the strictest schedule can still produce its bullet count from one batch.
-            bp_counts = [int(s.get('bullet_points_count') or 0)
-                         for s in schedules if s.get('bullet_points')]
-            b_count = max(bp_counts) if bp_counts else 0
-            if b_count:
-                batch_limit = max(1, 26 - b_count)
-            else:
-                batch_limit = 20
-            logger.info(
-                f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
-                f"| schedules={len(schedules)} | bp_counts={bp_counts} | b_used={b_count} "
-                f"| batch_limit={batch_limit}"
-            )
-            while True:
-                count = db.get_unsummarized_count_for_interim(bot_name, topic_name)
-                if count < batch_limit:
-                    break
-
-                messages = db.get_messages_for_interim(bot_name, topic_name, limit=batch_limit)
-                if len(messages) < batch_limit:
-                    break
-
-                prompt_key    = _get_prompt_key_for_topic(bot_name, topic_name)
-                schedule_name = _get_schedule_name_for_topic(bot_name, topic_name)
-                texts   = [m['text'] for m in messages]
-                msg_ids = [m['id'] for m in messages]
-
-                # Rolling cumulative — driven entirely by the user's prompt template.
-                # The template's {final_interim} slot receives the previous interim text
-                # (empty string on first run); the template owns how that context is
-                # blended with {messages} so the output style matches the schedule's
-                # final output exactly.
-                prev_interim = db.get_latest_interim(bot_name, topic_name)
-                prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
-
-                prompt = get_summary_prompt(
-                    texts, bot_name, prompt_key,
-                    topic_name=topic_name, final_interim=prev_text, b=b_count
-                )
-                if b_count:
-                    prompt += '\n\n' + get_bullet_points_suffix(b_count)
-
-                summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
-
-                interim_id = db.save_interim_summary(bot_name, topic_name, summary_text, len(messages), schedule_name=schedule_name)
-                db.mark_as_summarized(msg_ids, 'interim', bot_name, topic_name, interim_id=interim_id)
-                logger.info(f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} | msgs={len(msg_ids)}")
         except Exception as e:
-            logger.error(f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+            logger.error(f"[INTERIM] Failed to load schedules | Bot={bot_name} | Topic={topic_name}: {e}", exc_info=True)
+            return
+
+        for sched in schedules:
+            schedule_id   = sched.get('id')
+            schedule_type = sched.get('type')
+            if schedule_id is None or not schedule_type:
+                continue  # malformed schedule row — skip rather than crash
+            try:
+                schedule_name = sched.get('name')
+                prompt_key    = sched.get('prompt_key') or 'default'
+                b_count = int(sched.get('bullet_points_count') or 0) if sched.get('bullet_points') else 0
+                batch_limit = max(1, 26 - b_count) if b_count else 20
+                logger.info(
+                    f"[INTERIM] batch config | bot={bot_name} | topic={topic_name} "
+                    f"| schedule={schedule_name}#{schedule_id} ({schedule_type}) "
+                    f"| b={b_count} | batch_limit={batch_limit}"
+                )
+                # Bound the rolling {final_interim} chain to the current schedule window.
+                # Without this, a final fire that gets SKIPPED (below min_messages, outside
+                # active window, empty AI, or error) never marks its interims sent, so the
+                # stale interim keeps rolling forward — leaking very old content (and prompting
+                # hallucinated "messages") into every future summary. See get_latest_interim.
+                interim_window_start = _compute_window_start({
+                    'schedule_type':    schedule_type,
+                    'sch_minute':       sched.get('minute'),
+                    'sch_hour':         sched.get('hour'),
+                    'sch_hours':        sched.get('hours'),
+                    'sch_minutes':      sched.get('minutes'),
+                    'sch_start_hour':   sched.get('start_hour', 0),
+                    'sch_start_minute': sched.get('start_minute', 0),
+                    'sch_end_hour':     sched.get('end_hour'),
+                    'sch_end_minute':   sched.get('end_minute'),
+                })
+                while True:
+                    count = db.get_unsummarized_count_for_interim(
+                        bot_name, topic_name, schedule_id, schedule_type)
+                    if count < batch_limit:
+                        break
+
+                    messages = db.get_messages_for_interim(
+                        bot_name, topic_name, schedule_id, schedule_type, limit=batch_limit)
+                    if len(messages) < batch_limit:
+                        break
+
+                    texts   = [m['text'] for m in messages]
+                    msg_ids = [m['id'] for m in messages]
+
+                    # Rolling cumulative — driven entirely by the user's prompt template.
+                    # The template's {final_interim} slot receives the previous interim text
+                    # (empty string on first run); the template owns how that context is
+                    # blended with {messages} so the output style matches the schedule's
+                    # final output exactly. Scoped to THIS schedule's chain.
+                    prev_interim = db.get_latest_interim(
+                        bot_name, topic_name, schedule_id=schedule_id,
+                        after_dt=interim_window_start)
+                    prev_text = (prev_interim.get('summary_text') or '').strip() if prev_interim else ''
+
+                    prompt = get_summary_prompt(
+                        texts, bot_name, prompt_key,
+                        topic_name=topic_name, final_interim=prev_text, b=b_count
+                    )
+                    if b_count:
+                        prompt += '\n\n' + get_bullet_points_suffix(b_count)
+
+                    summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+
+                    interim_id = db.save_interim_summary(
+                        bot_name, topic_name, summary_text, len(messages),
+                        schedule_name=schedule_name, schedule_id=schedule_id)
+                    db.mark_as_summarized(
+                        msg_ids, f'interim:{schedule_id}', bot_name, topic_name, interim_id=interim_id)
+                    logger.info(
+                        f"[INTERIM] Saved | Bot={bot_name} | Topic={topic_name} "
+                        f"| schedule={schedule_name}#{schedule_id} | msgs={len(msg_ids)}")
+            except Exception as e:
+                logger.error(
+                    f"[INTERIM] Failed | Bot={bot_name} | Topic={topic_name} "
+                    f"| schedule={schedule_id}: {e}", exc_info=True)
 
 
 async def schedule_summaries():
@@ -1182,10 +1299,10 @@ async def schedule_summaries():
                     try:
                         if schedule_type == "minute":
                             minute_interval = schedule.get('minute', 1)
-                            trigger = CronTrigger(minute=f'*/{minute_interval}')
+                            trigger = CronTrigger(minute=f'*/{minute_interval}', timezone=BEIRUT_TZ)
                         elif schedule_type == "hourly":
                             minute = schedule.get('minute', 0)
-                            trigger = CronTrigger(minute=minute)
+                            trigger = CronTrigger(minute=minute, timezone=BEIRUT_TZ)
                         elif schedule_type == "interval_minutes":
                             interval_mins = schedule.get('minutes', 30)
                             start_hour   = schedule.get('start_hour', 0)
@@ -1216,7 +1333,7 @@ async def schedule_summaries():
                         elif schedule_type == "daily":
                             hour = schedule.get('hour', 0)
                             minute = schedule.get('minute', 0)
-                            trigger = CronTrigger(hour=hour, minute=minute)
+                            trigger = CronTrigger(hour=hour, minute=minute, timezone=BEIRUT_TZ)
                         else:
                             logger.error(f"Unknown schedule type: {schedule_type}")
                             continue
@@ -1266,11 +1383,11 @@ async def run_bot():
     Initializes all module-level state from the shared db/config,
     then runs the Telethon client + APScheduler until cancelled.
     """
-    global config, db, logger, llm_client, API_ID, API_HASH, STRING_SESSION, client
+    global config, db, logger, llm_client, API_ID, API_HASH, client
 
-    # Initialize from app.py's already-configured db and config
-    # NOTE: do NOT call setup_logging() here — app.py already configured the root logger.
-    # Calling it again would add a second handler → every line prints twice.
+    # Initialize from app.py's already-configured db and config.
+    # NOTE: logging is configured once in app.py (root logger + handlers); do not
+    # reconfigure it here, or every line would print twice via a duplicate handler.
     import logging as _logging
     config = load_config()
     logger = _logging.getLogger("bot")
@@ -1285,31 +1402,27 @@ async def run_bot():
             temperature=config["openai"]["temperature"]
         )
     else:
+        from utils.gemini_models import get_gemini_model
         llm_client = GeminiClient(
             project=config["gemini"]["project"],
             location=config["gemini"].get("location", "global"),
-            model=config["gemini"].get("model", "gemini-2.5-flash"))
+            model=get_gemini_model(config))
 
     API_ID = config["telegram"]["api_id"]
     API_HASH = config["telegram"]["api_hash"]
-    STRING_SESSION = config["telegram"].get("string_session")
 
-    # Prefer session string from DB (admin user), fall back to config.yaml
-    _db_session = None
+    # The admin's Telegram session lives in the DB (set via the System page → Session Setup).
+    active_session = None
     try:
         _admin_user = get_db().get_admin_user()
         if _admin_user and _admin_user.get('telegram_session'):
-            _db_session = _admin_user['telegram_session']
+            active_session = _admin_user['telegram_session']
     except Exception as _e:
         logger.debug(f"[SESSION] Could not load session from DB: {_e}")
-    active_session = _db_session or STRING_SESSION
     if not active_session:
         logger.warning("[SESSION] No Telegram session configured. Set one via the System page → Session Setup.")
         return
-    if _db_session:
-        logger.info("[SESSION] Using session string from DB")
-    else:
-        logger.info("[SESSION] Using session string from config.yaml (no DB session found)")
+    logger.info("[SESSION] Using session string from DB")
     client = TelegramClient(StringSession(active_session), API_ID, API_HASH)
 
     # Register message handler once — persists across reconnects

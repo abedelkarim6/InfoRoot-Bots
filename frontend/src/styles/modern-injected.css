@@ -69,6 +69,11 @@
 .sch-timeline-table thead th { background:var(--bg-secondary); }
 .sch-date-sep td { background:var(--bg-tertiary); color:var(--text-muted); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:5px 12px; border-bottom:1px solid var(--border-color); }
 .sch-date-sep:hover td { background:var(--bg-tertiary) !important; cursor:default; }
+/* YouTube Schedules page */
+.yt-sched-h { margin:18px 0 8px; font-size:15px; font-weight:700; }
+.yt-sched-budget { margin:8px 0 14px; }
+.yt-sched-budget-track { margin-top:6px; height:8px; border-radius:5px; background:var(--bg-tertiary); overflow:hidden; }
+.yt-sched-budget-fill { height:100%; border-radius:5px; transition:width .4s ease; }
 .mon-ellipsis { max-width:520px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word; line-height:1.45; }
 .mon-type-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; white-space:nowrap; }
 .mon-type-badge.hourly { background:rgba(59,130,246,0.18); color:#60a5fa; }

@@ -40,7 +40,8 @@ export default function BotDetail({ botName }) {
   // ?tab=basic|rules|categories — falls back to categories.
   const [tabParam, setTabParam] = useUrlString('tab', 'categories');
   const activeTab = VALID_TABS.has(tabParam) ? tabParam : 'categories';
-  const setActiveTab = setTabParam;
+  // Push so the browser Back button returns to the previous tab.
+  const setActiveTab = (t) => setTabParam(t, { push: true });
 
   // Resolve the bot's current source / target channels from the union of all
   // collections it references. This is what the per-bot Sources/Destinations

@@ -36,6 +36,17 @@ export function parseCommaSep(val) {
   return (val || '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** Format a duration in seconds as H:MM:SS or M:SS. Returns '—' when unknown. */
+export function formatDuration(secs) {
+  const s = Number(secs);
+  if (!s || s <= 0 || isNaN(s)) return '—';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
 export function kwScheduleToFields(intervalMinutes) {
   if (!intervalMinutes) return { val: '', unit: 'hours' };
   if (intervalMinutes >= 1440 && intervalMinutes % 1440 === 0) {

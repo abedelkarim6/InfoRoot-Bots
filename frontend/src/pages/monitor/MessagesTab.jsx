@@ -2,11 +2,16 @@
  * Messages tab — recent received messages with collection→channel grouping
  * (default) or flat-table view (toggle).
  *
- * Pagination: load 50 at a time, accumulating into a single in-component list
- * so filters apply across all loaded pages.
+ * All filters (bot, channel, topic, date range, text search) are applied
+ * server-side. Each filter change reloads page 1 from the server and "Load
+ * more" keeps paginating the *filtered* result set — so pagination always
+ * covers the whole matching dataset, not just the pages already loaded.
+ *
+ * The filter dropdown options come from a one-shot /facets call so they list
+ * every bot/channel/topic in the DB even though the visible rows are filtered.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, debounce, fmtLBN } from '../../lib/api';
 import MultiSelect from './MultiSelect';
 import ExportColumnsModal from './ExportColumnsModal';
@@ -26,9 +31,10 @@ export default function MessagesTab() {
   const [error, setError] = useState(null);
   const [flatView, setFlatView] = useUrlBool('flat');
   const [showExport, setShowExport] = useState(false);
+  const [facets, setFacets] = useState({ bots: [], channels: [], topics: [] });
 
   // Filters — URL-backed
-  const [selColls, setSelColls] = useUrlSet('coll');
+  const [selBots, setSelBots] = useUrlSet('bot');
   const [selChannels, setSelChannels] = useUrlSet('ch');
   const [selTopics, setSelTopics] = useUrlSet('topic');
   const [search, setSearch] = useUrlString('q', '');
@@ -38,20 +44,64 @@ export default function MessagesTab() {
 
   const debouncedSetSearch = useMemo(() => debounce((v) => setSearch(v), 220), []);
 
-  // Initial load + 30s silent refresh.
+  // Latest filters reachable from callbacks (the 30s interval and "Load more")
+  // which would otherwise close over stale values.
+  const filtersRef = useRef({});
+  filtersRef.current = { search, selBots, selChannels, selTopics, dateFrom, dateTo };
+
+  // Guards against out-of-order responses when filters change rapidly: only the
+  // newest loadPage result is applied.
+  const reqSeq = useRef(0);
+
+  // Reload page 1 whenever any filter changes. Every filter is server-side now,
+  // so the matches re-paginate across the whole DB instead of just hiding rows
+  // on already-loaded pages.
   useEffect(() => {
     loadPage(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, selBots, selChannels, selTopics, dateFrom, dateTo]);
+
+  // Filter dropdown options — fetched once so they list every bot/channel/topic
+  // even though the visible rows are filtered server-side.
+  useEffect(() => {
+    (async () => {
+      const res = await api('/api/monitor/messages/facets');
+      if (res?.status === 'ok') {
+        setFacets({
+          bots: res.bots || [],
+          channels: res.channels || [],
+          topics: res.topics || []
+        });
+      }
+    })();
+  }, []);
+
+  // 30s silent refresh of the first page (respecting the active filters).
+  useEffect(() => {
     const id = setInterval(() => silentRefresh(), 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function buildUrl(off) {
+    const f = filtersRef.current;
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(off) });
+    const q = (f.search || '').trim();
+    if (q) params.set('search', q);
+    if (f.selBots.size) params.set('bots', [...f.selBots].join(','));
+    if (f.selChannels.size) params.set('channels', [...f.selChannels].join(','));
+    if (f.selTopics.size) params.set('topics', [...f.selTopics].join(','));
+    if (f.dateFrom) params.set('date_from', f.dateFrom);
+    if (f.dateTo) params.set('date_to', f.dateTo);
+    return `/api/monitor/messages?${params.toString()}`;
+  }
+
   async function loadPage(append) {
+    const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
-    const res = await api(
-      `/api/monitor/messages?limit=${PAGE_SIZE}&offset=${append ? offset : 0}`
-    );
+    const res = await api(buildUrl(append ? offset : 0));
+    if (seq !== reqSeq.current) return; // superseded by a newer request
     if (res.status !== 'ok') {
       setError(res.message || 'Unknown error');
       setLoading(false);
@@ -66,8 +116,10 @@ export default function MessagesTab() {
   }
 
   async function silentRefresh() {
-    const res = await api(`/api/monitor/messages?limit=${PAGE_SIZE}&offset=0`);
+    const seq = reqSeq.current;
+    const res = await api(buildUrl(0));
     if (res?.status !== 'ok') return;
+    if (seq !== reqSeq.current) return; // a loadPage started after us — defer
     const newMsgs = res.messages || [];
     if (!newMsgs.length) return;
     setMessages((prev) => {
@@ -78,59 +130,53 @@ export default function MessagesTab() {
     });
   }
 
-  // Dynamic dropdown values from loaded messages.
-  const allColls = useMemo(
-    () => uniqueSorted(messages.map((m) => m.collection).filter(Boolean)),
-    [messages]
-  );
+  // Dropdown options: full facet universe unioned with anything in the loaded
+  // rows (covers brand-new values that appeared since the facets were fetched).
+  // Bots come from facets only (which lists currently-existing bots). We don't
+  // union loaded-row bot_names here because the messages table keeps rows from
+  // since-deleted bots, which would otherwise reappear in the filter.
+  const allBots = useMemo(() => uniqueSorted(facets.bots), [facets]);
   const allChannels = useMemo(
     () =>
-      uniqueSorted(
-        messages
+      uniqueSorted([
+        ...facets.channels.map((c) => `@${c}`),
+        ...messages
           .map((m) => (m.channel_username ? `@${m.channel_username}` : null))
           .filter(Boolean)
-      ),
-    [messages]
+      ]),
+    [facets, messages]
   );
   const allTopics = useMemo(
     () =>
-      uniqueSorted(
-        messages.flatMap((m) =>
+      uniqueSorted([
+        ...facets.topics,
+        ...messages.flatMap((m) =>
           (m.topics || '')
             .split(',')
             .map((t) => t.trim())
             .filter(Boolean)
         )
-      ),
-    [messages]
+      ]),
+    [facets, messages]
   );
 
-  const filtered = useMemo(() => {
-    let out = messages;
-    if (selColls.size) out = out.filter((m) => selColls.has(m.collection || ''));
-    if (selChannels.size) out = out.filter((m) => selChannels.has(`@${m.channel_username}`));
-    if (selTopics.size)
-      out = out.filter((m) =>
-        (m.topics || '')
-          .split(',')
-          .map((t) => t.trim())
-          .some((t) => selTopics.has(t))
-      );
-    const q = search.trim().toLowerCase();
-    if (q) out = out.filter((m) => (m.preview || '').toLowerCase().includes(q));
-    if (dateFrom) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) >= dateFrom);
-    if (dateTo) out = out.filter((m) => m.timestamp && m.timestamp.slice(0, 10) <= dateTo);
-    return out;
-  }, [messages, selColls, selChannels, selTopics, search, dateFrom, dateTo]);
+  // All filtering is server-side now; the loaded rows are already the result set.
+  const anyFilter =
+    !!search.trim() ||
+    selBots.size > 0 ||
+    selChannels.size > 0 ||
+    selTopics.size > 0 ||
+    !!dateFrom ||
+    !!dateTo;
 
   return (
     <>
       <div className="mon-filter-bar">
         <MultiSelect
-          label="All Collections"
-          values={allColls}
-          selected={selColls}
-          onChange={setSelColls}
+          label="All Bots"
+          values={allBots}
+          selected={selBots}
+          onChange={setSelBots}
         />
         <MultiSelect
           label="All Channels"
@@ -194,18 +240,18 @@ export default function MessagesTab() {
       )}
       {loading && !messages.length && <p className="mon-empty">Loading…</p>}
 
-      {!error && !loading && !filtered.length && (
+      {!error && !loading && !messages.length && (
         <p className="mon-empty">
-          {messages.length ? 'No messages match the filters.' : 'No messages in DB yet.'}
+          {anyFilter ? 'No messages match the filters.' : 'No messages in DB yet.'}
         </p>
       )}
 
-      {!error && filtered.length > 0 && (
+      {!error && messages.length > 0 && (
         <>
           {flatView ? (
-            <FlatTable messages={filtered} />
+            <FlatTable messages={messages} />
           ) : (
-            <GroupedView messages={filtered} />
+            <GroupedView messages={messages} />
           )}
 
           {hasMore ? (
@@ -237,7 +283,7 @@ export default function MessagesTab() {
           tabName="messages"
           onClose={() => setShowExport(false)}
           onConfirm={(keys) => {
-            const res = downloadCsv('messages', filtered, keys);
+            const res = downloadCsv('messages', messages, keys);
             setShowExport(false);
             if (!res.ok) showAlert(res.reason, { title: 'Export', icon: '⚠️' });
           }}
@@ -294,8 +340,8 @@ function FlatTable({ messages }) {
                   <td>
                     <Tags value={m.keywords_found} />
                   </td>
-                  <td className="mon-ellipsis" title={m.preview || ''}>
-                    {m.preview || ''}
+                  <td title={m.preview || ''}>
+                    <div className="mon-ellipsis">{m.preview || ''}</div>
                   </td>
                 </tr>
               );
@@ -356,8 +402,8 @@ function GroupedView({ messages }) {
                         <td>
                           <Tags value={m.keywords_found} />
                         </td>
-                        <td className="mon-ellipsis" title={m.preview || ''}>
-                          {m.preview || ''}
+                        <td title={m.preview || ''}>
+                          <div className="mon-ellipsis">{m.preview || ''}</div>
                         </td>
                       </tr>
                     ))}

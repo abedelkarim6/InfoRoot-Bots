@@ -77,8 +77,9 @@ export default function MonitorPage() {
     refetchIntervalInBackground: false
   });
 
+  // Push (not replace) so the browser Back button returns to the previous tab.
   function setTab(t) {
-    setSearchParams({ tab: t }, { replace: true });
+    setSearchParams({ tab: t }, { replace: false });
   }
 
   const data = monitor.data?.status === 'ok' ? monitor.data : null;

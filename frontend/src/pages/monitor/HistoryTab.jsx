@@ -8,8 +8,7 @@
  *   - Click message count → drill into the summary's interim composition
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, escapeHtml, fmtLBN } from '../../lib/api';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import MultiSelect from './MultiSelect';
@@ -34,15 +33,53 @@ const HIST_STYLES = `
       border-radius:20px; background:rgba(239,68,68,.15); color:#fca5a5; }
 `;
 
+const PAGE_SIZE = 200;
+
 export default function HistoryTab() {
   const { showAlert } = useDialogs();
 
-  const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['monitor', 'history'],
-    queryFn: () => api('/api/monitor/schedule-history?limit=200')
-  });
+  // Server-side pagination: each "Load older" appends the next page of runs
+  // (ordered newest→oldest) so we can page back arbitrarily far instead of
+  // being capped at the most recent PAGE_SIZE rows.
+  const [allRuns, setAllRuns] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  // Guards against out-of-order responses when reloading.
+  const reqSeq = useRef(0);
 
-  const allRuns = data?.status === 'ok' ? data.runs || [] : [];
+  async function loadPage(append) {
+    const seq = ++reqSeq.current;
+    setIsFetching(true);
+    if (!append) setIsLoading(true);
+    const offset = append ? allRuns.length : 0;
+    const res = await api(
+      `/api/monitor/schedule-history?limit=${PAGE_SIZE}&offset=${offset}`
+    );
+    if (seq !== reqSeq.current) return; // superseded by a newer request
+    if (res?.status !== 'ok') {
+      setLoadError(res?.message || 'Unknown error');
+      setIsFetching(false);
+      setIsLoading(false);
+      return;
+    }
+    const newRuns = res.runs || [];
+    setAllRuns((prev) => (append ? [...prev, ...newRuns] : newRuns));
+    setHasMore(newRuns.length === PAGE_SIZE);
+    setLoadError(null);
+    setIsFetching(false);
+    setIsLoading(false);
+  }
+
+  function refetch() {
+    loadPage(false);
+  }
+
+  useEffect(() => {
+    loadPage(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [selBots, setSelBots] = useUrlSet('hbot');
   const [selTopics, setSelTopics] = useUrlSet('htopic');
@@ -51,6 +88,9 @@ export default function HistoryTab() {
   const [summaryId, setSummaryId] = useUrlInt('summary', 0);
   const composition = summaryId > 0 ? { summaryId } : null;
   const [showExport, setShowExport] = useState(false);
+  const [exportingInterims, setExportingInterims] = useState(false);
+  // The run whose summary popup is open (null = closed).
+  const [viewRun, setViewRun] = useState(null);
 
   const allBots = useMemo(
     () => uniqueSorted(allRuns.map((r) => r.bot_name).filter(Boolean)),
@@ -82,14 +122,10 @@ export default function HistoryTab() {
     );
   }
 
-  function viewSummary(text) {
-    const safe = escapeHtml(text || '');
-    showAlert(
-      `<div style="direction:rtl;text-align:right;white-space:pre-wrap;` +
-        `max-height:420px;overflow-y:auto;font-size:13px;` +
-        `line-height:1.7;padding:4px 2px;">${safe}</div>`,
-      { title: 'Summary Output', icon: '📄' }
-    );
+  // Open the summary popup. When the run carries multiple model outputs
+  // (an A/B test), the modal shows one tab per model; otherwise just the text.
+  function viewSummary(run) {
+    setViewRun(run);
   }
 
   function viewError(rawErr) {
@@ -160,6 +196,19 @@ export default function HistoryTab() {
         </button>
         <button
           className="btn btn-secondary btn-sm"
+          disabled={exportingInterims}
+          onClick={async () => {
+            setExportingInterims(true);
+            const res = await exportHistoryWithInterims(runs);
+            setExportingInterims(false);
+            if (!res.ok) showAlert(res.reason, { title: 'Export', icon: '⚠️' });
+          }}
+          title="Export visible runs with their full interim composition and final summary"
+        >
+          {exportingInterims ? '… Exporting' : '⬇ Export with Interims'}
+        </button>
+        <button
+          className="btn btn-secondary btn-sm"
           style={{ whiteSpace: 'nowrap' }}
           onClick={() => refetch()}
           disabled={isFetching}
@@ -170,41 +219,67 @@ export default function HistoryTab() {
 
       {isLoading ? (
         <p className="mon-empty">Loading…</p>
-      ) : data?.status !== 'ok' ? (
-        <p className="mon-empty">Error: {data?.message || ''}</p>
+      ) : loadError ? (
+        <p className="mon-empty">Error: {loadError}</p>
       ) : !runs.length ? (
         <p className="mon-empty" style={{ padding: 24 }}>
-          No schedule runs recorded yet.
+          {allRuns.length
+            ? 'No runs match the filters.'
+            : 'No schedule runs recorded yet.'}
         </p>
       ) : (
-        <div style={{ overflowX: 'auto', maxHeight: '70vh', overflowY: 'auto' }}>
-          <table className="hist-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Bot</th>
-                <th>Topic</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Msgs</th>
-                <th>Summary</th>
-                <th>Target</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((r, i) => (
-                <HistoryRow
-                  key={r.id ?? i}
-                  run={r}
-                  onShowComposition={(id) => setSummaryId(id)}
-                  onViewSummary={viewSummary}
-                  onViewError={viewError}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div style={{ overflowX: 'auto', maxHeight: '70vh', overflowY: 'auto' }}>
+            <table className="hist-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Bot</th>
+                  <th>Topic</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Msgs</th>
+                  <th>Summary</th>
+                  <th>Target</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((r, i) => (
+                  <HistoryRow
+                    key={r.id ?? i}
+                    run={r}
+                    onShowComposition={(id) => setSummaryId(id, { push: true })}
+                    onViewSummary={viewSummary}
+                    onViewError={viewError}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {hasMore ? (
+            <div style={{ textAlign: 'center', padding: 16 }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => loadPage(true)}
+                disabled={isFetching}
+              >
+                {isFetching ? '… Loading' : 'Load older runs…'}
+              </button>
+              <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                {allRuns.length} loaded
+              </span>
+            </div>
+          ) : allRuns.length > PAGE_SIZE ? (
+            <p
+              className="text-muted"
+              style={{ textAlign: 'center', padding: 8, fontSize: 12 }}
+            >
+              All {allRuns.length} runs loaded
+            </p>
+          ) : null}
+        </>
       )}
 
       {showExport && (
@@ -218,7 +293,81 @@ export default function HistoryTab() {
           }}
         />
       )}
+
+      {viewRun && <SummaryModal run={viewRun} onClose={() => setViewRun(null)} />}
     </>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Summary popup. Shows the sent (primary) summary, plus a tab per compare model
+// when an A/B test ran. The sent model's tab is flagged "· sent".
+// ────────────────────────────────────────────────────────────────────────────
+function SummaryModal({ run, onClose }) {
+  // model_outputs is {model: text}; when present it already includes the
+  // primary. Fall back to a single synthetic tab from summary_text otherwise.
+  const outputs = run.model_outputs && Object.keys(run.model_outputs).length
+    ? run.model_outputs
+    : { [run.primary_model || 'summary']: run.summary_text || '' };
+
+  const models = Object.keys(outputs);
+  const primary = run.primary_model && outputs[run.primary_model] != null
+    ? run.primary_model
+    : models[0];
+  const [active, setActive] = useState(primary);
+  const multi = models.length > 1;
+
+  return (
+    <div
+      className="modal-overlay"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="modal-dialog" style={{ maxWidth: 760 }}>
+        <div className="modal-header">
+          <h3 style={{ margin: 0 }}>📄 Summary Output</h3>
+          <button className="btn-icon" onClick={onClose}>×</button>
+        </div>
+
+        {multi && (
+          <div
+            style={{
+              display: 'flex', gap: 6, flexWrap: 'wrap',
+              padding: '10px 16px 0', borderBottom: '1px solid var(--border-color)'
+            }}
+          >
+            {models.map((m) => (
+              <button
+                key={m}
+                className="btn btn-sm"
+                onClick={() => setActive(m)}
+                style={{
+                  fontSize: 11,
+                  padding: '4px 10px',
+                  borderBottom: active === m ? '2px solid var(--accent, #6366f1)' : '2px solid transparent',
+                  fontWeight: active === m ? 700 : 400,
+                  opacity: active === m ? 1 : 0.7
+                }}
+                title={m === primary ? 'This output was sent to Telegram' : 'Comparison only — not sent'}
+              >
+                {m}{m === primary ? ' · sent' : ''}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          <div
+            style={{
+              direction: 'rtl', textAlign: 'right', whiteSpace: 'pre-wrap',
+              fontSize: 13, lineHeight: 1.7, padding: '4px 2px',
+              color: 'var(--text-primary)'
+            }}
+          >
+            {outputs[active] || '(empty)'}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -259,9 +408,11 @@ function HistoryRow({ run, onShowComposition, onViewSummary, onViewError }) {
           <button
             className="btn btn-sm"
             style={{ fontSize: 11, padding: '2px 8px' }}
-            onClick={() => onViewSummary(run.summary_text)}
+            onClick={() => onViewSummary(run)}
           >
-            View
+            {run.model_outputs && Object.keys(run.model_outputs).length > 1
+              ? `View (${Object.keys(run.model_outputs).length})`
+              : 'View'}
           </button>
         ) : (
           <span style={{ color: 'var(--text-muted)' }}>—</span>
@@ -321,7 +472,9 @@ function CompositionPanel({ summaryId, onBack }) {
 
   const interims = data?.interims || [];
   const remaining = data?.remaining_messages || [];
+  const finalSummary = data?.summary_text || '';
   const lastIdx = interims.length - 1;
+  const hasData = interims.length > 0 || remaining.length > 0;
 
   return (
     <div className="sum-msg-page">
@@ -330,6 +483,16 @@ function CompositionPanel({ summaryId, onBack }) {
           ‹ Back to History
         </button>
         <h3 style={{ margin: 0, fontSize: 15 }}>Summary Composition</h3>
+        {hasData && (
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => exportCompositionCsv(summaryId, interims, remaining, finalSummary)}
+            title="Export all messages (full text) grouped by interim, ending with the final summary"
+          >
+            ⬇ Export
+          </button>
+        )}
       </div>
 
       {loading && <p className="mon-empty">Loading…</p>}
@@ -530,4 +693,151 @@ function CompMessagesTable({ messages }) {
 
 function uniqueSorted(values) {
   return [...new Set(values)].sort();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Composition CSV export
+//
+// Rows follow the way a summary is actually built up: all the source messages
+// that fed an interim, then that interim's rolling output, then the next
+// interim and its messages, … then any remaining (never-batched) messages, and
+// finally the summary's final output. Uses the full `text` field — falls back
+// to `preview` for older responses that don't carry it.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Columns shared by the single-summary export and each run block of the
+// History "with interims" export.
+const COMP_BODY_HEADER = [
+  'Section',
+  'Message Time',
+  'Source',
+  'Topics',
+  'Categories',
+  'Keywords',
+  'Content'
+];
+
+const csvCell = (v) => `"${(v == null ? '' : String(v)).replace(/"/g, '""')}"`;
+const csvRow = (vals) => vals.map(csvCell).join(',');
+const fullText = (m) => (m.text != null ? m.text : m.preview || '');
+
+/**
+ * Build the body rows (no header) for one summary's composition, in build
+ * order: per interim → its messages then its rolling output, then remaining
+ * messages, then the final summary output. Each row has COMP_BODY_HEADER shape.
+ */
+function compositionBodyRows(interims, remaining, finalSummary) {
+  const rows = [];
+  const lastIdx = interims.length - 1;
+
+  interims.forEach((interim, idx) => {
+    const num = interim.interim_number ?? idx + 1;
+    (interim.messages || []).forEach((m) => {
+      rows.push([
+        `Interim #${num}`,
+        m.timestamp ? fmtLBN(m.timestamp) : '',
+        m.channel_username ? `@${m.channel_username}` : '',
+        m.topics || '',
+        m.categories || '',
+        m.keywords_found || '',
+        fullText(m)
+      ]);
+    });
+    const status = idx === lastIdx ? 'used in final' : `rolled into #${num + 1}`;
+    rows.push([
+      `Interim #${num} Output (${status})`,
+      interim.created_at ? fmtLBN(interim.created_at) : '',
+      '',
+      '',
+      '',
+      '',
+      interim.summary_text || ''
+    ]);
+  });
+
+  (remaining || []).forEach((m) => {
+    rows.push([
+      'Remaining (not batched)',
+      m.timestamp ? fmtLBN(m.timestamp) : '',
+      m.channel_username ? `@${m.channel_username}` : '',
+      m.topics || '',
+      m.categories || '',
+      m.keywords_found || '',
+      fullText(m)
+    ]);
+  });
+
+  if (finalSummary) {
+    rows.push(['Final Summary Output', '', '', '', '', '', finalSummary]);
+  }
+
+  return rows;
+}
+
+// UTF-8 BOM so Excel reads non-ASCII (Arabic / Hebrew / emoji) correctly.
+function downloadCsvRows(rows, filename) {
+  const csv = '﻿' + rows.map(csvRow).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportCompositionCsv(summaryId, interims, remaining, finalSummary) {
+  const rows = [
+    COMP_BODY_HEADER,
+    ...compositionBodyRows(interims, remaining, finalSummary)
+  ];
+  downloadCsvRows(rows, `summary_${summaryId}_composition_${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+/**
+ * History export "with interims": for each visible run that produced a summary,
+ * emit its full composition (the same build-order layout as the single export)
+ * prefixed with the run's identity. Pulls every run's interims in one batch
+ * call so we don't hit the per-summary endpoint once per row.
+ */
+async function exportHistoryWithInterims(runs) {
+  const withSummary = runs.filter((r) => r.summary_id);
+  if (!withSummary.length) {
+    return { ok: false, reason: 'No runs with a generated summary to export.' };
+  }
+  const ids = withSummary.map((r) => r.summary_id).join(',');
+  const res = await api(`/api/monitor/summary-composition-batch?ids=${ids}`);
+  if (res?.status !== 'ok') {
+    return { ok: false, reason: res?.message || 'Failed to load interim composition.' };
+  }
+  const comps = res.compositions || {};
+
+  const header = ['Run Time', 'Bot', 'Topic', 'Type', 'Status', ...COMP_BODY_HEADER];
+  const rows = [header];
+  withSummary.forEach((r) => {
+    const comp = comps[String(r.summary_id)] || {};
+    const meta = [
+      r.fired_at ? fmtLBN(r.fired_at) : '',
+      r.bot_name || '',
+      r.topic_name || '',
+      r.schedule_type || '',
+      r.status || ''
+    ];
+    // Prefer the run's own final summary text; fall back to the batch payload.
+    const body = compositionBodyRows(
+      comp.interims || [],
+      comp.remaining_messages || [],
+      r.summary_text || comp.summary_text || ''
+    );
+    if (!body.length) {
+      rows.push([...meta, ...COMP_BODY_HEADER.map(() => '')]);
+    } else {
+      body.forEach((b) => rows.push([...meta, ...b]));
+    }
+  });
+
+  downloadCsvRows(rows, `schedule_history_interims_${new Date().toISOString().slice(0, 10)}.csv`);
+  return { ok: true };
 }

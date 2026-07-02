@@ -45,7 +45,8 @@ const VALID_ACCT_TABS = new Set(['users', 'plans']);
 export default function AccountsPage() {
   const [tabParam, setTabParam] = useUrlString('tab', 'users');
   const tab = VALID_ACCT_TABS.has(tabParam) ? tabParam : 'users';
-  const setTab = setTabParam;
+  // Push so the browser Back button returns to the previous tab.
+  const setTab = (t) => setTabParam(t, { push: true });
   const [createOpen, setCreateOpen] = useState(false);
 
   const { data, isLoading, refetch, isFetching } = useQuery({

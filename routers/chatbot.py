@@ -88,27 +88,31 @@ async def chatbot_suggestions():
 @router.post("/send")
 async def chatbot_send(request: Request):
     """Send a message and get AI response."""
-    data = await request.json()
-    session_id = data.get("session_id", "").strip()
-    message = data.get("message", "").strip()
-
-    context = data.get("context")  # {type, value} or None
-
-    if not session_id or not message:
-        return {"status": "error", "message": "session_id and message are required"}
-
-    allowed, err = _check_limit(request)
-    if not allowed:
-        return {"status": "error", "message": err, "limit_reached": True}
-
     try:
-        reply = await send_message(session_id, message, context=context)
-        _track_usage(request)
-        return {"status": "ok", "reply": reply}
-    except ValueError as e:
-        return {"status": "error", "message": str(e)}
+        data = await request.json()
+        session_id = data.get("session_id", "").strip()
+        message = data.get("message", "").strip()
+
+        context = data.get("context")  # {type, value} or None
+
+        if not session_id or not message:
+            return {"status": "error", "message": "session_id and message are required"}
+
+        allowed, err = _check_limit(request)
+        if not allowed:
+            return {"status": "error", "message": err, "limit_reached": True}
+
+        try:
+            reply = await send_message(session_id, message, context=context)
+            _track_usage(request)
+            return {"status": "ok", "reply": reply}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.error(f"[CHATBOT] Error in session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"[CHATBOT] Error in session {session_id}: {e}")
+        logger.exception("[CHATBOT] send failed")
         return {"status": "error", "message": str(e)}
 
 
@@ -141,9 +145,13 @@ async def chatbot_stream(request: Request):
 @router.post("/end")
 async def chatbot_end(request: Request):
     """End a chatbot session."""
-    data = await request.json()
-    delete_session(data.get("session_id", ""))
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        delete_session(data.get("session_id", ""))
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[CHATBOT] end session failed")
+        return {"status": "error", "message": str(e)}
 
 
 # ==================== System Chatbot ====================
@@ -162,20 +170,24 @@ async def system_chatbot_start():
 @router.post("/system/send")
 async def system_chatbot_send(request: Request):
     """Send a message to the system chatbot. Returns reply + actions performed."""
-    data = await request.json()
-    session_id = data.get("session_id", "").strip()
-    message = data.get("message", "").strip()
-
-    if not session_id or not message:
-        return {"status": "error", "message": "session_id and message are required"}
-
     try:
-        result = await send_system_message(session_id, message)
-        return {"status": "ok", "reply": result["reply"], "actions": result["actions"]}
-    except ValueError as e:
-        return {"status": "error", "message": str(e)}
+        data = await request.json()
+        session_id = data.get("session_id", "").strip()
+        message = data.get("message", "").strip()
+
+        if not session_id or not message:
+            return {"status": "error", "message": "session_id and message are required"}
+
+        try:
+            result = await send_system_message(session_id, message)
+            return {"status": "ok", "reply": result["reply"], "actions": result["actions"]}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.error(f"[SYS-CHAT] Error in session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"[SYS-CHAT] Error in session {session_id}: {e}")
+        logger.exception("[CHATBOT] system send failed")
         return {"status": "error", "message": str(e)}
 
 
@@ -199,9 +211,13 @@ async def system_chatbot_stream(request: Request):
 @router.post("/system/end")
 async def system_chatbot_end(request: Request):
     """End a system chatbot session."""
-    data = await request.json()
-    delete_system_session(data.get("session_id", ""))
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        delete_system_session(data.get("session_id", ""))
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[CHATBOT] system end session failed")
+        return {"status": "error", "message": str(e)}
 
 
 # ==================== Shared ====================
@@ -209,43 +225,51 @@ async def system_chatbot_end(request: Request):
 @router.post("/refine")
 async def chatbot_refine(request: Request):
     """Refine/polish text using Gemini (reuses video_chat's refine)."""
-    from youtube_monitor.video_chat import refine_text
-
-    data = await request.json()
-    text = data.get("text", "").strip()
-    instruction = data.get("instruction", "").strip()
-
-    if not text:
-        return {"status": "error", "message": "text is required"}
-
     try:
-        result = await refine_text(text, instruction)
-        return {"status": "ok", "result": result}
+        from youtube_monitor.video_chat import refine_text
+
+        data = await request.json()
+        text = data.get("text", "").strip()
+        instruction = data.get("instruction", "").strip()
+
+        if not text:
+            return {"status": "error", "message": "text is required"}
+
+        try:
+            result = await refine_text(text, instruction)
+            return {"status": "ok", "result": result}
+        except Exception as e:
+            logger.error(f"[CHATBOT] Refine error: {e}")
+            return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"[CHATBOT] Refine error: {e}")
+        logger.exception("[CHATBOT] refine failed")
         return {"status": "error", "message": str(e)}
 
 
 @router.post("/send-telegram")
 async def chatbot_send_telegram(request: Request):
     """Send composed text to a Telegram channel/chat."""
-    from youtube_monitor.worker import _telegram_send_fn
-
-    data = await request.json()
-    text = data.get("text", "").strip()
-    target = data.get("target", "").strip()
-
-    if not text:
-        return {"status": "error", "message": "text is required"}
-    if not target:
-        return {"status": "error", "message": "target (channel/chat) is required"}
-
-    if not _telegram_send_fn:
-        return {"status": "error", "message": "Telegram send not available (bot not running)"}
-
     try:
-        await _telegram_send_fn(target, text)
-        return {"status": "ok"}
+        from youtube_monitor.worker import _telegram_send_fn
+
+        data = await request.json()
+        text = data.get("text", "").strip()
+        target = data.get("target", "").strip()
+
+        if not text:
+            return {"status": "error", "message": "text is required"}
+        if not target:
+            return {"status": "error", "message": "target (channel/chat) is required"}
+
+        if not _telegram_send_fn:
+            return {"status": "error", "message": "Telegram send not available (bot not running)"}
+
+        try:
+            await _telegram_send_fn(target, text)
+            return {"status": "ok"}
+        except Exception as e:
+            logger.error(f"[CHATBOT] Telegram send error: {e}")
+            return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"[CHATBOT] Telegram send error: {e}")
+        logger.exception("[CHATBOT] send-telegram failed")
         return {"status": "error", "message": str(e)}

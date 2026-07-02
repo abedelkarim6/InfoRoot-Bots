@@ -40,6 +40,19 @@ export default function KeywordsPage() {
     queryFn: () => api('/api/youtube/keywords')
   });
 
+  // Quota-aware rotation plan (demand vs daily budget + per-keyword cadence).
+  const { data: capData } = useQuery({
+    queryKey: ['yt-quota-capacity'],
+    queryFn: () => api('/api/youtube/keywords/quota-capacity'),
+    refetchInterval: 30000
+  });
+  const cap = capData?.status === 'ok' ? capData : null;
+  const capByKw = useMemo(() => {
+    const m = new Map();
+    (cap?.keywords || []).forEach((k) => m.set(k.keyword_id, k));
+    return m;
+  }, [cap]);
+
   const ok = data?.status === 'ok';
   const seoVisible = ok ? data.seo_visible !== false : true;
   const seoCount = ok ? data.seo_count || 0 : 0;
@@ -54,7 +67,7 @@ export default function KeywordsPage() {
   const allActive = allKeywords.length > 0 && allKeywords.every((k) => k.active);
 
   const toggleAll = useApiMutation('/api/youtube/keywords/toggle-all', {
-    invalidate: ['yt-keywords'],
+    invalidate: ['yt-keywords', 'yt-quota-capacity'],
     successMsg: (_r, vars) => (vars.active ? 'All trackers enabled' : 'All trackers disabled'),
     errorMsg: 'Failed to toggle trackers'
   });
@@ -150,6 +163,8 @@ export default function KeywordsPage() {
         </button>
       </PageHeader>
 
+      <QuotaCapacityBanner cap={cap} />
+
       <BlockedChannelsCard />
 
       {isLoading ? (
@@ -164,6 +179,7 @@ export default function KeywordsPage() {
             <KeywordCard
               key={kw.id}
               kw={kw}
+              cap={capByKw.get(kw.id)}
               selected={selectedIds.has(kw.id)}
               onToggleSelect={(checked) => toggleSelected(kw.id, checked)}
               onEdit={() => setModalKw({ mode: 'edit', kw })}
@@ -183,17 +199,78 @@ export default function KeywordsPage() {
   );
 }
 
+// ─── Quota capacity banner ──────────────────────────────────────────────────
+
+function fmtNum(n) {
+  if (!Number.isFinite(n)) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+
+function QuotaCapacityBanner({ cap }) {
+  if (!cap) return null;
+  const usable = cap.usable_units || 0;
+  const demand = cap.total_demand_units || 0;
+  const used = cap.used_today || 0;
+  const pct = usable > 0 ? Math.min(100, (demand / usable) * 100) : 0;
+  const over = cap.over_budget;
+  const barCls = over ? 'aiu-bar-danger' : pct >= 80 ? 'aiu-bar-warn' : 'aiu-bar-ok';
+  const rotated = (cap.keywords || []).filter((k) => k.status === 'rotated');
+  const perWordHourly = (cap.word_search_cost || 101) * 24; // units/day for one word hourly
+  const wordsHourly = Math.floor(usable / perWordHourly);
+
+  return (
+    <div className="card" style={{ marginBottom: '1rem' }}>
+      <div className="card-header" style={{ gap: '.5rem' }}>
+        <span>📊</span>
+        <strong>Quota capacity</strong>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+          {fmtNum(used)} used today · budget {fmtNum(usable)} of {fmtNum(cap.limit_units)} u/day
+        </span>
+      </div>
+      <div className="card-body">
+        <div className="aiu-meter" style={{ maxWidth: 520 }}>
+          <div className="aiu-meter-label">
+            <span>Planned daily demand</span>
+            <span className="aiu-meter-vals">{fmtNum(demand)} / {fmtNum(usable)} u</span>
+          </div>
+          <div className="aiu-bar-track">
+            <div className={`aiu-bar-fill ${barCls}`} style={{ width: pct.toFixed(1) + '%' }} />
+          </div>
+          <div className="aiu-bar-pct">{pct.toFixed(0)}%</div>
+        </div>
+
+        {over ? (
+          <p style={{ marginTop: '.75rem', marginBottom: 0, fontSize: 13, color: 'var(--warning,#f59e0b)' }}>
+            ⚠ Over budget — <strong>auto-rotating</strong>: high-priority keywords run on schedule, lower-priority
+            ones run less often so the daily quota is never exceeded.
+            {rotated.length > 0 && (
+              <> Currently stretched: {rotated.map((k) => `"${k.keyword}"`).join(', ')}.</>
+            )}
+          </p>
+        ) : (
+          <p style={{ marginTop: '.75rem', marginBottom: 0, fontSize: 13, color: 'var(--text-muted)' }}>
+            ✓ All {cap.total_words} word(s) fit the budget — every keyword runs on its schedule.
+            Roughly <strong>{wordsHourly}</strong> word(s) fit at hourly cadence.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Keyword Card ───────────────────────────────────────────────────────────
 
-function KeywordCard({ kw, selected, onToggleSelect, onEdit }) {
+function KeywordCard({ kw, cap, selected, onToggleSelect, onEdit }) {
   const toggle = useApiMutation('/api/youtube/keywords/toggle', {
-    invalidate: ['yt-keywords'],
+    invalidate: ['yt-keywords', 'yt-quota-capacity'],
     successMsg: (_r, vars) => (vars.active ? 'Keyword enabled' : 'Keyword disabled'),
     errorMsg: 'Failed to toggle keyword'
   });
 
   const remove = useApiMutation('/api/youtube/keywords/delete', {
-    invalidate: ['yt-keywords', 'recycle-bin'],
+    invalidate: ['yt-keywords', 'recycle-bin', 'yt-quota-capacity'],
     successMsg: 'Keyword deleted',
     errorMsg: 'Failed to delete keyword'
   });
@@ -216,6 +293,7 @@ function KeywordCard({ kw, selected, onToggleSelect, onEdit }) {
   if (kw.max_duration_seconds) filters.push(`Max ${Math.round(kw.max_duration_seconds / 60)}min`);
   if (kw.min_view_count > 0) filters.push(`≥${kw.min_view_count} views`);
   if (kw.language) filters.push(`Lang: ${kw.language}`);
+  if (kw.output_length_percent) filters.push(`Len ${kw.output_length_percent}%`);
   if ((kw.channel_allowlist || []).length) filters.push(`${kw.channel_allowlist.length} allowed ch`);
   if ((kw.channel_blocklist || []).length) filters.push(`${kw.channel_blocklist.length} blocked ch`);
   if ((kw.title_must_include || []).length) filters.push(`+${kw.title_must_include.length} title terms`);
@@ -242,6 +320,31 @@ function KeywordCard({ kw, selected, onToggleSelect, onEdit }) {
     );
   }
 
+  const PRIORITY_LABEL = { 1: 'High', 2: 'High', 3: 'Normal', 4: 'Low', 5: 'Low' };
+  const priLabel = PRIORITY_LABEL[kw.priority || 3] || 'Normal';
+  let cadenceInfo = null;
+  if (cap) {
+    const ef = kwScheduleToFields(Math.round(cap.effective_interval_min || 0));
+    cadenceInfo = (
+      <div className="yt-ch-detail" style={{ marginTop: 4, fontSize: 12 }}>
+        {cap.status === 'rotated' ? (
+          <span style={{ color: 'var(--warning,#f59e0b)' }}>
+            🔄 Rotated · ~every {ef.val} {ef.unit}
+          </span>
+        ) : (
+          <span className="text-muted">✓ Runs on schedule</span>
+        )}
+        {' · '}
+        <span
+          className="text-muted"
+          title={`${cap.found_7d} found / ${cap.searches_7d} searches (7d)`}
+        >
+          Yield {cap.yield_per_search}/search
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className={`yt-keyword-card${selected ? ' yt-kw-card-selected' : ''}`}>
       <div className="yt-kw-header">
@@ -256,6 +359,9 @@ function KeywordCard({ kw, selected, onToggleSelect, onEdit }) {
         <div className="yt-kw-name">"{kw.keyword}"</div>
         <span className={`yt-status-badge ${kw.active ? 'yt-status-active' : 'yt-status-inactive'}`}>
           {kw.active ? 'Active' : 'Inactive'}
+        </span>
+        <span className="yt-filter-tag" style={{ fontSize: 11 }} title="Rotation priority">
+          ⭐ {priLabel}
         </span>
       </div>
       {subKws.length > 0 && (
@@ -284,6 +390,7 @@ function KeywordCard({ kw, selected, onToggleSelect, onEdit }) {
           : 'No Telegram targets'}
       </div>
       {scheduleInfo}
+      {cadenceInfo}
       {filters.length > 0 && (
         <div className="yt-kw-filters">
           {filters.map((f, i) => (
@@ -466,12 +573,14 @@ function KeywordModal({ mode, kw, onClose }) {
     blocklist: (kw?.channel_blocklist || []).join(', '),
     must_include: (kw?.title_must_include || []).join(', '),
     must_exclude: (kw?.title_must_exclude || []).join(', '),
-    prompt_key: kw?.prompt_key || ''
+    prompt_key: kw?.prompt_key || '',
+    priority: kw?.priority || 3,
+    output_length_percent: kw?.output_length_percent || ''
   }));
   const setF = (k, v) => setForm((s) => ({ ...s, [k]: v }));
 
   const save = useApiMutation(isEdit ? '/api/youtube/keywords/update' : '/api/youtube/keywords/add', {
-    invalidate: ['yt-keywords'],
+    invalidate: ['yt-keywords', 'yt-quota-capacity'],
     successMsg: isEdit ? 'Keyword updated' : 'Keyword added',
     errorMsg: 'Failed to save keyword',
     onSuccess: () => onClose()
@@ -499,7 +608,9 @@ function KeywordModal({ mode, kw, onClose }) {
       channel_blocklist: parseCommaSep(form.blocklist),
       title_must_include: parseCommaSep(form.must_include),
       title_must_exclude: parseCommaSep(form.must_exclude),
-      schedule_interval_minutes: kwFieldsToIntervalMinutes(form.sched_val, form.sched_unit)
+      schedule_interval_minutes: kwFieldsToIntervalMinutes(form.sched_val, form.sched_unit),
+      priority: parseInt(form.priority, 10) || 3,
+      output_length_percent: form.output_length_percent ? parseInt(form.output_length_percent, 10) : null
     };
     if (isEdit) payload.id = kw.id;
     save.mutate(payload);
@@ -589,6 +700,20 @@ function KeywordModal({ mode, kw, onClose }) {
                 min="0"
               />
             </div>
+            <div className="yt-kw-form-field">
+              <label className="input-label" title="Target summary length as a % of the video's transcript length">
+                Summary length %
+              </label>
+              <input
+                type="number"
+                className="input"
+                value={form.output_length_percent}
+                onChange={(e) => setF('output_length_percent', e.target.value)}
+                placeholder="Default"
+                min="1"
+                max="100"
+              />
+            </div>
           </div>
           <div className="yt-kw-form-row">
             <div className="yt-kw-form-field">
@@ -643,6 +768,20 @@ function KeywordModal({ mode, kw, onClose }) {
                   <option value="days">Days</option>
                 </select>
               </div>
+            </div>
+            <div className="yt-kw-form-field" style={{ maxWidth: 160 }}>
+              <label className="input-label">
+                Priority <span className="text-muted">(quota rotation)</span>
+              </label>
+              <select
+                className="select"
+                value={form.priority}
+                onChange={(e) => setF('priority', e.target.value)}
+              >
+                <option value={1}>High</option>
+                <option value={3}>Normal</option>
+                <option value={5}>Low</option>
+              </select>
             </div>
           </div>
           <div className="yt-kw-form-field">

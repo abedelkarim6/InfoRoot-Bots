@@ -39,22 +39,20 @@ _FIXED_PREFIX = _DEFAULT_FIXED_PREFIX
 
 
 def get_system_prompt() -> str:
-    """Return the active system prompt, reading override from config.yaml if set."""
+    """Return the active system prompt, reading override from system_prompts.yaml if set."""
     try:
-        from utils.helpers import load_config
-        cfg = load_config()
-        val = cfg.get("system_prompts", {}).get("summaries_system", "")
+        from utils.helpers import load_system_prompts
+        val = load_system_prompts().get("summaries_system", "")
         return val or _DEFAULT_SYSTEM_PROMPT
     except Exception:
         return _DEFAULT_SYSTEM_PROMPT
 
 
 def get_fixed_prefix() -> str:
-    """Return the active fixed prefix, reading override from config.yaml if set."""
+    """Return the active fixed prefix, reading override from system_prompts.yaml if set."""
     try:
-        from utils.helpers import load_config
-        cfg = load_config()
-        val = cfg.get("system_prompts", {}).get("summaries_prefix", "")
+        from utils.helpers import load_system_prompts
+        val = load_system_prompts().get("summaries_prefix", "")
         return val or _DEFAULT_FIXED_PREFIX
     except Exception:
         return _DEFAULT_FIXED_PREFIX
@@ -70,9 +68,8 @@ _DEFAULT_BULLET_POINTS_SUFFIX = (
 def get_bullet_points_suffix(b: int) -> str:
     """Returns the admin-enforced bullet points instruction appended after the user prompt."""
     try:
-        from utils.helpers import load_config
-        cfg = load_config()
-        tmpl = cfg.get("system_prompts", {}).get("bullet_points_suffix", "") or _DEFAULT_BULLET_POINTS_SUFFIX
+        from utils.helpers import load_system_prompts
+        tmpl = load_system_prompts().get("bullet_points_suffix", "") or _DEFAULT_BULLET_POINTS_SUFFIX
     except Exception:
         tmpl = _DEFAULT_BULLET_POINTS_SUFFIX
     return tmpl.replace('{b}', str(b))

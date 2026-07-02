@@ -156,6 +156,53 @@ def parse_feed_notification(body: bytes):
     return videos
 
 
+def _is_short(video_id: str) -> bool:
+    """Detect whether a video is a YouTube Short.
+
+    There's no direct field for this in the Data API, so we probe the canonical
+    /shorts/{id} URL: YouTube serves it 200 for actual Shorts and 303-redirects
+    everything else to /watch?v={id}. On any network error we return False (do
+    not treat ambiguous probes as Shorts).
+    """
+    try:
+        resp = httpx.head(
+            f"https://www.youtube.com/shorts/{video_id}",
+            follow_redirects=False,
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.warning(f"[WEBSUB] Shorts probe failed for {video_id}: {e} — treating as non-short")
+        return False
+
+
+def _channel_filter_reject_reason(video_id: str, meta: dict, duration_secs: int,
+                                  min_dur, max_dur, lang_filter, upload_type) -> str | None:
+    """Return a human-readable rejection reason or None if the video passes."""
+    if min_dur and duration_secs and duration_secs < min_dur:
+        return f"too short ({duration_secs}s < {min_dur}s min)"
+    if max_dur and duration_secs and duration_secs > max_dur:
+        return f"too long ({duration_secs}s > {max_dur}s max)"
+    if lang_filter:
+        # Lenient: only reject when YouTube actually reports a language and it
+        # disagrees. Many uploads don't set defaultAudio/DefaultLanguage at all.
+        video_lang = (meta.get('language') or '').lower()
+        if video_lang and not video_lang.startswith(lang_filter.lower()):
+            return f"wrong language ({video_lang} != {lang_filter})"
+    if upload_type and upload_type != 'video':
+        lbc = meta.get('live_broadcast_content')
+        if upload_type == 'live' and lbc != 'live':
+            return "not currently live"
+        if upload_type == 'completed' and not meta.get('actual_end_time'):
+            return "not a completed live broadcast"
+        if upload_type == 'short' and not _is_short(video_id):
+            return "not a Short"
+        if upload_type == 'regular' and _is_short(video_id):
+            return "is a Short (regular videos only)"
+    return None
+
+
 def process_websub_notification(body: bytes):
     """
     Process a WebSub callback notification: parse, deduplicate, and enqueue new videos.
@@ -216,6 +263,29 @@ def process_websub_notification(body: bytes):
                 if must_exclude and any(t.lower() in video_title.lower() for t in must_exclude):
                     logger.info(f"[WEBSUB] Skipping {vid} — title matches exclude filter")
                     continue
+
+                # Metadata-backed filters — fetch once if any are configured so
+                # videos that wouldn't pass never enter the queue (no wasted
+                # processing slot, no 'skipped' churn from the worker).
+                # min_view_count is intentionally left to the worker: WebSub
+                # fires within seconds of publish, so the count is always ~0
+                # here and any non-zero threshold would reject everything.
+                min_dur = ch_row.get('min_duration_seconds')
+                max_dur = ch_row.get('max_duration_seconds')
+                lang_filter = ch_row.get('language') or None
+                upload_type = ch_row.get('upload_type') or None
+                if min_dur or max_dur or lang_filter or (upload_type and upload_type != 'video'):
+                    from youtube_monitor.worker import _fetch_video_metadata, _parse_duration
+                    meta = _fetch_video_metadata(vid)
+                    duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
+                    reject_reason = _channel_filter_reject_reason(
+                        vid, meta, duration_secs, min_dur, max_dur, lang_filter, upload_type,
+                    )
+                    if reject_reason:
+                        logger.info(f"[WEBSUB] Skipping {vid} — {reject_reason}")
+                        db.mark_video_seen(video_id=vid, title=video.get('title'),
+                                           channel_id=yt_channel_id, source='websub')
+                        continue
 
         db.mark_video_seen(
             video_id=vid,

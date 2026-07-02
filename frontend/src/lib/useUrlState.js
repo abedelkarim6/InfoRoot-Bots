@@ -7,8 +7,13 @@
  *   - the browser back button moves between views inside a page
  *   - URLs are shareable / bookmarkable
  *
- * All updates use `{ replace: true }` so typing in a filter doesn't spam
- * history entries — only the *current* state lives in the URL.
+ * Updates default to `{ replace: true }` so typing in a filter doesn't spam
+ * history entries — only the *current* state lives in the URL. Genuine view
+ * transitions (switching tabs, drilling into a detail panel) should instead
+ * pass `{ push: true }` to the setter so the browser Back button returns to
+ * the previous view:
+ *   setTab('history', { push: true });
+ *   setSummaryId(id, { push: true });
  */
 
 import { useCallback, useMemo } from 'react';
@@ -28,7 +33,7 @@ export function useUrlString(key, defaultValue = '') {
   const value = raw == null ? defaultValue : raw;
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const v = typeof next === 'function' ? next(params.get(key) ?? defaultValue) : next;
       if (v == null || v === '' || v === defaultValue) {
@@ -36,7 +41,7 @@ export function useUrlString(key, defaultValue = '') {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: !opts?.push });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -53,7 +58,7 @@ export function useUrlBool(key) {
   const value = searchParams.get(key) === '1';
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const v = typeof next === 'function' ? next(params.get(key) === '1') : next;
       if (v) {
@@ -61,7 +66,7 @@ export function useUrlBool(key) {
       } else {
         params.delete(key);
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: !opts?.push });
     },
     [key, setSearchParams]
   );
@@ -87,7 +92,7 @@ export function useUrlSet(key) {
   );
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const prev = new Set(
         (params.get(key) || '').split(',').filter(Boolean)
@@ -99,7 +104,7 @@ export function useUrlSet(key) {
       } else {
         params.set(key, arr.join(','));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: !opts?.push });
     },
     [key, setSearchParams]
   );
@@ -118,7 +123,7 @@ export function useUrlInt(key, defaultValue = 0) {
   const value = Number.isFinite(parsed) ? parsed : defaultValue;
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       const prevRaw = params.get(key);
       const prev = prevRaw == null ? defaultValue : (parseInt(prevRaw, 10) || defaultValue);
@@ -128,7 +133,7 @@ export function useUrlInt(key, defaultValue = 0) {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: !opts?.push });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -155,14 +160,14 @@ export function useUrlJson(key) {
   }, [raw]);
 
   const setValue = useCallback(
-    (next) => {
+    (next, opts) => {
       const params = new URLSearchParams(window.location.search);
       if (next == null) {
         params.delete(key);
       } else {
         params.set(key, encodeURIComponent(JSON.stringify(next)));
       }
-      setSearchParams(params, { replace: true });
+      setSearchParams(params, { replace: !opts?.push });
     },
     [key, setSearchParams]
   );

@@ -6,6 +6,7 @@ const ADMIN_ONLY_PATHS = new Set([
   '/tg-tester',
   '/logs',
   '/ai-usage',
+  '/youtube-quota',
 ]);
 
 /**

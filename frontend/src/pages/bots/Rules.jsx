@@ -20,6 +20,7 @@
 import { useEffect, useState } from 'react';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { buildFullBotSavePayload } from './shared';
+import BotReplaceGroupsSection from './BotReplaceGroupsSection';
 
 export default function Rules({ botName, bot }) {
   // Hydrate local state from the canonical bot config every time the bot
@@ -35,7 +36,8 @@ export default function Rules({ botName, bot }) {
 
   const [open, setOpen] = useState(false);
 
-  const total = removeRules.length + replaceRules.length;
+  const replaceGroups = bot.replace_groups || [];
+  const total = removeRules.length + replaceRules.length + replaceGroups.length;
 
   const save = useApiMutation('/api/bot/save', {
     invalidate: ['config'],
@@ -181,6 +183,8 @@ export default function Rules({ botName, bot }) {
               + Add Rule
             </button>
           </div>
+
+          <BotReplaceGroupsSection botName={botName} bot={bot} />
         </div>
       </div>
     </div>
