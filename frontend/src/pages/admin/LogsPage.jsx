@@ -68,12 +68,12 @@ const LOG_STYLES = `
   .log-msg   { word-break:break-word; color:var(--text-primary); width:100%; }
   .log-level-error   { color:#ef4444; }
   .log-level-warn    { color:#f59e0b; }
-  .log-level-info    { color:#3b82f6; }
+  .log-level-info    { color:var(--accent-primary); }
   .log-level-debug   { color:var(--text-muted); }
   tr.log-row-error td { background:rgba(239,68,68,.04); }
   tr.log-row-warn  td { background:rgba(245,158,11,.04); }
   .log-tag { display:inline-block; font-weight:700; font-size:11px;
-             background:rgba(99,102,241,.12); color:var(--accent-primary,#6366f1);
+             background:rgba(var(--accent-primary-rgb),.12); color:var(--accent-primary);
              border-radius:3px; padding:0 3px; margin-right:2px; font-family:monospace; }
 `;
 

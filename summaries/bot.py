@@ -437,7 +437,14 @@ async def _send_with_split(client, target_chat, message_text):
             "لا تضف أي نص أو شرح آخر.\n\n"
             + message_text
         )
-        split_text, _ = await _run_with_retry(llm_client.generate_summary, split_prompt)
+        split_text, sptk = await _run_with_retry(llm_client.generate_summary, split_prompt)
+        try:
+            from utils.ai_pricing import client_model as _client_model
+            db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                            getattr(sptk, 'input', 0), getattr(sptk, 'output', 0),
+                            context="telegram-split")
+        except Exception:
+            pass
         candidates = [p.strip() for p in split_text.split('SPLIT', 1) if p.strip()]
         if len(candidates) == 2 and all(len(p) <= _TELEGRAM_MAX for p in candidates):
             parts = candidates
@@ -589,6 +596,7 @@ async def generate_and_send_summary(job_data):
 
         BATCH = 25
         total_tokens = 0
+        primary_usage = None   # TokenUsage of the primary model's calls (exact in/out)
         summary_text = ''
         empty_retry_attempts = 0
         MAX_EMPTY_RETRIES = 2
@@ -627,7 +635,9 @@ async def generate_and_send_summary(job_data):
 
                 Mirrors the single-batch vs chunked logic and the empty-retry loop
                 so every compared model sees identical inputs — a fair A/B."""
+                from utils.ai_pricing import TokenUsage
                 _tokens = 0
+                _inp = _outp = 0
                 _text = ''
                 _retries = 0
                 for attempt in range(MAX_EMPTY_RETRIES + 1):
@@ -640,6 +650,8 @@ async def generate_and_send_summary(job_data):
                             prompt += '\n\n' + get_bullet_points_suffix(b)
                         s, tk = await _run_with_retry(gen_fn, prompt)
                         _tokens += tk
+                        _inp += getattr(tk, 'input', 0)
+                        _outp += getattr(tk, 'output', 0)
                         _text = (s or '').strip()
                     else:
                         # Rare: > BATCH remaining messages. Roll the {final_interim}
@@ -657,6 +669,8 @@ async def generate_and_send_summary(job_data):
                                 p += '\n\n' + get_bullet_points_suffix(b)
                             s, tk = await _run_with_retry(gen_fn, p)
                             _tokens += tk
+                            _inp += getattr(tk, 'input', 0)
+                            _outp += getattr(tk, 'output', 0)
                             if (s or '').strip():
                                 rolling_text = s.strip()
                         _text = (rolling_text or '').strip()
@@ -668,11 +682,16 @@ async def generate_and_send_summary(job_data):
                         break
                     if attempt < MAX_EMPTY_RETRIES:
                         _retries = attempt + 1
-                return _text, _tokens, _retries
+                return _text, TokenUsage(_tokens, _inp, _outp), _retries
 
             # ── Primary model: this is what gets sent to Telegram ────────────
             summary_text, ptk, empty_retry_attempts = await _gen_one(llm_client.generate_summary)
             total_tokens += ptk
+            primary_usage = ptk
+            # Always record which model produced the summary — per-model cost
+            # accounting needs it even in single-model mode.
+            from utils.ai_pricing import client_model as _client_model
+            primary_model_used = _client_model(llm_client)
             if not summary_text and empty_retry_attempts:
                 logger.warning(
                     f"[RETRY] AI returned empty summary after {empty_retry_attempts} "
@@ -697,7 +716,17 @@ async def generate_and_send_summary(job_data):
                                     user_id=getattr(llm_client, 'user_id', None),
                                 )
                                 alt_text, atk, _ = await _gen_one(alt_client.generate_summary)
-                                total_tokens += atk
+                                # Compare-model tokens are logged as their own
+                                # ai_usage_log rows (exact per-model cost) and
+                                # kept OUT of the summary row, whose
+                                # tokens/input/output describe the primary only.
+                                try:
+                                    db.log_ai_usage(
+                                        None, 'summaries', cm,
+                                        getattr(atk, 'input', 0), getattr(atk, 'output', 0),
+                                        context=f"compare {bot_name}/{topic_name}")
+                                except Exception:
+                                    pass
                                 if alt_text:
                                     model_outputs[cm] = alt_text
                                 logger.info(
@@ -789,6 +818,8 @@ async def generate_and_send_summary(job_data):
                 schedule_id=schedule_id,
                 model_outputs=model_outputs or None,
                 primary_model=primary_model_used,
+                input_tokens=getattr(primary_usage, 'input', None) if primary_usage is not None else None,
+                output_tokens=getattr(primary_usage, 'output', None) if primary_usage is not None else None,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -935,7 +966,14 @@ async def generate_speech_buckets(job_data: dict):
         msg_ids = [m['id']   for m in in_window]
 
         prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-        llm_response, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+        llm_response, stk = await _run_with_retry(llm_client.generate_summary, prompt)
+        try:
+            from utils.ai_pricing import client_model as _client_model
+            db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                            getattr(stk, 'input', 0), getattr(stk, 'output', 0),
+                            context=f"speech {bot_name}/{topic_name}")
+        except Exception:
+            pass
         buckets      = _parse_speech_buckets(llm_response)
 
         # Cancel any existing pending send task and restart the countdown
@@ -1209,7 +1247,17 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                     if b_count:
                         prompt += '\n\n' + get_bullet_points_suffix(b_count)
 
-                    summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+                    summary_text, itk = await _run_with_retry(llm_client.generate_summary, prompt)
+
+                    # Interim calls are separate from the final summary row —
+                    # log them so their (exact) cost shows up in AI usage.
+                    try:
+                        from utils.ai_pricing import client_model as _client_model
+                        db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                                        getattr(itk, 'input', 0), getattr(itk, 'output', 0),
+                                        context=f"interim {bot_name}/{topic_name}")
+                    except Exception:
+                        pass
 
                     interim_id = db.save_interim_summary(
                         bot_name, topic_name, summary_text, len(messages),

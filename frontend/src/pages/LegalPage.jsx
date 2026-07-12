@@ -160,26 +160,26 @@ const BACK_BTN = {
   display: 'inline-flex',
   alignItems: 'center',
   gap: 6,
-  background: '#1e2433',
-  border: '1px solid #2d3748',
-  color: '#94a3b8',
+  background: 'var(--bg-card)',
+  border: '1px solid var(--border-color)',
+  color: 'var(--text-secondary)',
   borderRadius: 8,
   padding: '6px 14px',
   fontSize: 13,
   cursor: 'pointer'
 };
 const CARD = {
-  background: '#1e2433',
-  border: '1px solid #2d3748',
+  background: 'var(--bg-card)',
+  border: '1px solid var(--border-color)',
   borderRadius: 12,
   padding: '32px 36px',
   fontSize: 14.5,
-  color: '#94a3b8',
+  color: 'var(--text-secondary)',
   lineHeight: 1.7
 };
 const FOOTER = {
   textAlign: 'center',
   marginTop: 40,
   fontSize: 12,
-  color: '#64748b'
+  color: 'var(--text-muted)'
 };

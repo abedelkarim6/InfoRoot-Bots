@@ -25,39 +25,42 @@ import { api } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import PageHeader from '../../components/PageHeader';
+import Icon from '../../components/icons';
 
 export default function BotList() {
   const { config } = useGlobalConfig();
   const bots = config?.bots || {};
   const [duplicateState, setDuplicateState] = useState(null); // { sourceName }
+  const [createOpen, setCreateOpen] = useState(false);
   const navigate = useNavigate();
 
   return (
     <div className="page active" id="bots-page">
-      <PageHeader title="Bot Management" subtitle="Configure and manage your bots">
+      <PageHeader title="Summaries Bots" subtitle="Configure icon flags that are prepended to messages based on keyword matches.">
         <button
           className="btn btn-secondary"
           onClick={() => navigate('/summaries-prompts')}
           title="Manage the global summaries prompt library"
         >
-          📝 Prompts
+          Prompts
         </button>
         <button
           className="btn btn-secondary"
           onClick={() => navigate('/default-schedules')}
           title="Manage default schedule templates applied to every new topic"
         >
-          📅 Default Schedules
+          Default Schedules
+        </button>
+        <button className="btn btn-primary" onClick={() => setCreateOpen(true)}>
+          <Icon name="plus" size={15} style={{ marginRight: 6 }} />
+          New Bot
         </button>
       </PageHeader>
 
-      <CreateBotCard />
-
-      <h3 className="section-title mt-4">Your Bots</h3>
       <div id="bots-container">
         {Object.keys(bots).length === 0 ? (
           <p className="text-muted" style={{ padding: '12px 0' }}>
-            No bots yet. Create one above.
+            No bots yet. Click "+ New Bot" to create one.
           </p>
         ) : (
           Object.entries(bots).map(([name, bot]) => (
@@ -71,6 +74,7 @@ export default function BotList() {
         )}
       </div>
 
+      {createOpen && <CreateBotModal onClose={() => setCreateOpen(false)} />}
       {duplicateState && (
         <DuplicateBotModal
           sourceName={duplicateState.sourceName}
@@ -81,9 +85,9 @@ export default function BotList() {
   );
 }
 
-// ─── Create Bot ─────────────────────────────────────────────────────────────
+// ─── Create Bot (modal — Figma "+ New Bot" flow) ────────────────────────────
 
-function CreateBotCard() {
+function CreateBotModal({ onClose }) {
   const [name, setName] = useState('');
   const navigate = useNavigate();
   const { showAlert } = useDialogs();
@@ -128,27 +132,45 @@ function CreateBotCard() {
     }).catch(() => {});
 
     setName('');
+    onClose();
     setTimeout(() => navigate(`/bots/${encodeURIComponent(trimmed)}`), 200);
   }
 
   return (
-    <div className="create-bot-card" id="bots-create-card">
-      <h3>➕ Create New Bot</h3>
-      <div className="create-bot-form">
-        <input
-          type="text"
-          id="new-bot-name"
-          placeholder="Bot name (e.g., News Bot, Tech Alerts)"
-          className="input"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') onCreate();
-          }}
-        />
-        <button className="btn btn-primary" onClick={onCreate} disabled={create.isPending}>
-          {create.isPending ? 'Creating…' : 'Create Bot'}
-        </button>
+    <div
+      className="modal-overlay"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="modal-dialog" style={{ maxWidth: 440 }}>
+        <div className="modal-header">
+          <h3>New Bot</h3>
+          <button className="btn-icon" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="form-group">
+            <label className="form-label">Bot Name</label>
+            <input
+              type="text"
+              id="new-bot-name"
+              placeholder="e.g., News Bot, Tech Alerts"
+              className="input"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onCreate();
+              }}
+            />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onClose} disabled={create.isPending}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={onCreate} disabled={create.isPending}>
+            {create.isPending ? 'Creating…' : 'Create Bot'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -192,22 +214,24 @@ function BotListCard({ name, bot, onDuplicate }) {
         onClick={() => navigate(`/bots/${encodeURIComponent(name)}`)}
       >
         <div className="bot-list-info">
-          <span className="bot-list-icon">🤖</span>
-          <div>
-            <div className="bot-list-name">{name}</div>
-            <div className="bot-list-meta">
-              {categories.length} categor{categories.length === 1 ? 'y' : 'ies'} ·{' '}
-              {topicCount} topic{topicCount === 1 ? '' : 's'}
-            </div>
+          <span className="bot-list-icon"><Icon name="bot" size={20} /></span>
+          <div className="bot-list-name">{name}</div>
+          <div className="bot-list-meta">
+            <span className="count-pill">
+              {categories.length} Categor{categories.length === 1 ? 'y' : 'ies'}
+            </span>
+            <span className="count-pill">
+              {topicCount} Topic{topicCount === 1 ? '' : 's'}
+            </span>
           </div>
         </div>
         <div className="bot-list-right" onClick={(e) => e.stopPropagation()}>
           <button
-            className="btn btn-secondary btn-xs"
+            className="btn-icon"
             title="Duplicate bot"
             onClick={onDuplicate}
           >
-            ⧉
+            <Icon name="copy" size={15} />
           </button>
           <label className="toggle-switch toggle-sm">
             <input
@@ -218,7 +242,7 @@ function BotListCard({ name, bot, onDuplicate }) {
             />
             <span className="toggle-slider"></span>
           </label>
-          <span className="bot-list-arrow">›</span>
+          <span className="bot-list-arrow"><Icon name="chevronRight" size={16} /></span>
         </div>
       </div>
     </div>

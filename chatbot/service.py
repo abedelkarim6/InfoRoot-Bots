@@ -157,10 +157,14 @@ def create_session(db, yt_db, user_id=None) -> str:
     allowed_bot_names = _resolve_allowed_bots(db, user_id)
     session_id = str(uuid.uuid4())[:8]
     team = _build_team(db, yt_db, allowed_bot_names=allowed_bot_names)
+    from utils.gemini_models import get_gemini_model
     _sessions[session_id] = {
         "team": team,
         "messages": [],
         "created_at": datetime.utcnow(),
+        # For per-user cost tracking (ai_usage_log)
+        "user_id": user_id,
+        "model_id": get_gemini_model(),
     }
     logger.info(f"[CHATBOT] Session {session_id} created")
     return session_id
@@ -197,10 +201,33 @@ async def send_message(session_id: str, message: str, context: dict = None) -> s
 
     reply = response.content if response else "No response from the team."
 
+    _log_chat_usage(session, getattr(response, "metrics", None), full_message, reply)
+
     session["messages"].append({"role": "user", "text": message})
     session["messages"].append({"role": "assistant", "text": reply})
 
     return reply
+
+
+def _log_chat_usage(session: dict, metrics, prompt_text: str, reply_text: str):
+    """Record one chatbot run into ai_usage_log for per-user cost tracking.
+
+    Uses Agno run metrics when available (exact input/output tokens across the
+    team run); falls back to a chars/4 estimate. Best-effort — never raises."""
+    try:
+        inp = out = 0
+        if metrics is not None:
+            inp = int(getattr(metrics, "input_tokens", 0) or 0)
+            out = int(getattr(metrics, "output_tokens", 0) or 0)
+        if not (inp or out):
+            inp = len(prompt_text or "") // 4
+            out = len(reply_text or "") // 4
+        from utils.database import get_db
+        db = get_db()
+        if db is not None:
+            db.log_ai_usage(session.get("user_id"), "chatbot", session.get("model_id"), inp, out)
+    except Exception as e:
+        logger.warning(f"[CHATBOT] usage logging failed: {e}")
 
 
 async def stream_message(session_id: str, message: str, context: dict = None):
@@ -247,6 +274,7 @@ async def stream_message(session_id: str, message: str, context: dict = None):
     loop.run_in_executor(None, _run)
 
     content_parts = []
+    run_metrics = None  # final (aggregate) metrics from the completed-run event
 
     while True:
         item = await queue.get()
@@ -257,6 +285,11 @@ async def stream_message(session_id: str, message: str, context: dict = None):
             return
 
         evt_str = str(getattr(item, 'event', ''))
+
+        if 'RunCompleted' in evt_str:
+            m = getattr(item, 'metrics', None)
+            if m is not None:
+                run_metrics = m  # the team-level completed event arrives last
 
         if 'ToolCallStarted' in evt_str:
             tool = getattr(item, 'tool', None)
@@ -294,6 +327,8 @@ async def stream_message(session_id: str, message: str, context: dict = None):
 
     final_text = ''.join(content_parts)
     yield _sse('done', {'content': final_text})
+
+    _log_chat_usage(session, run_metrics, full_message, final_text)
 
     session['messages'].append({'role': 'user', 'text': message})
     session['messages'].append({'role': 'assistant', 'text': final_text})

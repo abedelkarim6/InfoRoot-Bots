@@ -18,13 +18,15 @@ import SeosSection from './SeosSection';
 import TopicSeoGroupsSection from './TopicSeoGroupsSection';
 import LinkedTopicsSection from './LinkedTopicsSection';
 import SchedulesSection from './SchedulesSection';
+import Icon from '../../components/icons';
 
 export default function TopicBox({
   botName,
   catName,
   topicName,
   topic,
-  categoryEnabled
+  categoryEnabled,
+  inherited = false
 }) {
   const [open, setOpen] = useState(false);
   // Once the topic has been opened, keep its body mounted (fast subsequent
@@ -112,7 +114,7 @@ export default function TopicBox({
     >
       <div className="topic-header-row" onClick={onHeaderClick}>
         <div className="topic-title-group">
-          <strong>📌 {topicName}</strong>
+          <strong>{topicName}</strong>
           {isDisabledByCategory && (
             <span className="disabled-badge">Category Disabled</span>
           )}
@@ -120,49 +122,53 @@ export default function TopicBox({
             <span
               className="linked-badge"
               style={{
-                background: 'var(--accent-primary,#6366f1)',
+                background: 'var(--accent-primary)',
                 color: '#fff'
               }}
             >
-              🌐 Catch All
+              Catch All
             </span>
           )}
           {linkedTopics.length > 0 && (
-            <span className="linked-badge">🔗 {linkedTopics.length} linked</span>
+            <span className="count-pill">{linkedTopics.length} Linked</span>
           )}
           {seoGroups.length > 0 && (
-            <span className="linked-badge">🏷️ {seoGroups.length} group{seoGroups.length !== 1 ? 's' : ''}</span>
+            <span className="count-pill">{seoGroups.length} SEO Group{seoGroups.length !== 1 ? 's' : ''}</span>
           )}
-          <span className="schedule-indicator">
-            🕐 {schedules.length} schedule{schedules.length !== 1 ? 's' : ''}
+          <span className="count-pill">
+            {schedules.length} Schedule{schedules.length !== 1 ? 's' : ''}
           </span>
         </div>
         <div className="topic-controls" onClick={(e) => e.stopPropagation()}>
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={!!topic.enabled}
-              onChange={onToggleEnabled}
-              disabled={toggle.isPending}
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <button
-            className="btn-icon"
-            title="Rename topic"
-            onClick={onRename}
-            disabled={rename.isPending}
-          >
-            ✏️
-          </button>
-          <button
-            className="btn-icon btn-danger"
-            title="Delete topic"
-            onClick={onDelete}
-            disabled={remove.isPending}
-          >
-            🗑️
-          </button>
+          {!inherited && (
+            <>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!topic.enabled}
+                  onChange={onToggleEnabled}
+                  disabled={toggle.isPending}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <button
+                className="btn-icon"
+                title="Rename topic"
+                onClick={onRename}
+                disabled={rename.isPending}
+              >
+                ✏️
+              </button>
+              <button
+                className="btn-icon btn-icon-danger"
+                title="Delete topic"
+                onClick={onDelete}
+                disabled={remove.isPending}
+              >
+                <Icon name="trash" size={15} />
+              </button>
+            </>
+          )}
           <span className="collapsible-toggle">▼</span>
         </div>
       </div>
@@ -171,36 +177,44 @@ export default function TopicBox({
         <div className="collapsible-content">
           <div className="collapsible-inner">
             <div className="topic-body">
-              <CatchAllToggle
-                botName={botName}
-                catName={catName}
-                topicName={topicName}
-                topic={topic}
-              />
+              {!inherited && (
+                <CatchAllToggle
+                  botName={botName}
+                  catName={catName}
+                  topicName={topicName}
+                  topic={topic}
+                />
+              )}
               <SeosSection
                 botName={botName}
                 catName={catName}
                 topicName={topicName}
                 topic={topic}
+                inherited={inherited}
               />
-              <TopicSeoGroupsSection
-                botName={botName}
-                catName={catName}
-                topicName={topicName}
-                topic={topic}
-              />
-              <LinkedTopicsSection
-                botName={botName}
-                catName={catName}
-                topicName={topicName}
-                topic={topic}
-              />
+              {!inherited && (
+                <TopicSeoGroupsSection
+                  botName={botName}
+                  catName={catName}
+                  topicName={topicName}
+                  topic={topic}
+                />
+              )}
+              {!inherited && (
+                <LinkedTopicsSection
+                  botName={botName}
+                  catName={catName}
+                  topicName={topicName}
+                  topic={topic}
+                />
+              )}
             </div>
             <SchedulesSection
               botName={botName}
               catName={catName}
               topicName={topicName}
               topic={topic}
+              inherited={inherited}
             />
           </div>
         </div>

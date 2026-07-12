@@ -538,23 +538,26 @@ class SummariesDB(Database):
                      bot_name: str = None, topic_name: str = None,
                      message_ids: list = None, tokens_used: int = 0,
                      thoughts: str = None, schedule_id: int = None,
-                     model_outputs: dict = None, primary_model: str = None) -> int:
+                     model_outputs: dict = None, primary_model: str = None,
+                     input_tokens: int = None, output_tokens: int = None) -> int:
         try:
             """Save a generated summary and return its id.
 
             `model_outputs` (optional) is a {model_name: summary_text} map of all
             models that ran for an A/B test; `primary_model` is the one sent to
-            Telegram (== the model that produced `summary_text`)."""
+            Telegram (== the model that produced `summary_text`).
+            `input_tokens`/`output_tokens` are the exact split of the PRIMARY
+            model's calls (NULL = unknown → blended cost estimate)."""
             import json
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
             outputs_json = json.dumps(model_outputs) if model_outputs else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id, model_outputs, primary_model)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id, model_outputs, primary_model, input_tokens, output_tokens)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id, outputs_json, primary_model)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id, outputs_json, primary_model, input_tokens, output_tokens)
             )
             row = cursor.fetchone()
             return row['id']
@@ -674,58 +677,195 @@ class SummariesDB(Database):
         gran = granularity if granularity in ('day', 'month') else 'day'
         owner_sql, owner_params = '', []
         if owner_filter == 'admin':
-            owner_sql = 'AND b.owner_id IS NULL'
+            owner_sql = 'AND su.eff_owner_id IS NULL'
         elif isinstance(owner_filter, int):
-            owner_sql = 'AND b.owner_id = %s'
+            owner_sql = 'AND su.eff_owner_id = %s'
             owner_params = [owner_filter]
-        base_where = "s.timestamp::date BETWEEN %s AND %s"
-        params = [date_from, date_to] + owner_params
+        # Bot names are NOT unique across owners (multi-user), so a plain
+        # `JOIN bots ON name` fans out and double-counts. Ownership is resolved
+        # via the schedule chain (schedules→topics→categories→bots) when the
+        # summary has a schedule_id; otherwise via a name→owner map deduped
+        # with DISTINCT ON so each summary matches exactly one bot row.
+        cte = """
+            WITH sched_owner AS (
+                SELECT sc.id AS schedule_id, bo.owner_id, TRUE AS found
+                FROM schedules sc
+                JOIN topics t    ON t.id = sc.topic_id
+                JOIN categories c ON c.id = t.category_id
+                JOIN bots bo     ON bo.id = c.bot_id
+            ),
+            name_owner AS (
+                SELECT DISTINCT ON (name) name, owner_id FROM bots ORDER BY name, id
+            ),
+            su AS (
+                SELECT s.id, s.bot_name, s.timestamp, s.tokens_used, s.message_count, s.primary_model,
+                       s.input_tokens, s.output_tokens,
+                       CASE WHEN so.found THEN so.owner_id ELSE nm.owner_id END AS eff_owner_id
+                FROM summaries s
+                LEFT JOIN sched_owner so ON so.schedule_id = s.schedule_id
+                LEFT JOIN name_owner nm  ON nm.name = s.bot_name
+                WHERE s.timestamp::date BETWEEN %s AND %s
+            )
+        """
+        # Rows with a recorded input/output split are priced exactly; older
+        # rows only have a combined total (`legacy_tokens`) → blended estimate.
+        split_sums = """
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN su.input_tokens ELSE 0 END) AS input_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.output_tokens, 0) ELSE 0 END) AS output_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NULL THEN COALESCE(su.tokens_used, 0) ELSE 0 END) AS legacy_tokens
+        """
+        date_params = [date_from, date_to]
         try:
             cursor = self._get_cursor()
-            cursor.execute(f"""
-                SELECT DATE_TRUNC(%s, s.timestamp)::date  AS bucket,
-                       COUNT(*)                           AS runs,
-                       SUM(COALESCE(s.tokens_used, 0))    AS tokens,
-                       SUM(COALESCE(s.message_count, 0))  AS messages
-                FROM summaries s
-                LEFT JOIN bots b ON b.name = s.bot_name
-                WHERE {base_where} {owner_sql}
-                GROUP BY 1 ORDER BY 1
-            """, [gran] + params)
+            # Every aggregate is model-grained so the endpoint can price each
+            # slice ($/1M differs per model) and fold to totals afterwards.
+            cursor.execute(cte + f"""
+                SELECT DATE_TRUNC(%s, su.timestamp)::date  AS bucket,
+                       su.primary_model                    AS model,
+                       COUNT(*)                            AS runs,
+                       SUM(COALESCE(su.tokens_used, 0))    AS tokens,
+                       SUM(COALESCE(su.message_count, 0))  AS messages,
+                       {split_sums}
+                FROM su
+                WHERE TRUE {owner_sql}
+                GROUP BY 1, 2 ORDER BY 1
+            """, date_params + [gran] + owner_params)
             series = []
             for row in cursor.fetchall():
                 d = dict(row)
                 d['bucket'] = d['bucket'].isoformat() if d['bucket'] else None
                 series.append(d)
 
-            cursor.execute(f"""
-                SELECT b.owner_id                        AS user_id,
-                       COALESCE(u.username, 'Admin')     AS username,
-                       COUNT(*)                          AS runs,
-                       SUM(COALESCE(s.tokens_used, 0))   AS tokens
-                FROM summaries s
-                LEFT JOIN bots b ON b.name = s.bot_name
-                LEFT JOIN users u ON u.id = b.owner_id
-                WHERE {base_where} {owner_sql}
-                GROUP BY 1, 2
+            cursor.execute(cte + f"""
+                SELECT su.eff_owner_id                    AS user_id,
+                       COALESCE(u.username, 'Admin')      AS username,
+                       su.primary_model                   AS model,
+                       COUNT(*)                           AS runs,
+                       SUM(COALESCE(su.tokens_used, 0))   AS tokens,
+                       {split_sums}
+                FROM su
+                LEFT JOIN users u ON u.id = su.eff_owner_id
+                WHERE TRUE {owner_sql}
+                GROUP BY 1, 2, 3
                 ORDER BY tokens DESC NULLS LAST
-            """, params)
+            """, date_params + owner_params)
             by_user = [dict(r) for r in cursor.fetchall()]
 
-            cursor.execute(f"""
-                SELECT COALESCE(s.bot_name, '—')        AS bot_name,
-                       COUNT(*)                          AS runs,
-                       SUM(COALESCE(s.tokens_used, 0))   AS tokens
-                FROM summaries s
-                LEFT JOIN bots b ON b.name = s.bot_name
-                WHERE {base_where} {owner_sql}
-                GROUP BY 1
+            cursor.execute(cte + f"""
+                SELECT COALESCE(su.bot_name, '—')         AS bot_name,
+                       su.primary_model                   AS model,
+                       COUNT(*)                           AS runs,
+                       SUM(COALESCE(su.tokens_used, 0))   AS tokens,
+                       {split_sums}
+                FROM su
+                WHERE TRUE {owner_sql}
+                GROUP BY 1, 2
                 ORDER BY tokens DESC NULLS LAST
-                LIMIT 15
-            """, params)
+            """, date_params + owner_params)
             by_bot = [dict(r) for r in cursor.fetchall()]
 
             return {'series': series, 'by_user': by_user, 'by_bot': by_bot}
+        finally:
+            self._commit()
+
+    def get_agent_usage_history(self, date_from: str, date_to: str,
+                                granularity: str = 'day', owner_filter='all') -> list:
+        """ai_usage_log (chatbot / seo) aggregates between two dates, grained
+        by (bucket, feature, model, user) — exact input/output token sums.
+        owner_filter: 'all', 'admin' (user_id IS NULL) or an int user id."""
+        gran = granularity if granularity in ('day', 'month') else 'day'
+        owner_sql, owner_params = '', []
+        if owner_filter == 'admin':
+            owner_sql = 'AND l.user_id IS NULL'
+        elif isinstance(owner_filter, int):
+            owner_sql = 'AND l.user_id = %s'
+            owner_params = [owner_filter]
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(f"""
+                SELECT DATE_TRUNC(%s, l.created_at)::date  AS bucket,
+                       l.feature                           AS feature,
+                       l.model                             AS model,
+                       l.user_id                           AS user_id,
+                       COALESCE(u.username, 'Admin')       AS username,
+                       COUNT(*)                            AS runs,
+                       SUM(COALESCE(l.input_tokens, 0))    AS input_tokens,
+                       SUM(COALESCE(l.output_tokens, 0))   AS output_tokens
+                FROM ai_usage_log l
+                LEFT JOIN users u ON u.id = l.user_id
+                WHERE l.created_at::date BETWEEN %s AND %s {owner_sql}
+                GROUP BY 1, 2, 3, 4, 5
+                ORDER BY 1
+            """, [gran, date_from, date_to] + owner_params)
+            out = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['bucket'] = d['bucket'].isoformat() if d['bucket'] else None
+                out.append(d)
+            return out
+        finally:
+            self._commit()
+
+    def get_user_month_ai_tokens(self, user_id) -> list:
+        """Current-month token usage rows for one user (None = admin), across
+        every cost source — for the monthly $ cap check.
+
+        Returns [{feature, model, tokens?, input_tokens?, output_tokens?}]:
+        summaries rows carry a combined `tokens` (blended pricing); ai_usage_log
+        rows carry the exact input/output split.
+        """
+        owner_sql, owner_params = ('su.eff_owner_id IS NULL', []) if user_id is None \
+            else ('su.eff_owner_id = %s', [user_id])
+        log_sql, log_params = ('l.user_id IS NULL', []) if user_id is None \
+            else ('l.user_id = %s', [user_id])
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(f"""
+                WITH sched_owner AS (
+                    SELECT sc.id AS schedule_id, bo.owner_id, TRUE AS found
+                    FROM schedules sc
+                    JOIN topics t    ON t.id = sc.topic_id
+                    JOIN categories c ON c.id = t.category_id
+                    JOIN bots bo     ON bo.id = c.bot_id
+                ),
+                name_owner AS (
+                    SELECT DISTINCT ON (name) name, owner_id FROM bots ORDER BY name, id
+                ),
+                su AS (
+                    SELECT s.tokens_used, s.primary_model, s.input_tokens, s.output_tokens,
+                           CASE WHEN so.found THEN so.owner_id ELSE nm.owner_id END AS eff_owner_id
+                    FROM summaries s
+                    LEFT JOIN sched_owner so ON so.schedule_id = s.schedule_id
+                    LEFT JOIN name_owner nm  ON nm.name = s.bot_name
+                    WHERE s.timestamp >= DATE_TRUNC('month', CURRENT_TIMESTAMP)
+                )
+                SELECT su.primary_model AS model,
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN su.input_tokens ELSE 0 END) AS input_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.output_tokens, 0) ELSE 0 END) AS output_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NULL THEN COALESCE(su.tokens_used, 0) ELSE 0 END) AS legacy_tokens
+                FROM su WHERE {owner_sql}
+                GROUP BY 1
+            """, owner_params)
+            rows = []
+            for r in cursor.fetchall():
+                # Exact split rows price precisely; legacy totals price blended.
+                if (r['input_tokens'] or 0) + (r['output_tokens'] or 0) > 0:
+                    rows.append({'feature': 'summaries', 'model': r['model'],
+                                 'input_tokens': r['input_tokens'], 'output_tokens': r['output_tokens']})
+                if (r['legacy_tokens'] or 0) > 0:
+                    rows.append({'feature': 'summaries', 'model': r['model'],
+                                 'tokens': r['legacy_tokens']})
+
+            cursor.execute(f"""
+                SELECT l.feature, l.model,
+                       SUM(COALESCE(l.input_tokens, 0))  AS input_tokens,
+                       SUM(COALESCE(l.output_tokens, 0)) AS output_tokens
+                FROM ai_usage_log l
+                WHERE l.created_at >= DATE_TRUNC('month', CURRENT_TIMESTAMP) AND {log_sql}
+                GROUP BY 1, 2
+            """, log_params)
+            rows.extend(dict(r) for r in cursor.fetchall())
+            return rows
         finally:
             self._commit()
 
@@ -1589,6 +1729,26 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    def get_user_overlay_keywords(self, bot_name: str, owner_id: int) -> dict:
+        """User-scoped keyword rows on an (inherited) admin bot, grouped by
+        (category_name, topic_name). These overlay the admin bot's keywords in
+        the user's inherited view — the user never owns the bot itself."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT category_name, topic_name, keyword FROM topic_keywords
+                WHERE bot_name = %s AND owner_id = %s
+                ORDER BY id
+            """, (bot_name, owner_id))
+            out = {}
+            for r in cursor.fetchall():
+                out.setdefault((r['category_name'], r['topic_name']), []).append(r['keyword'])
+            for key, kws in out.items():
+                out[key] = self._split_keywords(kws)
+            return out
+        finally:
+            self._commit()
+
     @staticmethod
     def _split_keywords(raw: list) -> list:
         """Flatten a list that may contain comma-separated strings into individual keywords."""
@@ -1632,11 +1792,26 @@ class SummariesDB(Database):
             cursor = self._get_cursor()
             total_inserted = 0
             for kw in self._split_keywords([keyword]):
-                cursor.execute("""
-                    INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
-                """, (bot_name, category_name, topic_name, kw, owner_id))
+                if owner_id is None:
+                    cursor.execute("""
+                        INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (bot_name, category_name, topic_name, kw, owner_id))
+                else:
+                    # User overlay row — skip when the admin bot already has this
+                    # keyword, so the user's view never shows duplicate pills.
+                    cursor.execute("""
+                        INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
+                        SELECT %s, %s, %s, %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM topic_keywords
+                            WHERE bot_name = %s AND category_name = %s AND topic_name = %s
+                              AND keyword = %s AND owner_id IS NULL
+                        )
+                        ON CONFLICT DO NOTHING
+                    """, (bot_name, category_name, topic_name, kw, owner_id,
+                          bot_name, category_name, topic_name, kw))
                 total_inserted += cursor.rowcount
             if total_inserted > 0:
                 self._bump_config_version()
@@ -2515,11 +2690,9 @@ class SummariesDB(Database):
         cats_flat = self.get_categories_topics_flat()
         cat_id_to_name   = {c['category_id']: c['category_name'] for c in cats_flat}
         topic_id_to_name = {}
-        topic_key_to_id  = {}
         for c in cats_flat:
             for t in c.get('topics', []):
                 topic_id_to_name[t['id']] = t['name']
-                topic_key_to_id[(c['bot_name'], c['category_name'], t['name'])] = t['id']
 
         full_config = self.get_all_bots_config()
 
@@ -2553,18 +2726,29 @@ class SummariesDB(Database):
             if not inh.get('inherit_rules', True):
                 bot_cfg['rules'] = {'remove': [], 'replace': []}
 
-            ts_map = {ts['topic_id']: ts for ts in (inh.get('topic_settings') or [])}
-            if ts_map:
-                for cat_name, cat_data in bot_cfg['categories'].items():
-                    for topic_name, topic in cat_data['topics'].items():
-                        tid = topic_key_to_id.get((bot_name, cat_name, topic_name))
-                        if tid and not ts_map.get(tid, {}).get('seo_visible', True):
-                            kws = topic.get('keywords') or []
-                            topic['_keyword_count'] = len(kws)
-                            topic['keywords'] = []
+            # Inherited SEOs are a read-only group: the user sees that the topic
+            # carries keywords (count) but never the keywords themselves. Only
+            # their own overlay keywords (user_keywords, below) are visible.
+            for cat_data in bot_cfg['categories'].values():
+                for topic in cat_data['topics'].values():
+                    kws = topic.get('keywords') or []
+                    topic['_keyword_count'] = len(kws)
+                    topic['keywords'] = []
 
             bot_cfg['collections'] = [c for c in bot_cfg.get('collections', []) if c in user_coll_names]
 
+            # User-scoped overlay keywords: the user's own additions on top of
+            # the (shared, admin-owned) bot. Kept separate from `keywords` so
+            # the UI can tell which pills the user may delete.
+            overlay = self.get_user_overlay_keywords(bot_name, user_id)
+            if overlay:
+                for cat_name, cat_data in bot_cfg['categories'].items():
+                    for topic_name, topic in cat_data['topics'].items():
+                        uk = overlay.get((cat_name, topic_name))
+                        if uk:
+                            topic['user_keywords'] = uk
+
+            bot_cfg['inherited'] = True
             result[bot_name] = bot_cfg
 
         return result
@@ -2639,102 +2823,6 @@ class SummariesDB(Database):
     def get_owned_bots_config(self, user_id: int) -> dict:
         """Return full config for all bots owned by this user."""
         return self.get_all_bots_config(owner_id=user_id, _admin_only=False)
-
-    def clone_bot_for_user(self, bot_name: str, user_id: int) -> bool:
-        """Copy an admin-managed bot into the user's own namespace (copy-on-write).
-
-        Returns True if a new copy was created, False if the user already owns one.
-        """
-        try:
-            cursor = self._get_cursor()
-            cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id = %s", (bot_name, user_id))
-            if cursor.fetchone():
-                return False
-
-            cursor.execute("SELECT * FROM bots WHERE name = %s AND owner_id IS NULL", (bot_name,))
-            admin_bot = cursor.fetchone()
-            if not admin_bot:
-                return False
-            admin_bot_id = admin_bot['id']
-
-            cursor.execute("""
-                INSERT INTO bots (name, enabled, minimum_messages, collection_names, rules, default_schedules, owner_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (bot_name, admin_bot['enabled'], admin_bot['minimum_messages'],
-                  admin_bot['collection_names'], admin_bot['rules'],
-                  admin_bot['default_schedules'], user_id))
-            new_bot_id = cursor.fetchone()['id']
-
-            cursor.execute("SELECT * FROM categories WHERE bot_id = %s ORDER BY id", (admin_bot_id,))
-            categories = cursor.fetchall()
-            topic_id_map: list = []  # (old_topic_id, new_topic_id) — to carry over SEO-group links
-            for cat in categories:
-                cursor.execute("""
-                    INSERT INTO categories (bot_id, name, enabled) VALUES (%s, %s, %s) RETURNING id
-                """, (new_bot_id, cat['name'], cat['enabled']))
-                new_cat_id = cursor.fetchone()['id']
-
-                cursor.execute("SELECT * FROM topics WHERE category_id = %s ORDER BY id", (cat['id'],))
-                topics = cursor.fetchall()
-                for topic in topics:
-                    cursor.execute("""
-                        INSERT INTO topics (category_id, name, enabled, catch_all, linked_topics)
-                        VALUES (%s, %s, %s, %s, %s) RETURNING id
-                    """, (new_cat_id, topic['name'], topic['enabled'],
-                          topic.get('catch_all', False), topic.get('linked_topics', '[]')))
-                    new_topic_id = cursor.fetchone()['id']
-                    topic_id_map.append((topic['id'], new_topic_id))
-
-                    cursor.execute("SELECT * FROM schedules WHERE topic_id = %s", (topic['id'],))
-                    schedules = cursor.fetchall()
-                    for sch in schedules:
-                        cursor.execute("""
-                            INSERT INTO schedules
-                                (topic_id, name, type, enabled, prompt_key, header, header_datetime,
-                                 header_date_arabic, header_time_arabic, minute, hour, hours, minutes,
-                                 start_hour, start_minute, wait_time, end_hour, end_minute, telegram_targets)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """, (new_topic_id, sch['name'], sch['type'], sch['enabled'],
-                              sch.get('prompt_key'), sch.get('header'), sch.get('header_datetime', False),
-                              sch.get('header_date_arabic', False), sch.get('header_time_arabic', False),
-                              sch.get('minute'), sch.get('hour'), sch.get('hours'), sch.get('minutes'),
-                              sch.get('start_hour'), sch.get('start_minute'), sch.get('wait_time'),
-                              sch.get('end_hour'), sch.get('end_minute'),
-                              json.dumps(sch.get('telegram_targets') or [])))
-
-            cursor.execute("""
-                INSERT INTO topic_keywords (bot_name, category_name, topic_name, keyword, owner_id)
-                SELECT bot_name, category_name, topic_name, keyword, %s
-                FROM topic_keywords WHERE bot_name = %s AND owner_id IS NULL
-                ON CONFLICT DO NOTHING
-            """, (user_id, bot_name))
-
-            cursor.execute("""
-                INSERT INTO prompts (bot_name, key, text, owner_id)
-                SELECT bot_name, key, text, %s
-                FROM prompts WHERE bot_name = %s AND owner_id IS NULL
-                ON CONFLICT DO NOTHING
-            """, (user_id, bot_name))
-
-            # Carry over the admin topics' SEO-group attachments to the new copy.
-            for old_tid, new_tid in topic_id_map:
-                cursor.execute("""
-                    INSERT INTO topic_seo_groups (topic_id, group_id)
-                    SELECT %s, group_id FROM topic_seo_groups WHERE topic_id = %s
-                    ON CONFLICT DO NOTHING
-                """, (new_tid, old_tid))
-
-            # Carry over the admin bot's replace-group attachments to the new copy.
-            cursor.execute("""
-                INSERT INTO bot_replace_groups (bot_id, group_id)
-                SELECT %s, group_id FROM bot_replace_groups WHERE bot_id = %s
-                ON CONFLICT DO NOTHING
-            """, (new_bot_id, admin_bot_id))
-
-            self._bump_config_version()
-            return True
-        finally:
-            self._commit()
 
     def toggle_bot(self, name: str, enabled: bool, owner_id: int = None) -> bool:
         try:

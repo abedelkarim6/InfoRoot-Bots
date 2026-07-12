@@ -19,6 +19,9 @@ import CategoryBox from './CategoryBox';
 export default function TopicsSection({ botName, bot }) {
   const cats = Object.entries(bot.categories || {});
   const [open, setOpen] = useState(true);
+  // Inherited bots are shared admin bots — structure is read-only for the
+  // user; only user-scoped SEO keywords can be added/removed.
+  const inherited = !!bot.inherited;
 
   return (
     <div
@@ -40,10 +43,11 @@ export default function TopicsSection({ botName, bot }) {
               botName={botName}
               catName={catName}
               cat={cat}
+              inherited={inherited}
             />
           ))}
 
-          <AddCategoryInline botName={botName} />
+          {!inherited && <AddCategoryInline botName={botName} />}
         </div>
       </div>
     </div>

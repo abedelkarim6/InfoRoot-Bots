@@ -46,13 +46,13 @@
 .mon-sch-left { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .mon-sch-icon { font-size:14px; }
 .mon-sch-name { font-size:12px; font-weight:600; color:var(--text-primary); }
-.mon-sch-prompt { font-size:10px; padding:1px 7px; border-radius:20px; background:rgba(59,130,246,0.12); color:#93c5fd; font-weight:600; }
+.mon-sch-prompt { font-size:10px; padding:1px 7px; border-radius:20px; background:rgba(var(--accent-primary-rgb),0.12); color:var(--accent-primary); font-weight:600; }
 .mon-sch-spec { font-size:11px; color:var(--text-muted); }
 .mon-sch-disabled { opacity:0.4; }
 
 .mon-sch-right { display:flex; align-items:center; gap:10px; flex-shrink:0; }
 .mon-pending { font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; white-space:nowrap; }
-.mon-pending.has  { background:rgba(16,185,129,0.15); color:#34d399; }
+.mon-pending.has  { background:rgba(16,185,129,0.15); color:var(--success); }
 .mon-pending.none { background:rgba(100,116,139,0.12); color:var(--text-muted); }
 .mon-next-label { font-size:10px; color:var(--text-muted); }
 .mon-countdown { font-size:12px; font-weight:700; color:var(--success); min-width:60px; text-align:right; }
@@ -62,7 +62,7 @@
 /* shared table style */
 .mon-table { width:100%; border-collapse:collapse; font-size:12px; }
 .mon-table th { padding:8px 12px; text-align:left; color:var(--text-muted); font-weight:600; border-bottom:1px solid var(--border-color); white-space:nowrap; }
-.mon-table td { padding:7px 12px; border-bottom:1px solid rgba(45,55,72,0.4); vertical-align:top; color:var(--text-secondary); }
+.mon-table td { padding:7px 12px; border-bottom:1px solid var(--border-color); vertical-align:top; color:var(--text-secondary); }
 .mon-table tr:last-child td { border-bottom:none; }
 .mon-table tr:hover td { background:var(--bg-tertiary); }
 .sch-timeline-table thead { position:sticky; top:0; z-index:1; }
@@ -76,21 +76,21 @@
 .yt-sched-budget-fill { height:100%; border-radius:5px; transition:width .4s ease; }
 .mon-ellipsis { max-width:520px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word; line-height:1.45; }
 .mon-type-badge { font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; white-space:nowrap; }
-.mon-type-badge.hourly { background:rgba(59,130,246,0.18); color:#60a5fa; }
+.mon-type-badge.hourly { background:rgba(var(--accent-primary-rgb),0.18); color:var(--accent-primary); }
 .mon-type-badge.daily  { background:rgba(139,92,246,0.18); color:#a78bfa; }
 .mon-type-badge.minute { background:rgba(245,158,11,0.18); color:#fbbf24; }
 
 /* messages section */
 .mon-coll-hdr { padding:9px 14px; font-weight:700; font-size:12px; color:var(--accent-primary); background:var(--bg-tertiary); border-bottom:1px solid var(--border-color); }
 .mon-ch-hdr   { padding:6px 14px; font-size:11px; color:var(--text-muted); background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
-.mon-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:10px; background:rgba(59,130,246,0.13); color:#93c5fd; margin:1px; }
+.mon-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:10px; background:rgba(var(--accent-primary-rgb),0.13); color:var(--accent-primary); margin:1px; }
 .mon-tag.cat { background:rgba(139,92,246,0.13); color:#c4b5fd; }
 
-/* tab bar */
-.mon-tab-bar { display:flex; gap:2px; padding:12px 16px 0; background:var(--bg-secondary); border-bottom:1px solid var(--border-color); }
-.mon-tab { padding:7px 20px; border:none; border-radius:6px 6px 0 0; background:transparent; color:var(--text-muted); cursor:pointer; font-size:13px; font-weight:500; transition:all 0.15s; border-bottom:2px solid transparent; margin-bottom:-1px; }
-.mon-tab:hover { color:var(--text-primary); background:var(--bg-tertiary); }
-.mon-tab.active { color:var(--accent-primary); background:var(--bg-card); border-bottom:2px solid var(--accent-primary); font-weight:600; }
+/* tab bar — Figma pill tabs (shared by Monitor, SEOs, Prompts pages) */
+.mon-tab-bar { display:flex; flex-wrap:wrap; gap:8px; padding:12px 16px; background:transparent; border-bottom:none; }
+.mon-tab { display:inline-flex; align-items:center; gap:7px; padding:8px 16px; border:1px solid var(--border-color); border-radius:999px; background:var(--bg-card); color:var(--text-secondary); cursor:pointer; font-size:13px; font-weight:500; transition:var(--transition); margin-bottom:0; }
+.mon-tab:hover { color:var(--text-primary); border-color:var(--accent-primary); background:var(--bg-card); }
+.mon-tab.active { color:var(--accent-primary); background:var(--bg-card); border-color:var(--accent-primary); font-weight:600; box-shadow:var(--shadow-sm), inset 0 0 0 1px var(--accent-primary); }
 .mon-tab-panel { padding:16px; }
 .mon-uncl-badge { display:inline-block; background:var(--danger); color:#fff; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; margin-left:4px; vertical-align:middle; }
 .mon-uncl-stats-bar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }

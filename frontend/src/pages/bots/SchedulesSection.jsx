@@ -15,7 +15,7 @@ import { formatScheduleLong } from './shared';
 import AddScheduleModal from './AddScheduleModal';
 import EditScheduleModal from './EditScheduleModal';
 
-export default function SchedulesSection({ botName, catName, topicName, topic }) {
+export default function SchedulesSection({ botName, catName, topicName, topic, inherited = false }) {
   const schedules = topic.schedules || [];
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -65,14 +65,17 @@ export default function SchedulesSection({ botName, catName, topicName, topic })
               })
             }
             disabled={toggleSch.isPending || removeSch.isPending}
+            readOnly={inherited}
           />
         ))}
-        <button
-          className="btn btn-secondary btn-sm mt-2"
-          onClick={() => setAddOpen(true)}
-        >
-          + Add Schedule
-        </button>
+        {!inherited && (
+          <button
+            className="btn btn-secondary btn-sm mt-2"
+            onClick={() => setAddOpen(true)}
+          >
+            + Add Schedule
+          </button>
+        )}
       </div>
 
       {addOpen && (
@@ -96,35 +99,39 @@ export default function SchedulesSection({ botName, catName, topicName, topic })
   );
 }
 
-function ScheduleRow({ sch, onToggle, onEdit, onDelete, disabled }) {
+function ScheduleRow({ sch, onToggle, onEdit, onDelete, disabled, readOnly = false }) {
   return (
     <div className="summary-block">
       <div className="summary-header">
         <div className="summary-title">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={!!sch.enabled}
-              onChange={(e) => onToggle(e.target.checked)}
-              disabled={disabled}
-            />
-            <span className="toggle-slider"></span>
-          </label>
+          {!readOnly && (
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={!!sch.enabled}
+                onChange={(e) => onToggle(e.target.checked)}
+                disabled={disabled}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+          )}
           <strong>{sch.name}</strong>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <button className="btn-icon" title="Edit schedule" onClick={onEdit}>
-            ✏️
-          </button>
-          <button
-            className="btn-icon btn-danger"
-            title="Delete schedule"
-            onClick={onDelete}
-            disabled={disabled}
-          >
-            🗑️
-          </button>
-        </div>
+        {!readOnly && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button className="btn-icon" title="Edit schedule" onClick={onEdit}>
+              ✏️
+            </button>
+            <button
+              className="btn-icon btn-danger"
+              title="Delete schedule"
+              onClick={onDelete}
+              disabled={disabled}
+            >
+              🗑️
+            </button>
+          </div>
+        )}
       </div>
       <div className="summary-details">
         <span>📅 {formatScheduleLong(sch)}</span>

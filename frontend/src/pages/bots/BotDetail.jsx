@@ -24,12 +24,13 @@ import BasicSettings from './BasicSettings';
 import Rules from './Rules';
 import TopicsSection from './TopicsSection';
 import BotChannelsModal from './BotChannelsModal';
+import Icon from '../../components/icons';
 
 // Prompts are global now — managed on the top-level /prompts page.
 const TABS = [
-  { id: 'basic',      label: '⚙️ Basic' },
-  { id: 'rules',      label: '🔧 Rules' },
-  { id: 'categories', label: '📂 Categories & Topics' }
+  { id: 'basic',      label: 'Basic Settings' },
+  { id: 'rules',      label: 'Rules' },
+  { id: 'categories', label: 'Categories & Topics' }
 ];
 const VALID_TABS = new Set(TABS.map((t) => t.id));
 
@@ -138,46 +139,75 @@ function BotDetailHeader({ botName, bot, sources, targets, onBack }) {
     });
   }
 
+  const inherited = !!bot.inherited;
+
   return (
     <>
+      {/* Breadcrumb row (Figma: "Summaries Bots / <bot>") */}
+      <nav className="breadcrumbs">
+        <button className="breadcrumb-link" onClick={onBack}>
+          <Icon name="bot" size={14} style={{ marginRight: 5, verticalAlign: '-2px' }} />
+          Summaries Bots
+        </button>
+        <span className="breadcrumb-sep">/</span>
+        <span className="breadcrumb-current">{botName}</span>
+      </nav>
+
       <div className="bot-detail-header" style={{ flexWrap: 'wrap', rowGap: 8 }}>
-        <button className="btn btn-secondary btn-sm" onClick={onBack}>
-          ‹ All Bots
-        </button>
-        <h2 style={{ margin: 0, fontSize: 18 }}>🤖 {botName}</h2>
-        <label className="toggle-switch" style={{ marginLeft: 'auto' }}>
-          <input
-            type="checkbox"
-            checked={!!bot.enabled}
-            disabled={save.isPending}
-            onChange={toggleEnabled}
-          />
-          <span className="toggle-slider"></span>
-        </label>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={() => setChannelsModal('source')}
-          title="Channels this bot reads from"
-        >
-          📡 Telegram Sources <span style={{ opacity: 0.7 }}>({sources.length})</span>
-        </button>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={() => setChannelsModal('target')}
-          title="Channels this bot sends summaries to"
-        >
-          📤 Telegram Destinations <span style={{ opacity: 0.7 }}>({targets.length})</span>
-        </button>
-        <button className="btn btn-secondary btn-sm" onClick={() => setRenameOpen(true)}>
-          ✏️ Rename
-        </button>
-        <button
-          className="btn btn-danger btn-sm"
-          onClick={() => confirmDelete({ name: botName })}
-          disabled={remove.isPending}
-        >
-          🗑️ Delete
-        </button>
+        <h2 className="page-title" style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          {botName}
+          {inherited && (
+            <span
+              className="linked-badge"
+              title="Shared bot managed by the admin — you can add your own SEO keywords; structure is read-only"
+            >
+              🔗 Inherited
+            </span>
+          )}
+          {!inherited && (
+            <button
+              className="btn-icon"
+              style={{ fontSize: 16 }}
+              title="Rename bot"
+              onClick={() => setRenameOpen(true)}
+            >✏️</button>
+          )}
+        </h2>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => setChannelsModal('source')}
+            title="Channels this bot reads from"
+          >
+            Sources <span style={{ opacity: 0.7 }}>({sources.length})</span>
+          </button>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => setChannelsModal('target')}
+            title="Channels this bot sends summaries to"
+          >
+            Destinations <span style={{ opacity: 0.7 }}>({targets.length})</span>
+          </button>
+          {!inherited && (
+            <>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!bot.enabled}
+                  disabled={save.isPending}
+                  onChange={toggleEnabled}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <button
+                className="btn-icon btn-icon-danger"
+                title="Delete bot"
+                onClick={() => confirmDelete({ name: botName })}
+                disabled={remove.isPending}
+              ><Icon name="trash" size={15} /></button>
+            </>
+          )}
+        </div>
       </div>
 
       {renameOpen && (

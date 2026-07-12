@@ -24,12 +24,18 @@ import AddKeywordsModal from './AddKeywordsModal';
 // the master list — keyed by 'bot|cat|topic'.
 const _userAddedKeywords = {};
 
-export default function SeosSection({ botName, catName, topicName, topic }) {
+export default function SeosSection({ botName, catName, topicName, topic, inherited = false }) {
   const seoHidden = topic._keyword_count != null;
   const keywords = topic.keywords || [];
   const ukKey = `${botName}|${catName}|${topicName}`;
-  const userKws = seoHidden ? _userAddedKeywords[ukKey] || [] : [];
-  const seoCount = seoHidden ? topic._keyword_count : keywords.length;
+  // User-scoped overlay keywords on an inherited bot: persisted by the backend
+  // (topic.user_keywords) + any added this session before the config refetch.
+  const serverUserKws = topic.user_keywords || [];
+  const localUserKws = _userAddedKeywords[ukKey] || [];
+  const userKws = (inherited || seoHidden)
+    ? [...serverUserKws, ...localUserKws.filter((k) => !serverUserKws.includes(k))]
+    : [];
+  const seoCount = (seoHidden ? topic._keyword_count : keywords.length) + userKws.length;
   const catchAll = !!topic.catch_all;
 
   const [selected, setSelected] = useState(new Set());
@@ -153,7 +159,7 @@ export default function SeosSection({ botName, catName, topicName, topic }) {
           <button className="btn-kw-action kw-add" onClick={() => setAddOpen(true)}>
             ➕ Add Keywords
           </button>
-          {!seoHidden && keywords.length > 0 && (
+          {!seoHidden && !inherited && keywords.length > 0 && (
             <>
               <button className="btn-kw-action kw-neutral" onClick={toggleSelectAll}>
                 ☑ Select All
@@ -190,7 +196,8 @@ export default function SeosSection({ botName, catName, topicName, topic }) {
                 pointerEvents: 'none'
               }}
             >
-              🔒 {seoCount} SEO{seoCount !== 1 ? 's' : ''} active — details hidden by admin
+              🔒 {topic._keyword_count} SEO{topic._keyword_count !== 1 ? 's' : ''} active —{' '}
+              {inherited ? 'inherited group (keywords managed by admin)' : 'details hidden by admin'}
             </span>
             {userKws.map((kw) => (
               <span className="tag tag-user-kw" key={kw}>
@@ -257,7 +264,7 @@ export default function SeosSection({ botName, catName, topicName, topic }) {
           botName={botName}
           catName={catName}
           topicName={topicName}
-          seoHidden={seoHidden}
+          seoHidden={seoHidden || inherited}
           onAddedHidden={(kws) => {
             if (!_userAddedKeywords[ukKey]) _userAddedKeywords[ukKey] = [];
             kws.forEach((kw) => {

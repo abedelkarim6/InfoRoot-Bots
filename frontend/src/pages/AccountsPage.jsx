@@ -283,6 +283,9 @@ function UserCard({ user, plans, allBots, allChans, allKws, cats, allColls }) {
           {/* Plan selector */}
           <PlanSelector user={user} plans={plans} />
 
+          {/* Monthly $ cost caps */}
+          <CostCapsEditor user={user} />
+
           {/* Top-level feature toggles */}
           <div className="ac-features">
             <FeatureRow user={user} flag="bots_on" label="📰 Summaries" />
@@ -603,6 +606,83 @@ function PlanSelector({ user, plans }) {
       {user.ai_plan_name && (
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           {user.ai_plan_monthly_limit} requests/month
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Monthly AI cost caps (USD). Chatbot + SEO-suggest caps BLOCK the feature
+// when reached; summaries/youtube run under the admin scheduler, so those (and
+// the overall cap for them) are informational on the AI Usage page.
+const COST_CAP_FIELDS = [
+  { key: 'total', label: 'Overall' },
+  { key: 'summaries', label: 'Summaries' },
+  { key: 'youtube', label: 'YouTube' },
+  { key: 'chatbot', label: 'Chatbot' },
+  { key: 'seo', label: 'SEO AI' }
+];
+
+function CostCapsEditor({ user }) {
+  const update = useApiMutation(`/api/admin/accounts/${user.id}/update`, {
+    invalidate: [ACCOUNTS_KEY],
+    successMsg: 'Cost caps saved',
+    errorMsg: 'Update failed',
+  });
+  const caps = user.cost_caps || {};
+  const [draft, setDraft] = useState(() =>
+    Object.fromEntries(COST_CAP_FIELDS.map((f) => [f.key, caps[f.key] != null ? String(caps[f.key]) : '']))
+  );
+
+  function commit() {
+    const next = {};
+    for (const f of COST_CAP_FIELDS) {
+      const v = parseFloat(draft[f.key]);
+      if (Number.isFinite(v) && v >= 0 && draft[f.key] !== '') next[f.key] = v;
+    }
+    update.mutate({ cost_caps: next });
+  }
+
+  const anyCap = COST_CAP_FIELDS.some((f) => caps[f.key] != null);
+
+  return (
+    <div
+      style={{
+        padding: '10px 0 6px',
+        borderTop: '1px solid var(--border-color)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        flexWrap: 'wrap',
+      }}
+    >
+      <span
+        style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+        title="Monthly AI cost caps in USD. Blank = unlimited. Chatbot / SEO AI caps block the feature when reached; the rest are informational on the AI Usage page."
+      >
+        💲 Cost caps /mo:
+      </span>
+      {COST_CAP_FIELDS.map((f) => (
+        <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+          {f.label}
+          <input
+            type="number"
+            className="ac-num-inp"
+            min="0"
+            step="0.5"
+            placeholder="∞"
+            style={{ width: 62, fontSize: 12, padding: '3px 6px', height: 26 }}
+            value={draft[f.key]}
+            onChange={(e) => setDraft((cur) => ({ ...cur, [f.key]: e.target.value }))}
+            onBlur={commit}
+          />
+        </label>
+      ))}
+      {anyCap && (
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          {COST_CAP_FIELDS.filter((f) => caps[f.key] != null)
+            .map((f) => `${f.label} $${caps[f.key]}`)
+            .join(' · ')}
         </span>
       )}
     </div>

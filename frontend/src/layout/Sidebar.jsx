@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { useGlobalConfig } from '../config/ConfigProvider';
+import Icon from '../components/icons';
 
 const THEME_KEY = 'theme';
 // Match the legacy localStorage keys so a user's saved sidebar state
@@ -118,17 +119,17 @@ export default function Sidebar() {
       </div>
 
       <nav className="sidebar-nav">
-        <NavItem to="/" icon="🔌" label="Main Dashboard" end />
+        <NavItem to="/" icon="dashboard" label="System Dashboard" end />
         {/* Telegram Setup was a separate page in legacy; merged into Profile now. */}
 
         {hasBots && (
           <>
             <div className="nav-separator" />
-            <span className="nav-section-label">Summaries</span>
-            <NavItem to="/dashboard" icon="📊" label="Summaries Dashboard" />
-            <NavItem to="/bots" icon="🤖" label="Summaries Bots" badge={Object.keys(bots).length} />
-            <NavItem to="/seos" icon="🏷️" label="SEOs" />
-            <NavItem to="/monitor" icon="📡" label="Schedules Monitor" />
+            <span className="nav-section-label">News Summaries</span>
+            <NavItem to="/dashboard" icon="chart" label="Summaries Dashboard" />
+            <NavItem to="/bots" icon="bot" label="Summaries Bots" badge={Object.keys(bots).length} />
+            <NavItem to="/monitor" icon="monitor" label="Schedules Monitor" />
+            <NavItem to="/seos" icon="seo" label="SEOs" />
           </>
         )}
 
@@ -136,12 +137,12 @@ export default function Sidebar() {
         {youtubeOn && (
           <>
             <div className="nav-separator" />
-            <span className="nav-section-label">YouTube Reader</span>
-            <NavItem to="/yt-videos" icon="📋" label="Youtube Dashboard" />
-            <NavItem to="/yt-channels" icon="📺" label="Youtube Channels" />
-            <NavItem to="/yt-keywords" icon="🔎" label="YouTube SEOs" />
-            {isAdmin && <NavItem to="/yt-schedules" icon="🗓️" label="Youtube Schedules" />}
-            <NavItem to="/youtube-prompts" icon="📝" label="Youtube Prompts" />
+            <span className="nav-section-label">YouTube Summaries</span>
+            <NavItem to="/yt-videos" icon="grid" label="Youtube Dashboard" />
+            <NavItem to="/yt-channels" icon="video" label="Youtube Channels" />
+            <NavItem to="/yt-keywords" icon="search" label="Youtube SEOs" />
+            {isAdmin && <NavItem to="/yt-schedules" icon="calendar" label="Youtube Schedules" />}
+            <NavItem to="/youtube-prompts" icon="fileText" label="Youtube Prompts" />
           </>
         )}
 
@@ -149,31 +150,31 @@ export default function Sidebar() {
           <>
             <div className="nav-separator" />
             <span className="nav-section-label">AI Chatbots</span>
-            {ytChatOn && <NavItem to="/yt-chat" icon="💬" label="Video Chat" />}
-            {agentsOn && <NavItem to="/agent-chat" icon="🤖" label="Agent Bot" />}
+            {agentsOn && <NavItem to="/agent-chat" icon="agent" label="Agent Chatbot" />}
+            {ytChatOn && <NavItem to="/yt-chat" icon="messageVideo" label="Video Chatbot" />}
           </>
         )}
 
         <div className="nav-separator" />
         <span className="nav-section-label">System</span>
-        <NavItem to="/recycle-bin" icon="🗑️" label="Recycle Bin" />
+        <NavItem to="/recycle-bin" icon="trash" label="Recycle Bin" />
 
         {isAdmin && (
           <>
             <div className="nav-separator" />
             <span className="nav-section-label">Admin</span>
-            <NavItem to="/prompts" icon="🔒" label="Admin Prompts" />
-            <NavItem to="/accounts" icon="👥" label="Access & Plans" />
-            <NavItem to="/tg-tester" icon="🧪" label="TG Tester" />
-            <NavItem to="/logs" icon="📋" label="Logs" />
-            <NavItem to="/ai-usage" icon="⚡" label="AI Usage" />
-            <NavItem to="/youtube-quota" icon="📺" label="YouTube Quota" />
+            <NavItem to="/prompts" icon="lock" label="Admin Prompts" />
+            <NavItem to="/accounts" icon="users" label="Access & Plans" />
+            <NavItem to="/tg-tester" icon="flask" label="TG Tester" />
+            <NavItem to="/logs" icon="list" label="Logs" />
+            <NavItem to="/ai-usage" icon="zap" label="AI Usage" />
+            <NavItem to="/youtube-quota" icon="tv" label="YouTube Quota" />
           </>
         )}
       </nav>
 
       <div className="sidebar-footer">
-        <NavItem to="/profile" icon="👤" label={user?.username || 'Profile'} className="profile-link" />
+        <NavItem to="/profile" icon="user" label={user?.username || 'Profile'} className="profile-link" />
         <div className="footer-status-row">
           <div className="system-status">
             <div className="status-indicator" />
@@ -211,7 +212,7 @@ function NavItem({ to, icon, label, badge, end, className = '' }) {
       end={end}
       className={({ isActive }) => `nav-item ${className} ${isActive ? 'active' : ''}`.trim()}
     >
-      <span className="icon">{icon}</span>
+      <span className="icon"><Icon name={icon} /></span>
       <span>{label}</span>
       {badge != null && badge > 0 && <span className="badge">{badge}</span>}
     </NavLink>

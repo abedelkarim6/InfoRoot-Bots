@@ -57,12 +57,15 @@ class OpenAIClient:
             
             summary = response.choices[0].message.content.strip()
             logger.info(f"Summary generated successfully (length: {len(summary)} chars)")
-            tokens = 0
+            from utils.ai_pricing import TokenUsage
+            inp = out = 0
             if hasattr(response, 'usage') and response.usage:
-                tokens = (response.usage.prompt_tokens or 0) + (response.usage.completion_tokens or 0)
-            if not tokens:
-                tokens = (len(prompt) + len(summary)) // 4
-            return summary, tokens
+                inp = response.usage.prompt_tokens or 0
+                out = response.usage.completion_tokens or 0
+            if not (inp or out):
+                inp = len(prompt) // 4
+                out = len(summary) // 4
+            return summary, TokenUsage(inp + out, inp, out)
             
         except Exception as e:
             logger.error(f"Error generating summary: {e}")

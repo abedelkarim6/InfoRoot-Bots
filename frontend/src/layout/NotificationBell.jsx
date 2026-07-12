@@ -40,7 +40,7 @@ function warnKey(w) {
   return `${w.type || ''}::${w.bot_name || ''}::${w.message || ''}`;
 }
 
-export default function NotificationBell() {
+export default function NotificationBell({ persistent = false }) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [dismissed, setDismissed] = useState(() => loadDismissed());
@@ -68,14 +68,18 @@ export default function NotificationBell() {
     [allWarnings, dismissed]
   );
 
-  if (visible.length === 0) return null;
+  // Legacy floating mode disappears entirely with no warnings; the top-bar
+  // (persistent) mode keeps the bell visible with no badge.
+  if (visible.length === 0 && !persistent) return null;
 
   const errors = visible.filter((w) => w.level === 'error');
   const others = visible.filter((w) => w.level !== 'error');
   const errCount = errors.length;
   const title = errCount
     ? `⛔ Missing Definitions (${errCount} error${errCount > 1 ? 's' : ''})`
-    : `⚠️ Missing Definitions (${visible.length})`;
+    : visible.length
+      ? `⚠️ Missing Definitions (${visible.length})`
+      : '🔔 Notifications';
 
   function dismissOne(w) {
     setDismissed((prev) => {
@@ -111,7 +115,7 @@ export default function NotificationBell() {
         title="Notifications"
       >
         <span className="notif-bell-icon">🔔</span>
-        <span className="notif-bell-badge">{visible.length}</span>
+        {visible.length > 0 && <span className="notif-bell-badge">{visible.length}</span>}
       </button>
 
       <div className={`notif-panel${open ? ' open' : ''}`}>
@@ -139,6 +143,11 @@ export default function NotificationBell() {
           </div>
         </div>
         <div className="notif-panel-body">
+          {visible.length === 0 && (
+            <div className="notif-item" style={{ color: 'var(--text-muted)', fontSize: 13, padding: '16px 14px' }}>
+              You're all caught up — no warnings.
+            </div>
+          )}
           {[...errors, ...others].map((w) => (
             <div
               key={warnKey(w)}

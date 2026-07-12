@@ -309,6 +309,7 @@ class YouTubeDB:
         _ensure_col('yt_summaries', 'duration_secs',  'INTEGER')
         _ensure_col('yt_summaries', 'input_tokens',   'INTEGER')
         _ensure_col('yt_summaries', 'output_tokens',  'INTEGER')
+        _ensure_col('yt_summaries', 'model',          'TEXT')
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
         _ensure_col('yt_video_queue', 'updated_at', 'TIMESTAMP', 'NOW()')
@@ -860,18 +861,21 @@ class YouTubeDB:
         return [dict(r) for r in cursor.fetchall()]
 
     def get_ai_usage_history(self, date_from: str, date_to: str, granularity: str = 'day') -> list:
-        """Per-bucket (day|month) YouTube summarization runs + Gemini token totals
-        between two dates (inclusive). For the admin AI Usage history section.
+        """Per-(bucket, model) YouTube summarization runs + token sums between
+        two dates (inclusive), with exact input/output splits for pricing.
         YouTube has no per-user ownership — all usage counts as admin-owned."""
         gran = granularity if granularity in ('day', 'month') else 'day'
         cursor = self._get_cursor()
         cursor.execute("""
             SELECT DATE_TRUNC(%s, created_at)::date AS bucket,
+                   model                             AS model,
                    COUNT(*)                          AS runs,
+                   SUM(COALESCE(input_tokens, 0))    AS input_tokens,
+                   SUM(COALESCE(output_tokens, 0))   AS output_tokens,
                    SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
             FROM yt_summaries
             WHERE created_at::date BETWEEN %s AND %s
-            GROUP BY 1 ORDER BY 1
+            GROUP BY 1, 2 ORDER BY 1
         """, (gran, date_from, date_to))
         out = []
         for r in cursor.fetchall():
@@ -1483,19 +1487,20 @@ class YouTubeDB:
                      duration_secs: int = None, input_tokens: int = None, output_tokens: int = None,
                      prompt: str = None, thoughts: str = None,
                      transcript_text: str = None,
-                     output_length_percent: int = None):
+                     output_length_percent: int = None,
+                     model: str = None):
         prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
                  telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-                 thoughts, transcript_text, output_length_percent)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 thoughts, transcript_text, output_length_percent, model)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
               telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-              thoughts or None, transcript_text, output_length_percent))
+              thoughts or None, transcript_text, output_length_percent, model))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']

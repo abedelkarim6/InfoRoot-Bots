@@ -62,7 +62,7 @@ export default function SeoLibraryPage() {
   return (
     <div className="page active">
       <PageHeader
-        title="🏷️ SEOs"
+        title="SEOs"
         subtitle="Shared category library — keyword groups for topic matching, and replace-term groups for message rewriting."
       />
 

@@ -587,6 +587,7 @@ async def process_queue_item(queue_item: dict) -> bool:
         thoughts=thoughts or None,
         transcript_text=transcript_text,
         output_length_percent=output_length_percent,
+        model=get_gemini_model(),
     )
 
     # Mark done the moment the summary is persisted, BEFORE the best-effort

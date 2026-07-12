@@ -11,15 +11,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _resolve_bot_access(request: Request, bot_name: str):
+def _resolve_bot_access(request: Request, bot_name: str, keyword_op: bool = False):
     """Return (allowed: bool, owner_id_for_db).
 
     owner_id_for_db is what to pass to DB operations:
       - None  → operate on admin-managed bot
-      - int   → operate on this user's own bot
+      - int   → operate on this user's own rows
 
-    When a user tries to modify an inherited admin bot, we clone it into their
-    namespace first (copy-on-write), so the admin original is never affected.
+    Inheritance is shallow: a user never gets an owned copy of an admin bot
+    (the old copy-on-write clone is gone). On an inherited bot only keyword
+    operations are allowed — they write user-scoped overlay rows
+    (topic_keywords.owner_id) on top of the shared admin bot. Structural
+    edits (categories/topics/schedules) on inherited bots are rejected;
+    bots the user created themselves stay fully editable.
     """
     db = get_db()
     if is_admin_request(request):
@@ -27,14 +31,12 @@ def _resolve_bot_access(request: Request, bot_name: str):
     user_id = get_request_user_id(request)
     if not user_id:
         return False, None
-    # User already owns this bot — direct access
+    # User owns this bot (created it themselves) — full access
     bot_owner = db.get_bot_owner_id(bot_name, requesting_user_id=user_id)
     if bot_owner == user_id:
         return True, user_id
-    # User has inherited access to an admin bot → clone it into their namespace first,
-    # then all writes go to their own copy (admin original stays untouched)
-    if db.user_has_bot_access(user_id, bot_name):
-        db.clone_bot_for_user(bot_name, user_id)
+    # Inherited admin bot — keyword overlay only, never a clone
+    if keyword_op and db.user_has_bot_access(user_id, bot_name):
         return True, user_id
     return False, None
 
@@ -405,13 +407,19 @@ def get_topic_keywords(request: Request, bot_name: str, category_name: str, topi
     try:
         db = get_db()
         keywords = db.get_topic_keywords(bot_name, category_name, topic_name)
-        # Check seo_visible for non-admin users
+        # Inherited SEOs are a read-only group — non-admin users never see the
+        # admin keyword list, only the count (plus their own overlay keywords).
         if not is_admin_request(request):
             user_id = get_request_user_id(request)
-            if user_id:
-                user_row = db.get_user_by_id(user_id)
-                if user_row and not user_row.get('seo_visible', True):
-                    return {"status": "ok", "keywords": [], "count": len(keywords), "seo_visible": False}
+            if not user_id:
+                return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+            bot_owner = db.get_bot_owner_id(bot_name, requesting_user_id=user_id)
+            if bot_owner == user_id:
+                own = db.get_topic_keywords(bot_name, category_name, topic_name, owner_id=user_id)
+                return {"status": "ok", "keywords": own, "count": len(own), "seo_visible": True}
+            user_kws = db.get_topic_keywords(bot_name, category_name, topic_name, owner_id=user_id)
+            return {"status": "ok", "keywords": user_kws, "count": len(keywords) + len(user_kws),
+                    "seo_visible": False}
         return {"status": "ok", "keywords": keywords, "count": len(keywords), "seo_visible": True}
     except Exception as e:
         logger.exception("[TOPIC] get_topic_keywords failed")
@@ -428,7 +436,7 @@ def add_topic_keyword(request: Request, data: dict = Body(...)):
         if not bot_name or not category_name or not topic_name or not keyword:
             return {"status": "error", "message": "Missing required fields"}
 
-        allowed, owner_id = _resolve_bot_access(request, bot_name)
+        allowed, owner_id = _resolve_bot_access(request, bot_name, keyword_op=True)
         if not allowed:
             return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
@@ -451,7 +459,7 @@ def delete_topic_keyword(request: Request, data: dict = Body(...)):
         if not bot_name or not category_name or not topic_name or not keyword:
             return {"status": "error", "message": "Missing required fields"}
 
-        allowed, owner_id = _resolve_bot_access(request, bot_name)
+        allowed, owner_id = _resolve_bot_access(request, bot_name, keyword_op=True)
         if not allowed:
             return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
@@ -475,7 +483,7 @@ def add_topic_keywords_bulk(request: Request, data: dict = Body(...)):
         if not bot_name or not category_name or not topic_name or not keywords:
             return {"status": "error", "message": "Missing required fields"}
 
-        allowed, owner_id = _resolve_bot_access(request, bot_name)
+        allowed, owner_id = _resolve_bot_access(request, bot_name, keyword_op=True)
         if not allowed:
             return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
 
@@ -505,9 +513,18 @@ async def suggest_seos(request: Request, data: dict = Body(...)):
         if not bot_name or not category_name or not topic_name:
             return {"status": "error", "message": "Missing required fields"}
 
-        allowed, _ = _resolve_bot_access(request, bot_name)
+        allowed, _ = _resolve_bot_access(request, bot_name, keyword_op=True)
         if not allowed:
             return JSONResponse({"status": "error", "message": "Access denied"}, status_code=403)
+
+        # Monthly $ cost cap (seo + overall) — user-triggered AI call
+        _req_user_id = None if is_admin_request(request) else get_request_user_id(request)
+        if _req_user_id:
+            from utils.ai_pricing import check_user_cost_cap
+            cap_ok, cap_msg = check_user_cost_cap(get_db(), _req_user_id, 'seo')
+            if not cap_ok:
+                return JSONResponse({"status": "error", "message": cap_msg, "limit_reached": True},
+                                    status_code=429)
 
         # Per-batch config (frontend splits total into ≤50 batches)
         count     = max(1, min(50, int(data.get('count') or 50)))
@@ -565,7 +582,18 @@ Example: ["keyword1", "keyword2", ...]"""
 
         try:
             loop = asyncio.get_event_loop()
-            response, _ = await loop.run_in_executor(None, llm.generate_summary, prompt)
+            response, sug_tokens = await loop.run_in_executor(None, llm.generate_summary, prompt)
+
+            # Cost tracking — generate_summary returns a TokenUsage carrying
+            # the exact input/output split.
+            try:
+                from utils.ai_pricing import client_model
+                db.log_ai_usage(_req_user_id, 'seo', client_model(llm),
+                                input_tokens=getattr(sug_tokens, 'input', 0) or int(sug_tokens or 0),
+                                output_tokens=getattr(sug_tokens, 'output', 0),
+                                context=f"suggest-seos {bot_name}/{topic_name}")
+            except Exception:
+                pass
 
             match = re.search(r'\[[\s\S]*\]', response)
             if not match:

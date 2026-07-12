@@ -1043,6 +1043,103 @@ class Database:
             cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
             cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
 
+            # Migrate: exact input/output token split for the PRIMARY model's
+            # calls of a summary run (tokens_used stays the combined total for
+            # display). NULL input_tokens = pre-migration row → blended pricing.
+            cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS input_tokens INTEGER")
+            cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS output_tokens INTEGER")
+
+            # Generic AI usage event log — features without their own storage
+            # (chatbot agent runs, SEO suggestions). Summaries / YouTube keep
+            # using their own tables; the AI Usage history endpoint unions all.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_usage_log (
+                    id            SERIAL PRIMARY KEY,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    feature       TEXT NOT NULL,
+                    model         TEXT,
+                    input_tokens  INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    context       TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS ai_usage_log_created_idx
+                ON ai_usage_log (created_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS ai_usage_log_user_created_idx
+                ON ai_usage_log (user_id, created_at DESC)
+            """)
+
+            # Per-user monthly AI cost caps (USD): {"total": 10, "summaries":
+            # ..., "youtube": ..., "chatbot": ..., "seo": ...}; NULL = no caps.
+            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS cost_caps JSONB DEFAULT NULL")
+
+            # Migrate: remove copy-on-write bot clones. Editing an inherited bot
+            # used to fork the whole bot into the user's namespace (owner_id set),
+            # freezing their view and duplicating the bot name. Inheritance is now
+            # shallow-only (live admin view + user-scoped keyword overlay), so
+            # existing clones are deleted. Keyword rows the user genuinely added
+            # (absent from the admin bot) are kept — they become overlay keywords.
+            cursor.execute("""
+                SELECT ub.id AS user_bot_id, ub.name, ub.owner_id
+                FROM bots ub
+                JOIN bots ab ON ab.name = ub.name AND ab.owner_id IS NULL
+                JOIN user_bot_inheritance ubi
+                  ON ubi.user_id = ub.owner_id AND ubi.bot_id = ab.id
+                WHERE ub.owner_id IS NOT NULL
+            """)
+            clones = cursor.fetchall()
+            for cl in clones:
+                cursor.execute("""
+                    DELETE FROM topic_keywords uk
+                    WHERE uk.bot_name = %s AND uk.owner_id = %s
+                      AND EXISTS (
+                          SELECT 1 FROM topic_keywords ak
+                          WHERE ak.owner_id IS NULL
+                            AND ak.bot_name = uk.bot_name
+                            AND ak.category_name = uk.category_name
+                            AND ak.topic_name = uk.topic_name
+                            AND ak.keyword = uk.keyword
+                      )
+                """, (cl['name'], cl['owner_id']))
+                cursor.execute("""
+                    DELETE FROM prompts up
+                    WHERE up.bot_name = %s AND up.owner_id = %s
+                      AND EXISTS (
+                          SELECT 1 FROM prompts ap
+                          WHERE ap.owner_id IS NULL AND ap.bot_name = up.bot_name
+                            AND ap.key = up.key AND ap.text = up.text
+                      )
+                """, (cl['name'], cl['owner_id']))
+                cursor.execute("""
+                    DELETE FROM topic_seo_groups WHERE topic_id IN (
+                        SELECT t.id FROM topics t
+                        JOIN categories c ON c.id = t.category_id
+                        WHERE c.bot_id = %s
+                    )
+                """, (cl['user_bot_id'],))
+                cursor.execute("""
+                    DELETE FROM schedules WHERE topic_id IN (
+                        SELECT t.id FROM topics t
+                        JOIN categories c ON c.id = t.category_id
+                        WHERE c.bot_id = %s
+                    )
+                """, (cl['user_bot_id'],))
+                cursor.execute("""
+                    DELETE FROM topics WHERE category_id IN (
+                        SELECT id FROM categories WHERE bot_id = %s
+                    )
+                """, (cl['user_bot_id'],))
+                cursor.execute("DELETE FROM categories WHERE bot_id = %s", (cl['user_bot_id'],))
+                cursor.execute("DELETE FROM bot_replace_groups WHERE bot_id = %s", (cl['user_bot_id'],))
+                cursor.execute("DELETE FROM bots WHERE id = %s", (cl['user_bot_id'],))
+            if clones:
+                logger.info("[MIGRATE] Removed %d copy-on-write bot clone(s): %s",
+                            len(clones), [f"{c['name']} (user {c['owner_id']})" for c in clones])
+
             # Indexes for monitor-page hot queries. All tabs paginate by
             # `timestamp DESC` and filter by bot_name/collection_name/keywords_found.
             # Without these, every Messages/Unclassified/Schedules/History load
@@ -1131,6 +1228,7 @@ class Database:
                 SELECT u.id, u.username, u.role, u.is_active, u.bots_on, u.youtube_on,
                        u.yt_chat_on, u.agents_on, u.sys_bot_on, u.agents_limit,
                        u.telegram_phone, u.created_at, u.ai_plan_id, u.seo_visible,
+                       u.cost_caps,
                        p.name AS ai_plan_name, p.monthly_limit AS ai_plan_monthly_limit
                 FROM users u
                 LEFT JOIN ai_plans p ON p.id = u.ai_plan_id
@@ -1151,7 +1249,7 @@ class Database:
 
     def update_user(self, user_id: int, **fields):
         try:
-            allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role', 'ai_plan_id', 'seo_visible'}
+            allowed = {'is_active', 'bots_on', 'youtube_on', 'yt_chat_on', 'agents_on', 'sys_bot_on', 'agents_limit', 'role', 'ai_plan_id', 'seo_visible', 'cost_caps'}
             updates = {k: v for k, v in fields.items() if k in allowed}
             if not updates:
                 return
@@ -1297,6 +1395,33 @@ class Database:
             )
             row = cursor.fetchone()
             return row['request_count'] if row else 0
+        finally:
+            self._commit()
+
+    def log_ai_usage(self, user_id, feature: str, model: str,
+                     input_tokens: int = 0, output_tokens: int = 0, context: str = None):
+        """Record one AI call for cost tracking (chatbot / seo — features
+        without their own storage table). Best-effort: never raises."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                """INSERT INTO ai_usage_log (user_id, feature, model, input_tokens, output_tokens, context)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (user_id, feature, model, int(input_tokens or 0), int(output_tokens or 0), context)
+            )
+        except Exception as e:
+            logger.warning(f"[AI-USAGE] log_ai_usage failed: {e}")
+        finally:
+            self._commit()
+
+    def get_user_cost_caps(self, user_id: int) -> dict:
+        """Return the user's monthly cost caps dict ({} when none set)."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("SELECT cost_caps FROM users WHERE id = %s", (user_id,))
+            row = cursor.fetchone()
+            caps = row['cost_caps'] if row else None
+            return caps if isinstance(caps, dict) else {}
         finally:
             self._commit()
 

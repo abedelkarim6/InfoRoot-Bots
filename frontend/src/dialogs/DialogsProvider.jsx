@@ -226,7 +226,7 @@ function ToastRenderer({ toasts }) {
         padding: '16px 24px',
         background:
           t.type === 'success' ? '#10b981' :
-          t.type === 'error' ? '#ef4444' : '#3b82f6',
+          t.type === 'error' ? 'var(--danger, #ef4444)' : 'var(--accent-primary, #6b3db5)',
         color: 'white',
         borderRadius: 8,
         boxShadow: '0 4px 6px rgba(0,0,0,0.1)',

@@ -12,8 +12,9 @@ import { useRef, useState } from 'react';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import TopicBox from './TopicBox';
+import Icon from '../../components/icons';
 
-export default function CategoryBox({ botName, catName, cat }) {
+export default function CategoryBox({ botName, catName, cat, inherited = false }) {
   const [open, setOpen] = useState(true);
   const topics = Object.entries(cat.topics || {});
   const newTopicInputRef = useRef(null);
@@ -68,34 +69,40 @@ export default function CategoryBox({ botName, catName, cat }) {
     >
       <div className="category-header-row" onClick={() => setOpen((v) => !v)}>
         <div className="category-title-group">
-          <h4>🗂️ {catName}</h4>
-          <span className="text-muted" style={{ marginLeft: 8 }}>
-            ({topics.length} topic{topics.length !== 1 ? 's' : ''})
+          <span className="category-icon-tile"><Icon name="folder" size={17} /></span>
+          <h4>{catName}</h4>
+          <span className="count-pill">
+            {topics.length} Topic{topics.length !== 1 ? 's' : ''}
           </span>
         </div>
         <div className="category-controls" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={onClickAddTopic}
-          >
-            + Add Topic
-          </button>
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={!!cat.enabled}
-              onChange={onToggleEnabled}
-              disabled={toggle.isPending}
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <button
-            className="btn-icon btn-danger"
-            onClick={onDelete}
-            disabled={remove.isPending}
-          >
-            🗑️
-          </button>
+          {!inherited && (
+            <>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onClickAddTopic}
+              >
+                + Add Topic
+              </button>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!cat.enabled}
+                  onChange={onToggleEnabled}
+                  disabled={toggle.isPending}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <button
+                className="btn-icon btn-icon-danger"
+                onClick={onDelete}
+                disabled={remove.isPending}
+                title="Delete category"
+              >
+                <Icon name="trash" size={15} />
+              </button>
+            </>
+          )}
           <span className="collapsible-toggle">▼</span>
         </div>
       </div>
@@ -111,13 +118,16 @@ export default function CategoryBox({ botName, catName, cat }) {
                 topicName={topicName}
                 topic={topic}
                 categoryEnabled={cat.enabled !== false}
+                inherited={inherited}
               />
             ))}
-            <AddTopicInline
-              botName={botName}
-              catName={catName}
-              inputRef={newTopicInputRef}
-            />
+            {!inherited && (
+              <AddTopicInline
+                botName={botName}
+                catName={catName}
+                inputRef={newTopicInputRef}
+              />
+            )}
           </div>
         </div>
       )}

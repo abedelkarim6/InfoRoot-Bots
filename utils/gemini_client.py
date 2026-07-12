@@ -136,20 +136,26 @@ class GeminiClient:
                 # alongside the summary row when "Extended Thinking" is on.
                 self.last_thoughts = thoughts
 
-                tokens = 0
+                # TokenUsage is an int (the total) that also carries the
+                # input/output split for exact per-model cost accounting.
+                # Thinking tokens are billed as output, so they count there.
+                from utils.ai_pricing import TokenUsage
+                inp = out = 0
                 try:
-                    from utils.gemini_usage import record_gemini_request
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
                         um = response.usage_metadata
-                        tokens = (getattr(um, "prompt_token_count", 0) or 0) + \
-                                 (getattr(um, "candidates_token_count", 0) or 0)
-                    if not tokens:
-                        tokens = (len(full_prompt) + len(summary)) // 4
-                    record_gemini_request(total_tokens=tokens)
+                        inp = getattr(um, "prompt_token_count", 0) or 0
+                        out = (getattr(um, "candidates_token_count", 0) or 0) + \
+                              (getattr(um, "thoughts_token_count", 0) or 0)
+                    if not (inp or out):
+                        inp = len(full_prompt) // 4
+                        out = len(summary) // 4
+                    from utils.gemini_usage import record_gemini_request
+                    record_gemini_request(total_tokens=inp + out)
                 except Exception:
                     pass
 
-                return summary, tokens
+                return summary, TokenUsage(inp + out, inp, out)
 
             except Exception as e:
                 last_exc = e
