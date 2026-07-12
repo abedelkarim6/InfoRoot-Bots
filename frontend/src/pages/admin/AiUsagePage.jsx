@@ -57,6 +57,9 @@ export default function AiUsagePage() {
 
       {!isLoading && ok && (
         <>
+          {/* Gemini model picker */}
+          <GeminiModelCard />
+
           {/* Thinking toggle (Gemini 2.5 extended reasoning) */}
           <ThinkingToggleCard />
 
@@ -642,6 +645,126 @@ function ThinkingToggleCard() {
             </span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Gemini model picker
+//
+// Picks the PRIMARY model (sent to Telegram + used everywhere a single model is
+// needed) and an optional set of COMPARE models. When compare models are set,
+// the scheduler also runs each of them on the same input as an A/B test — those
+// outputs are stored and viewable in the History popup / export, never sent.
+// Stored as a system setting; overrides config.yaml at runtime — no redeploy.
+// ────────────────────────────────────────────────────────────────────────────
+
+function GeminiModelCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['gemini-model'],
+    queryFn: () => api('/api/system/gemini-model')
+  });
+
+  // Optimistic local state so the controls reflect the click immediately.
+  const [primary, setPrimaryState] = useState('');
+  const [compare, setCompareState] = useState([]);
+  useEffect(() => {
+    if (data?.status === 'ok') {
+      if (data.primary) setPrimaryState(data.primary);
+      setCompareState(Array.isArray(data.compare) ? data.compare : []);
+    }
+  }, [data?.status, data?.primary, data?.compare]);
+
+  const update = useApiMutation('/api/system/gemini-model', {
+    invalidate: ['gemini-model'],
+    successMsg: 'Gemini model updated',
+    errorMsg: 'Failed to update Gemini model',
+    onError: () => {
+      if (data?.status === 'ok') {
+        setPrimaryState(data.primary || '');
+        setCompareState(Array.isArray(data.compare) ? data.compare : []);
+      }
+    }
+  });
+
+  const options = (data?.status === 'ok' && Array.isArray(data.options)) ? data.options : [];
+  const busy = isLoading || update.isPending || !options.length;
+
+  function save(nextPrimary, nextCompare) {
+    // A model can't be both primary and a compare target.
+    const cleaned = nextCompare.filter((m) => m !== nextPrimary);
+    setPrimaryState(nextPrimary);                 // optimistic
+    setCompareState(cleaned);
+    update.mutate({ primary: nextPrimary, compare: cleaned });
+  }
+
+  function setPrimary(next) {
+    save(next, compare);
+  }
+
+  function toggleCompare(m) {
+    const next = compare.includes(m)
+      ? compare.filter((x) => x !== m)
+      : [...compare, m];
+    save(primary, next);
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: '1.25rem' }}>
+      <div className="card-header" style={{ gap: '.75rem' }}>
+        <span style={{ fontSize: '1.1rem' }}>🤖</span>
+        <strong>Gemini Model</strong>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+          Applies to summaries, chatbots & YouTube
+        </span>
+      </div>
+      <div className="card-body" style={{ padding: '1rem 1.25rem' }}>
+        <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-muted)' }}>
+          The <strong>primary</strong> model is what gets sent to Telegram and used
+          for all single-model calls. (Fast helper calls like chatbot search
+          expansion always use flash-lite.)
+        </p>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
+          <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 120 }}>Primary (sent):</span>
+          <select
+            className="select"
+            value={primary}
+            disabled={busy}
+            onChange={(e) => setPrimary(e.target.value)}
+            style={{ width: 240 }}
+          >
+            {!options.includes(primary) && primary && <option value={primary}>{primary}</option>}
+            {options.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 120, paddingTop: 4 }}>
+            Also compare:
+          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {options.filter((m) => m !== primary).map((m) => (
+              <label key={m} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={compare.includes(m)}
+                  disabled={busy}
+                  onChange={() => toggleCompare(m)}
+                />
+                {m}
+              </label>
+            ))}
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              {compare.length
+                ? `⚠ Each scheduled summary runs ${compare.length + 1} models — ~${compare.length + 1}× the tokens. Alternates are viewable in History → View, not sent.`
+                : 'None — single-model mode (no extra cost).'}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

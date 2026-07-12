@@ -121,7 +121,7 @@ function ChannelCard({ ch, onEdit }) {
   });
 
   const confirmDelete = useConfirmedMutation(remove, {
-    message: `Delete channel <strong>${escapeHtml(ch.channel_id)}</strong>?`,
+    message: `Delete channel <strong>${escapeHtml(ch.channel_name || ch.channel_id)}</strong>?`,
     title: 'Delete Channel',
     confirmLabel: 'Delete',
     confirmClass: 'btn-danger'
@@ -136,6 +136,7 @@ function ChannelCard({ ch, onEdit }) {
   if (ch.min_view_count > 0) filters.push(`≥${ch.min_view_count} views`);
   if (ch.language) filters.push(`Lang: ${ch.language}`);
   if (ch.upload_type) filters.push(`Type: ${ch.upload_type}`);
+  if (ch.output_length_percent) filters.push(`Len ${ch.output_length_percent}%`);
   if ((ch.title_must_include || []).length) filters.push(`+${ch.title_must_include.length} title terms`);
   if ((ch.title_must_exclude || []).length) filters.push(`-${ch.title_must_exclude.length} excluded`);
 
@@ -146,7 +147,6 @@ function ChannelCard({ ch, onEdit }) {
       <div className="yt-ch-header">
         <div>
           <div className="yt-ch-name">{ch.channel_name || ch.channel_id}</div>
-          <div className="yt-ch-id text-muted">{ch.channel_id}</div>
         </div>
         <span className={`yt-status-badge ${ch.active ? 'yt-status-active' : 'yt-status-inactive'}`}>
           {ch.active ? 'Active' : 'Inactive'}
@@ -332,7 +332,8 @@ function ChannelModal({ mode, channel, onClose }) {
     upload_type: channel?.upload_type || '',
     must_include: (channel?.title_must_include || []).join(', '),
     must_exclude: (channel?.title_must_exclude || []).join(', '),
-    prompt_key: channel?.prompt_key || ''
+    prompt_key: channel?.prompt_key || '',
+    output_length_percent: channel?.output_length_percent || ''
   }));
   const setF = (k, v) => setForm((s) => ({ ...s, [k]: v }));
 
@@ -361,7 +362,8 @@ function ChannelModal({ mode, channel, onClose }) {
       language: form.language || null,
       upload_type: form.upload_type || null,
       title_must_include: parseCommaSep(form.must_include),
-      title_must_exclude: parseCommaSep(form.must_exclude)
+      title_must_exclude: parseCommaSep(form.must_exclude),
+      output_length_percent: form.output_length_percent ? parseInt(form.output_length_percent, 10) : null
     };
     save.mutate(payload);
   }
@@ -372,13 +374,13 @@ function ChannelModal({ mode, channel, onClose }) {
         <div className="dialog-title">{isEdit ? 'Edit' : 'Add'} YouTube Channel</div>
         <div className="yt-kw-form">
           <div className="yt-kw-form-field">
-            <label className="input-label">Channel ID or URL *</label>
+            <label className="input-label">Channel: @handle, URL, or video link *</label>
             <input
               type="text"
               className="input"
               value={form.channel_id}
               onChange={(e) => setF('channel_id', e.target.value)}
-              placeholder="UCxxxx or youtube.com/channel/UCxxxx"
+              placeholder="@handle, youtube.com/@handle, /channel/UC…, or a video link"
               readOnly={isEdit}
               style={isEdit ? { opacity: 0.6 } : undefined}
             />
@@ -438,6 +440,20 @@ function ChannelModal({ mode, channel, onClose }) {
                 min="0"
               />
             </div>
+            <div className="yt-kw-form-field">
+              <label className="input-label" title="Target summary length as a % of the video's transcript length">
+                Summary length %
+              </label>
+              <input
+                type="number"
+                className="input"
+                value={form.output_length_percent}
+                onChange={(e) => setF('output_length_percent', e.target.value)}
+                placeholder="Default"
+                min="1"
+                max="100"
+              />
+            </div>
           </div>
           <div className="yt-kw-form-row">
             <div className="yt-kw-form-field">
@@ -460,9 +476,11 @@ function ChannelModal({ mode, channel, onClose }) {
                 onChange={(e) => setF('upload_type', e.target.value)}
               >
                 <option value="">Any</option>
-                <option value="video">Video</option>
-                <option value="live">Live</option>
-                <option value="completed">Completed</option>
+                <option value="video">Any video (incl. Shorts)</option>
+                <option value="regular">Regular (no Shorts)</option>
+                <option value="short">Shorts only</option>
+                <option value="live">Live now</option>
+                <option value="completed">Completed live</option>
               </select>
             </div>
           </div>

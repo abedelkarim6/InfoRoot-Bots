@@ -63,7 +63,7 @@ except Exception as _chatbot_import_err:
     chatbot = None
     _chatbot_available = False
 # Summaries feature routers (moved to summaries/routers/)
-from summaries.routers import bot, telegram, prompts, rules, collection, topic, monitor, recycle_bin
+from summaries.routers import bot, telegram, prompts, rules, collection, topic, monitor, recycle_bin, seo
 from summaries.routers import default_schedules as default_schedules_router
 from summaries.db import SummariesDB
 from utils.database import set_db_instance, get_db
@@ -75,6 +75,7 @@ from utils.helpers import (
 # YouTube monitor imports
 from youtube_monitor.db import YouTubeDB, set_yt_db
 from youtube_monitor.worker import init_worker
+from youtube_monitor.transcript_api import init_transcript_api
 from youtube_monitor.keyword_search import init_keyword_search
 from routers.youtube import router as youtube_router, websub_router
 from youtube_monitor.renew_websub import renew_all_subscriptions
@@ -92,15 +93,6 @@ if _admin_cfg.get("username"):
     try:
         _admin_id = db.create_admin_user(_admin_cfg["username"], hash_password(_admin_cfg["password"]))
         logger.info(f"[AUTH] Admin user '{_admin_cfg['username']}' seeded/verified in DB")
-        # Seed telegram session from config if DB row has none yet
-        _tg_cfg = _cfg.get("telegram", {})
-        _ss = _tg_cfg.get("string_session", "")
-        if _ss and _admin_id:
-            _admin_row = db.get_user_by_id(_admin_id)
-            if _admin_row and not _admin_row.get("telegram_session"):
-                _phone = _tg_cfg.get("phone", "") or ""
-                db.update_user_telegram(_admin_id, _phone, _ss)
-                logger.info(f"[AUTH] Admin telegram session seeded from config.yaml")
     except Exception as _e:
         logger.warning(f"[AUTH] Admin seed failed: {_e}")
 
@@ -112,14 +104,20 @@ set_yt_db(yt_db)
 # Initialize YouTube feature — keys from config.yaml youtube section
 _yt_cfg = _cfg.get("youtube", {})
 init_keyword_search(youtube_data_api_key=_yt_cfg.get("data_api_key", ""))
+# Daily YouTube Data API quota budget shown on the admin quota page
+# (Google default is 10,000 units/day).
+from youtube_monitor.db import set_quota_limit as _set_yt_quota_limit
+_set_yt_quota_limit(_yt_cfg.get("daily_quota_limit", 10000))
+
+
 async def _yt_resolve_send_target(client, target):
     """Resolve a stored Telegram target into an entity Telethon can send to.
 
     The manual-video picker and channel config store `entity.id` — a bare
-    numeric channel id. `_yt_telegram_send` uses a freshly-connected client
-    whose entity cache is empty, so a numeric id raises "Cannot find any
-    entity corresponding to ...". We warm the cache from the userbot's dialog
-    list and fall back to an explicit PeerChannel for bare positive ids.
+    numeric channel id. A freshly-connected client's entity cache is empty, so
+    a numeric id raises "Cannot find any entity corresponding to ...". We warm
+    the cache from the userbot's dialog list and fall back to an explicit
+    PeerChannel for bare positive ids.
     """
     raw = str(target).strip()
     if not raw:
@@ -148,14 +146,68 @@ async def _yt_resolve_send_target(client, target):
     raise RuntimeError(f"[YT-TG] Could not resolve Telegram target '{raw}'")
 
 
+async def _yt_send_chunks(client, target: str, text: str):
+    """Send `text` to `target` over an already-connected Telethon client, split
+    into ≤4096-char chunks so long summaries aren't silently dropped."""
+    from telethon.errors import (
+        EntitiesTooLongError, EntityBoundsInvalidError, EntityMentionUserInvalidError,
+    )
+    # Server-side rejections of malformed markdown entities. When Telegram returns
+    # any of these the message is NOT created, so resending as plain text is safe.
+    _MD_ENTITY_ERRORS = (
+        EntitiesTooLongError, EntityBoundsInvalidError, EntityMentionUserInvalidError,
+    )
+    # Resolve the target to a concrete entity first. A bare numeric channel id
+    # (what the dialogs picker stores) cannot be resolved by a cold client, so
+    # this warms the entity cache before sending.
+    entity = await _yt_resolve_send_target(client, target)
+    chunk_size = 4096
+    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        try:
+            msg = await client.send_message(entity, chunk, parse_mode='md')
+        except (_MD_ENTITY_ERRORS + (ValueError, TypeError)) as md_err:
+            # The markdown was rejected (bad entities) or failed to parse — in all
+            # these cases Telegram did NOT create the message, so it is safe to
+            # resend the same chunk as plain text.
+            #
+            # We deliberately do NOT catch broad Exception here: a transient
+            # network/RPC failure (read-timeout, connection drop) can fire AFTER
+            # Telegram already created the message. Blindly resending in that case
+            # delivers the chunk twice — the "exact same text sent twice" bug. Let
+            # those errors propagate so the caller treats the send as failed
+            # (telegram_sent stays false) instead of duplicating.
+            logger.warning(f"[YT-TG] Markdown rejected ({md_err}), resending chunk as plain text")
+            msg = await client.send_message(entity, chunk, parse_mode=None)
+        if msg is None or not getattr(msg, 'id', None):
+            raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")
+    logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")
+
+
 async def _yt_telegram_send(target: str, text: str):
-    """Send a Telegram message using a temporary Telethon client (userbot session)."""
+    """Send a YouTube summary to Telegram.
+
+    Prefer the long-running userbot client that the summaries bot already keeps
+    connected (summaries.bot.get_bot_client). Reusing that single connection
+    avoids opening a SECOND Telethon client on the same session string — Telethon
+    warns against running one session from two concurrent clients, and doing so
+    here was the root trigger of duplicate sends. Only when the bot client isn't
+    up (e.g. mid-restart) do we fall back to a temporary client; in that window
+    there is no concurrent connection, so a throwaway client on the same session
+    is safe.
+    """
+    from summaries.bot import get_bot_client
+    bot_client = get_bot_client()
+    if bot_client is not None and bot_client.is_connected():
+        await _yt_send_chunks(bot_client, target, text)
+        return
+
+    # ── Fallback: bot client not available — use a temporary client ──────────
     from telethon import TelegramClient
-    from telethon import errors as tg_errors
     from telethon.sessions import StringSession
     tg_cfg = _cfg.get("telegram", {})
-    # Prefer session stored in DB (set via Telegram setup page); fall back to config.yaml
-    session_str = tg_cfg.get("string_session", "")
+    # The admin's Telegram session is set via the Telegram setup page (UI login flow).
+    session_str = ""
     try:
         admin_row = db.get_admin_user()
         if admin_row and admin_row.get("telegram_session"):
@@ -163,7 +215,8 @@ async def _yt_telegram_send(target: str, text: str):
     except Exception:
         pass
     if not session_str:
-        raise RuntimeError("[YT-TG] No string_session in config or DB — cannot send")
+        raise RuntimeError("[YT-TG] No Telegram session for admin — link it via the Telegram setup page first")
+    logger.warning("[YT-TG] Bot client unavailable — sending via temporary client")
     client = TelegramClient(
         StringSession(session_str),
         int(tg_cfg["api_id"]),
@@ -171,36 +224,9 @@ async def _yt_telegram_send(target: str, text: str):
     )
     try:
         await client.connect()
-
         if not await client.is_user_authorized():
-            raise RuntimeError("[YT-TG] Session is not authorized — regenerate string_session")
-
-        # Resolve the target to a concrete entity. A bare numeric channel id
-        # (what the dialogs picker stores) cannot be resolved by a cold client.
-        entity = await _yt_resolve_send_target(client, target)
-
-        # Split into ≤4096-char chunks so long summaries don't get silently dropped
-        chunk_size = 4096
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        for i, chunk in enumerate(chunks):
-            try:
-                msg = await client.send_message(entity, chunk, parse_mode='md')
-            except (tg_errors.RPCError, ValueError) as md_err:
-                # The message was NOT delivered — either Telegram's server
-                # rejected the request (RPCError, e.g. bad markdown entities)
-                # or Telethon's markdown parser failed client-side
-                # (ValueError). Both are safe to retry as plain text.
-                #
-                # Any OTHER exception (connection reset / timeout) is NOT
-                # caught here: the message may already have been delivered,
-                # and re-sending it is what duplicated summaries in the
-                # channel. Let it propagate so the worker logs a send failure
-                # instead of double-posting.
-                logger.warning(f"[YT-TG] Markdown send rejected ({md_err}), retrying as plain text")
-                msg = await client.send_message(entity, chunk, parse_mode=None)
-            if msg is None or not getattr(msg, 'id', None):
-                raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")
-        logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")
+            raise RuntimeError("[YT-TG] Session is not authorized — re-link the admin Telegram account")
+        await _yt_send_chunks(client, target, text)
     finally:
         await client.disconnect()
 
@@ -212,9 +238,32 @@ init_worker(
     telegram_send_fn=_yt_telegram_send,
 )
 
+# External transcript API (headless-browser scraper) — primary transcript +
+# metadata source. Disabled (worker falls back to Data API + library) until a
+# token is set in config.yaml youtube.transcript_api.token.
+_yt_transcript_cfg = _yt_cfg.get("transcript_api", {}) or {}
+init_transcript_api(
+    base_url=_yt_transcript_cfg.get("base_url", ""),
+    lan_url=_yt_transcript_cfg.get("lan_url", ""),
+    token=_yt_transcript_cfg.get("token", ""),
+    use_lan=_yt_transcript_cfg.get("use_lan", False),
+)
+
+# Probe which Gemini models this Vertex project can actually call (background
+# thread) so the admin model picker only offers accessible ones — preview models
+# the project isn't granted are hidden instead of 404-ing every summarization.
+from utils.gemini_models import init_available_models
+init_available_models(
+    project=_yt_cfg.get("gemini_project", "") or _gemini_cfg.get("project", ""),
+    location=_yt_cfg.get("gemini_location", "") or _gemini_cfg.get("location", "global"),
+)
+
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    _OPEN = {"/login", "/api/auth/login", "/favicon.ico"}
+    # Public endpoints — no auth required. Native /api/auth/login is gone now
+    # (Keycloak handles login), but the diagnostic endpoint stays open so the
+    # SPA / curl can sanity-check the realm without a token.
+    _OPEN = {"/favicon.ico", "/api/_debug/keycloak"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -223,12 +272,12 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if path.startswith("/youtube/websub/"):
             return await call_next(request)
 
-        # Page requests and static files pass through freely.
-        # auth.js in the browser handles the /login redirect client-side.
+        # Page requests and static files pass through freely. SPA-side
+        # ProtectedRoute triggers the Keycloak redirect for unauth'd users.
         if not path.startswith("/api/") or path in self._OPEN:
             return await call_next(request)
 
-        # Only API routes are protected server-side.
+        # Only /api/* is protected server-side, and only via Keycloak JWTs.
         auth_header = request.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
@@ -256,9 +305,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         try:
             path = request.url.path
             method = request.method
-            if method in _AUDIT_MUTATING and path.startswith("/api/") and path not in (
-                "/api/auth/login",  # already handled below
-            ):
+            if method in _AUDIT_MUTATING and path.startswith("/api/"):
                 from routers.auth import (
                     _get_bearer, validate_token, get_token_user_id,
                 )
@@ -267,9 +314,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                 username = "anonymous"
                 if token and validate_token(token):
                     user_id = get_token_user_id(token)
-                    if user_id is None:
-                        username = "admin(legacy)"
-                    else:
+                    if user_id is not None:
                         try:
                             u = get_db().get_user_by_id(user_id)
                             username = (u or {}).get("username", f"uid:{user_id}")
@@ -281,11 +326,6 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     f"[AUDIT] user={username} uid={user_id} ip={ip} "
                     f"{method} {path} -> {response.status_code}"
                 )
-            elif path == "/api/auth/login" and method == "POST":
-                fwd = request.headers.get("X-Forwarded-For", "")
-                ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
-                outcome = "ok" if response.status_code == 200 else f"fail({response.status_code})"
-                _audit_logger.info(f"[AUDIT] login ip={ip} -> {outcome}")
         except Exception as exc:
             _audit_logger.warning(f"[AUDIT] middleware error: {exc}")
         return response
@@ -299,7 +339,7 @@ async def lifespan(app):
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
     from youtube_monitor.worker import process_pending_queue
-    from youtube_monitor.keyword_search import run_due_keyword_searches
+    from youtube_monitor.keyword_search import run_due_keyword_words
 
     start_bot_task(app.state)
 
@@ -310,8 +350,10 @@ async def lifespan(app):
     yt_scheduler.add_job(process_pending_queue, IntervalTrigger(minutes=5),
                          id='yt_process_queue', replace_existing=True)
 
-    # Check for due keyword searches every 5 minutes (per-keyword scheduling)
-    yt_scheduler.add_job(run_due_keyword_searches, IntervalTrigger(minutes=5),
+    # Run one due keyword word per minute — each word (main keyword + every
+    # sub-keyword) is searched ~hourly, spread across the hour so search.list
+    # calls never burst together (protects the YouTube API quota).
+    yt_scheduler.add_job(run_due_keyword_words, IntervalTrigger(minutes=1),
                          id='yt_keyword_search', replace_existing=True)
 
     # Renew WebSub subscriptions every 4 days. YouTube's hub grants ~5-day
@@ -343,6 +385,30 @@ async def lifespan(app):
             logger.info(f"[RECYCLE] Purged {count} items older than 5 days")
     yt_scheduler.add_job(_purge_recycle_bin, IntervalTrigger(hours=12),
                          id='recycle_bin_purge', replace_existing=True)
+
+    # SEO library mirror — pull the external platform's categories/groups/keywords
+    # into our local mirror so the categorizer matches on fresh keywords even when
+    # groups are edited directly on the platform (our own edits re-sync inline).
+    def _sync_seo_library_job():
+        try:
+            from summaries import seo_external
+            from utils.helpers import invalidate_categorizer_cache
+            cats = seo_external.list_categories()
+            groups = seo_external.list_groups()
+            db.sync_seo_library(cats, groups)
+            replace_groups = seo_external.list_replace_groups()
+            db.sync_replace_library(replace_groups)
+            invalidate_categorizer_cache()
+            logger.info(
+                f"[SEO] mirror synced: {len(cats)} categories, {len(groups)} groups, "
+                f"{len(replace_groups)} replace groups"
+            )
+        except Exception as e:
+            logger.warning(f"[SEO] periodic mirror sync failed: {e}")
+    yt_scheduler.add_job(_sync_seo_library_job, IntervalTrigger(minutes=5),
+                         id='seo_mirror_sync', replace_existing=True)
+    # Warm the mirror once at startup (off-thread; non-blocking).
+    asyncio.get_event_loop().run_in_executor(None, _sync_seo_library_job)
 
     # Chatbot suggestion refresh — runs once at startup, then every hour.
     # Skipped when the chatbot import failed at module load (agno / google-genai
@@ -442,6 +508,7 @@ app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(collection.router, prefix="/api", tags=["collection"])
 app.include_router(bot.router, prefix="/api", tags=["bot"])
 app.include_router(topic.router, prefix="/api", tags=["topic"])
+app.include_router(seo.router, prefix="/api", tags=["seo"])
 app.include_router(telegram.router, prefix="/api", tags=["telegram"])
 app.include_router(prompts.router, prefix="/api", tags=["prompts"])
 app.include_router(default_schedules_router.router, prefix="/api", tags=["default_schedules"])
@@ -463,8 +530,12 @@ app.include_router(websub_router)
 @app.get("/api/warnings")
 def get_warnings(request: Request):
     """Return all system dependency warnings (orphaned prompts, orphaned collections)."""
-    db = get_db()
-    return {"warnings": db.get_all_dependency_warnings()}
+    try:
+        db = get_db()
+        return {"warnings": db.get_all_dependency_warnings()}
+    except Exception as e:
+        logger.exception("[APP] get_warnings failed")
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/logs")
@@ -475,44 +546,56 @@ def api_get_logs(
     limit: int = 500,
 ):
     """Return buffered log records. Admin only."""
-    if not is_admin_request(request):
-        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
-    records = get_log_records(
-        level=level or None,
-        search=search or None,
-        limit=min(limit, 1000),
-    )
-    # Newest first for the UI
-    return {"status": "ok", "logs": list(reversed(records))}
+    try:
+        if not is_admin_request(request):
+            return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+        records = get_log_records(
+            level=level or None,
+            search=search or None,
+            limit=min(limit, 1000),
+        )
+        # Newest first for the UI
+        return {"status": "ok", "logs": list(reversed(records))}
+    except Exception as e:
+        logger.exception("[APP] api_get_logs failed")
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/api/logs/clear")
 def api_clear_logs(request: Request):
     """Clear the in-memory log buffer. Admin only."""
-    if not is_admin_request(request):
-        return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
-    clear_log_records()
-    return {"status": "ok"}
+    try:
+        if not is_admin_request(request):
+            return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+        clear_log_records()
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[APP] api_clear_logs failed")
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/config")
 def get_config(request: Request):
-    db = get_db()
-    if is_admin_request(request):
-        return db.get_full_config()
-    # Regular user: return only their inherited bots
-    user_id = get_request_user_id(request)
-    if not user_id:
-        return {'system': {'enabled': db.get_system_enabled()}, 'bots': {}, 'collections': {}}
-    user_row = db.get_user_by_id(user_id)
-    seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
-    bots = db.get_filtered_bots_config(user_id)
-    return {
-        'system': {'enabled': db.get_system_enabled()},
-        'bots': bots,
-        'collections': db.get_user_collections(user_id),
-        'seo_visible': seo_visible,
-    }
+    try:
+        db = get_db()
+        if is_admin_request(request):
+            return db.get_full_config()
+        # Regular user: return only their inherited bots
+        user_id = get_request_user_id(request)
+        if not user_id:
+            return {'system': {'enabled': db.get_system_enabled()}, 'bots': {}, 'collections': {}}
+        user_row = db.get_user_by_id(user_id)
+        seo_visible = bool(user_row.get('seo_visible', True)) if user_row else True
+        bots = db.get_filtered_bots_config(user_id)
+        return {
+            'system': {'enabled': db.get_system_enabled()},
+            'bots': bots,
+            'collections': db.get_user_collections(user_id),
+            'seo_visible': seo_visible,
+        }
+    except Exception as e:
+        logger.exception("[APP] get_config failed")
+        return {"status": "error", "message": str(e)}
 
 
 # ---------------------------------------------------------------------------

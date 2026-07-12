@@ -1,9 +1,12 @@
+import logging
 from fastapi import APIRouter, Query
 from fastapi import Body
 from starlette.requests import Request
 from utils.database import get_db
 from utils.helpers import compute_window_start
 from routers.auth import is_admin_request, get_request_user_id
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -96,6 +99,7 @@ def get_monitor_data(request: Request):
             'recent_summaries': recent_summaries
         }
     except Exception as e:
+        logger.exception("[MONITOR] get_monitor_data failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -125,64 +129,115 @@ def get_summary_messages(request: Request, id: int = Query(...)):
         messages = db.get_messages_by_ids(ids)
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
+        logger.exception("[MONITOR] get_summary_messages failed")
         return {'status': 'error', 'message': str(e)}
     finally:
         db._commit()
+
+
+def _load_summary_composition(db, summary_id: int, allowed_bots):
+    """Build the interim/remaining breakdown plus the final summary text for one
+    summary. Shared by the single and batch composition endpoints.
+
+    Raises PermissionError when the summary's bot is outside the caller's
+    allowed set. Returns a dict with `interims`, `remaining_messages` and
+    `summary_text` (the final generated output).
+    """
+    cursor = db._get_cursor()
+    cursor.execute(
+        "SELECT message_ids, bot_name, topic_name, schedule_id, summary_text "
+        "FROM summaries WHERE id = %s",
+        (summary_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return {'interims': [], 'remaining_messages': [], 'summary_text': ''}
+    if allowed_bots is not None and row['bot_name'] not in allowed_bots:
+        raise PermissionError('Access denied')
+
+    summary_text = row.get('summary_text') or ''
+    if not row['message_ids']:
+        return {'interims': [], 'remaining_messages': [], 'summary_text': summary_text}
+
+    ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
+    interim_id_map = db.get_interim_ids_for_messages(
+        ids, bot_name=row['bot_name'], topic_name=row['topic_name'],
+        schedule_id=row['schedule_id'])
+
+    seen: set = set()
+    ordered_interim_ids: list = []
+    for mid in ids:
+        if mid in interim_id_map:
+            iid = interim_id_map[mid]
+            if iid not in seen:
+                seen.add(iid)
+                ordered_interim_ids.append(iid)
+
+    interims = db.get_interims_by_ids(ordered_interim_ids)
+    for interim in interims:
+        interim['messages'] = db.get_interim_messages(interim['id'])
+
+    remaining_ids = [mid for mid in ids if mid not in interim_id_map]
+    remaining_messages = db.get_messages_by_ids(remaining_ids) if remaining_ids else []
+
+    return {
+        'interims': interims,
+        'remaining_messages': remaining_messages,
+        'summary_text': summary_text,
+    }
 
 
 @router.get("/monitor/summary-composition")
 def get_summary_composition(request: Request, id: int = Query(...)):
-    """Return the interims and remaining messages that make up a summary."""
+    """Return the interims, remaining messages and final summary text that make
+    up a summary."""
     db = get_db()
     try:
-        cursor = db._get_cursor()
         allowed_bots = _get_allowed_bots(request)
-        cursor.execute("SELECT message_ids, bot_name, topic_name, schedule_id FROM summaries WHERE id = %s", (id,))
-        row = cursor.fetchone()
-        if not row:
-            return {'status': 'ok', 'interims': [], 'remaining_messages': []}
-        if allowed_bots is not None and row['bot_name'] not in allowed_bots:
-            return {'status': 'error', 'message': 'Access denied'}, 403
-        if not row['message_ids']:
-            return {'status': 'ok', 'interims': [], 'remaining_messages': []}
-        ids = [int(x) for x in row['message_ids'].split(',') if x.strip()]
-        summary_bot      = row['bot_name']
-        summary_topic    = row['topic_name']
-        summary_sched_id = row['schedule_id']
+        comp = _load_summary_composition(db, id, allowed_bots)
+        return {'status': 'ok', **comp}
+    except PermissionError:
+        return {'status': 'error', 'message': 'Access denied'}, 403
     except Exception as e:
+        logger.exception("[MONITOR] get_summary_composition failed")
         return {'status': 'error', 'message': str(e)}
     finally:
         db._commit()
 
+
+@router.get("/monitor/summary-composition-batch")
+def get_summary_composition_batch(request: Request, ids: str = Query(...)):
+    """Return the composition (interims + remaining + final summary) for many
+    summaries at once, keyed by summary id. Powers the History tab's
+    "export with interims" so it doesn't have to call the single endpoint per
+    run. Summaries outside the caller's allowed bots are silently omitted."""
+    db = get_db()
     try:
-        interim_id_map = db.get_interim_ids_for_messages(ids,
-                                                          bot_name=summary_bot,
-                                                          topic_name=summary_topic,
-                                                          schedule_id=summary_sched_id)
+        allowed_bots = _get_allowed_bots(request)
+        id_list: list = []
+        for x in ids.split(','):
+            x = x.strip()
+            if not x:
+                continue
+            try:
+                id_list.append(int(x))
+            except ValueError:
+                continue
+        # Cap to keep a single export request bounded.
+        id_list = id_list[:300]
 
-        seen: set = set()
-        ordered_interim_ids: list = []
-        for mid in ids:
-            if mid in interim_id_map:
-                iid = interim_id_map[mid]
-                if iid not in seen:
-                    seen.add(iid)
-                    ordered_interim_ids.append(iid)
-
-        interims = db.get_interims_by_ids(ordered_interim_ids)
-        for interim in interims:
-            interim['messages'] = db.get_interim_messages(interim['id'])
-
-        remaining_ids = [mid for mid in ids if mid not in interim_id_map]
-        remaining_messages = db.get_messages_by_ids(remaining_ids) if remaining_ids else []
-
-        return {
-            'status': 'ok',
-            'interims': interims,
-            'remaining_messages': remaining_messages,
-        }
+        compositions: dict = {}
+        for sid in id_list:
+            try:
+                compositions[str(sid)] = _load_summary_composition(db, sid, allowed_bots)
+            except PermissionError:
+                continue
+        return {'status': 'ok', 'compositions': compositions}
     except Exception as e:
+        logger.exception("[MONITOR] get_summary_composition_batch failed")
         return {'status': 'error', 'message': str(e)}
+    finally:
+        db._commit()
 
 
 @router.get("/monitor/messages")
@@ -191,12 +246,22 @@ def get_monitor_messages(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     search: str = Query(default=None),
+    bots: str = Query(default=None),       # comma-separated bot names
+    channels: str = Query(default=None),   # comma-separated channel usernames (with or without @)
+    topics: str = Query(default=None),     # comma-separated topic names
+    date_from: str = Query(default=None),  # YYYY-MM-DD inclusive
+    date_to: str = Query(default=None),    # YYYY-MM-DD inclusive
 ):
     db = get_db()
     try:
         allowed_bots = _get_allowed_bots(request)
+        bots_list = [b.strip() for b in bots.split(',') if b.strip()] if bots else None
+        channels_list = [c.strip().lstrip('@') for c in channels.split(',') if c.strip()] if channels else None
+        topics_list = [t.strip() for t in topics.split(',') if t.strip()] if topics else None
         messages = db.get_recent_messages(
-            limit=limit, offset=offset, allowed_bot_names=allowed_bots, search=search)
+            limit=limit, offset=offset, allowed_bot_names=allowed_bots, search=search,
+            bots=bots_list, channels=channels_list, topics=topics_list,
+            date_from=date_from or None, date_to=date_to or None)
 
         id_to_username = {}
         for msg in messages:
@@ -222,6 +287,22 @@ def get_monitor_messages(
 
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
+        logger.exception("[MONITOR] get_monitor_messages failed")
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.get("/monitor/messages/facets")
+def get_monitor_messages_facets(request: Request):
+    """Distinct bot / channel / topic values for the Messages-tab filter dropdowns.
+    Computed independently of the active filter so the dropdowns list the full
+    universe of options rather than only what's on the currently loaded page."""
+    db = get_db()
+    try:
+        allowed_bots = _get_allowed_bots(request)
+        facets = db.get_message_filter_facets(allowed_bot_names=allowed_bots)
+        return {'status': 'ok', **facets}
+    except Exception as e:
+        logger.exception("[MONITOR] get_monitor_messages_facets failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -244,6 +325,7 @@ def get_unclassified_messages(
         stats = db.get_unclassified_stats(allowed_bot_names=allowed_bots, since=since)
         return {'status': 'ok', 'messages': messages, 'stats': stats}
     except Exception as e:
+        logger.exception("[MONITOR] get_unclassified_messages failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -266,6 +348,7 @@ def get_missed_messages(
         stats = db.get_missed_stats(allowed_bot_names=allowed_bots, since=since)
         return {'status': 'ok', 'messages': messages, 'stats': stats}
     except Exception as e:
+        logger.exception("[MONITOR] get_missed_messages failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -277,6 +360,7 @@ def get_schedule_stats(request: Request):
         stats = db.get_today_schedule_stats(allowed_bot_names=allowed_bots)
         return {'status': 'ok', 'stats': stats}
     except Exception as e:
+        logger.exception("[MONITOR] get_schedule_stats failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -324,6 +408,7 @@ def get_pending_messages(
             })
         return {'status': 'ok', 'messages': result}
     except Exception as e:
+        logger.exception("[MONITOR] get_pending_messages failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -346,6 +431,7 @@ def get_prompt_preview(
             'fixed_prefix': get_fixed_prefix(),
         }
     except Exception as e:
+        logger.exception("[MONITOR] get_prompt_preview failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -356,16 +442,18 @@ def get_schedule_history(
     topic: str = Query(default=None),
     status: str = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ):
     db = get_db()
     try:
         allowed_bots = _get_allowed_bots(request)
         runs = db.get_schedule_history(
             limit=limit, bot_name=bot, topic_name=topic,
-            status=status, allowed_bot_names=allowed_bots
+            status=status, allowed_bot_names=allowed_bots, offset=offset
         )
         return {'status': 'ok', 'runs': runs}
     except Exception as e:
+        logger.exception("[MONITOR] get_schedule_history failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -389,6 +477,7 @@ def get_interims(
             rows = [r for r in rows if r['status'] == 'done']
         return {'status': 'ok', 'interims': rows}
     except Exception as e:
+        logger.exception("[MONITOR] get_interims failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -402,6 +491,7 @@ def get_interim_messages(request: Request, id: int = Query(...)):
         messages = db.get_interim_messages(id)
         return {'status': 'ok', 'messages': messages}
     except Exception as e:
+        logger.exception("[MONITOR] get_interim_messages failed")
         return {'status': 'error', 'message': str(e)}
 
 
@@ -435,4 +525,5 @@ def get_dashboard_stats(
         )
         return {'status': 'ok', **data}
     except Exception as e:
+        logger.exception("[MONITOR] get_dashboard_stats failed")
         return {'status': 'error', 'message': str(e)}

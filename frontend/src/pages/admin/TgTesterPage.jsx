@@ -44,7 +44,8 @@ const VALID_TGT_TABS = new Set(['telegram', 'summaries', 'manual']);
 export default function TgTesterPage() {
   const [tabParam, setTabParam] = useUrlString('tab', 'telegram');
   const tab = VALID_TGT_TABS.has(tabParam) ? tabParam : 'telegram';
-  const setTab = setTabParam;
+  // Push so the browser Back button returns to the previous tab.
+  const setTab = (t) => setTabParam(t, { push: true });
 
   // Single source of truth for the bot config + recent summaries.
   const monitorQuery = useQuery({

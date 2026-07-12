@@ -341,19 +341,30 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
-    def get_latest_interim(self, bot_name: str, topic_name: str, schedule_id: int = None):
+    def get_latest_interim(self, bot_name: str, topic_name: str, schedule_id: int = None,
+                           after_dt=None):
         """Return the most recent UNSENT interim for (bot, topic), or None.
 
         `sent_at IS NULL` makes the rolling {final_interim} chain reset after a schedule
         fire (which marks its interims sent) — so a new window never inherits the
         previous window's summary. When schedule_id is given, the lookup is scoped to
-        that schedule's own interim chain."""
+        that schedule's own interim chain.
+
+        `after_dt` additionally bounds the chain to the current schedule window
+        (created_at >= after_dt). This is the safety net for the case where a final
+        fire is SKIPPED (below min_messages, outside active window, empty AI, or an
+        error) and therefore never marks its interims sent: without the bound those
+        stale interims would roll forward via {final_interim} indefinitely, leaking
+        very old content into new summaries. With it, they age out after ~1 cycle."""
         try:
             cursor = self._get_cursor()
             extra, params = "", [bot_name, topic_name]
             if schedule_id is not None:
-                extra = " AND schedule_id = %s"
+                extra += " AND schedule_id = %s"
                 params.append(schedule_id)
+            if after_dt is not None:
+                extra += " AND created_at >= %s"
+                params.append(after_dt)
             cursor.execute(
                 f"""SELECT * FROM topic_interim_summaries
                    WHERE bot_name = %s AND topic_name = %s
@@ -471,7 +482,11 @@ class SummariesDB(Database):
             self._commit()
 
     def get_interim_messages(self, interim_id: int) -> list:
-        """Return the messages linked to a specific interim (requires interim_id migration)."""
+        """Return the messages linked to a specific interim (requires interim_id migration).
+
+        Returns both `preview` (truncated 300 chars, for UI tables) and `text`
+        (full message body, for export).
+        """
         try:
             cursor = self._get_cursor()
             cursor.execute(
@@ -487,7 +502,8 @@ class SummariesDB(Database):
             result = []
             for row in cursor.fetchall():
                 d = dict(row)
-                txt = d.pop('text', '') or ''
+                txt = d.get('text', '') or ''
+                d['text'] = txt
                 d['preview'] = txt[:300]
                 if d['timestamp']:
                     d['timestamp'] = d['timestamp'].isoformat()
@@ -521,17 +537,24 @@ class SummariesDB(Database):
                      summary_type: str, target_entity: str,
                      bot_name: str = None, topic_name: str = None,
                      message_ids: list = None, tokens_used: int = 0,
-                     thoughts: str = None, schedule_id: int = None) -> int:
+                     thoughts: str = None, schedule_id: int = None,
+                     model_outputs: dict = None, primary_model: str = None) -> int:
         try:
-            """Save a generated summary and return its id."""
+            """Save a generated summary and return its id.
+
+            `model_outputs` (optional) is a {model_name: summary_text} map of all
+            models that ran for an A/B test; `primary_model` is the one sent to
+            Telegram (== the model that produced `summary_text`)."""
+            import json
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
+            outputs_json = json.dumps(model_outputs) if model_outputs else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id, model_outputs, primary_model)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id, outputs_json, primary_model)
             )
             row = cursor.fetchone()
             return row['id']
@@ -638,6 +661,74 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    def get_ai_usage_history(self, date_from: str, date_to: str,
+                             granularity: str = 'day', owner_filter='all') -> dict:
+        """Historical summaries-feature AI usage between two dates (inclusive).
+
+        Admin-page analytics — attributes each summary to a user via the owning
+        bot's owner_id (NULL owner or deleted bot → Admin). owner_filter is
+        'all' (no filter), 'admin' (admin-owned bots only) or an int user id.
+        Returns {'series': [{bucket, runs, tokens, messages}], 'by_user': [...],
+        'by_bot': [...]} where bucket is truncated to `granularity` (day|month).
+        """
+        gran = granularity if granularity in ('day', 'month') else 'day'
+        owner_sql, owner_params = '', []
+        if owner_filter == 'admin':
+            owner_sql = 'AND b.owner_id IS NULL'
+        elif isinstance(owner_filter, int):
+            owner_sql = 'AND b.owner_id = %s'
+            owner_params = [owner_filter]
+        base_where = "s.timestamp::date BETWEEN %s AND %s"
+        params = [date_from, date_to] + owner_params
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(f"""
+                SELECT DATE_TRUNC(%s, s.timestamp)::date  AS bucket,
+                       COUNT(*)                           AS runs,
+                       SUM(COALESCE(s.tokens_used, 0))    AS tokens,
+                       SUM(COALESCE(s.message_count, 0))  AS messages
+                FROM summaries s
+                LEFT JOIN bots b ON b.name = s.bot_name
+                WHERE {base_where} {owner_sql}
+                GROUP BY 1 ORDER BY 1
+            """, [gran] + params)
+            series = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d['bucket'] = d['bucket'].isoformat() if d['bucket'] else None
+                series.append(d)
+
+            cursor.execute(f"""
+                SELECT b.owner_id                        AS user_id,
+                       COALESCE(u.username, 'Admin')     AS username,
+                       COUNT(*)                          AS runs,
+                       SUM(COALESCE(s.tokens_used, 0))   AS tokens
+                FROM summaries s
+                LEFT JOIN bots b ON b.name = s.bot_name
+                LEFT JOIN users u ON u.id = b.owner_id
+                WHERE {base_where} {owner_sql}
+                GROUP BY 1, 2
+                ORDER BY tokens DESC NULLS LAST
+            """, params)
+            by_user = [dict(r) for r in cursor.fetchall()]
+
+            cursor.execute(f"""
+                SELECT COALESCE(s.bot_name, '—')        AS bot_name,
+                       COUNT(*)                          AS runs,
+                       SUM(COALESCE(s.tokens_used, 0))   AS tokens
+                FROM summaries s
+                LEFT JOIN bots b ON b.name = s.bot_name
+                WHERE {base_where} {owner_sql}
+                GROUP BY 1
+                ORDER BY tokens DESC NULLS LAST
+                LIMIT 15
+            """, params)
+            by_bot = [dict(r) for r in cursor.fetchall()]
+
+            return {'series': series, 'by_user': by_user, 'by_bot': by_bot}
+        finally:
+            self._commit()
+
     def log_schedule_run(self, bot_name: str, topic_name: str, schedule_type: str,
                          status: str, message_count: int = 0, error_text: str = None,
                          rpm_at_failure: int = None, tpm_at_failure: int = None,
@@ -680,7 +771,7 @@ class SummariesDB(Database):
 
     def get_schedule_history(self, limit: int = 200, bot_name: str = None,
                              topic_name: str = None, status: str = None,
-                             allowed_bot_names: list = None):
+                             allowed_bot_names: list = None, offset: int = 0):
         """Schedule run history with the matched summary (closest ±300 s) and
         every target entity that fired in that window.
 
@@ -708,6 +799,7 @@ class SummariesDB(Database):
                 params.append(status)
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             params.append(limit)
+            params.append(offset)
             cursor.execute(
                 f"""
                 WITH r AS (
@@ -717,12 +809,14 @@ class SummariesDB(Database):
                     FROM schedule_runs
                     {where}
                     ORDER BY fired_at DESC
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                 ),
                 matched AS (
                     SELECT r.id AS run_id,
-                           (array_agg(s.id           ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_id,
-                           (array_agg(s.summary_text ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_text,
+                           (array_agg(s.id            ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_id,
+                           (array_agg(s.summary_text  ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS summary_text,
+                           (array_agg(s.model_outputs ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS model_outputs,
+                           (array_agg(s.primary_model ORDER BY ABS(EXTRACT(EPOCH FROM (s.timestamp - r.fired_at)))))[1] AS primary_model,
                            string_agg(DISTINCT s.target_entity, ', ') AS target_entities
                     FROM r
                     JOIN summaries s
@@ -735,7 +829,7 @@ class SummariesDB(Database):
                 SELECT r.id, r.bot_name, r.topic_name, r.schedule_type, r.status,
                        r.message_count, r.error_text, r.fired_at,
                        r.rpm_at_failure, r.tpm_at_failure, r.rpd_at_failure,
-                       m.summary_id, m.summary_text, m.target_entities
+                       m.summary_id, m.summary_text, m.model_outputs, m.primary_model, m.target_entities
                 FROM r
                 LEFT JOIN matched m ON m.run_id = r.id
                 ORDER BY r.fired_at DESC
@@ -755,7 +849,12 @@ class SummariesDB(Database):
 
     def get_messages_by_ids(self, message_ids: list):
         try:
-            """Return messages matching the given IDs."""
+            """Return messages matching the given IDs.
+
+            Includes both `preview` (truncated 300 chars) and `text` (full body)
+            so callers can show a short cell in tables and still export the full
+            message body when needed.
+            """
             if not message_ids:
                 return []
             cursor = self._get_cursor()
@@ -770,7 +869,8 @@ class SummariesDB(Database):
             result = []
             for row in cursor.fetchall():
                 d = dict(row)
-                txt = d.pop('text', '') or ''
+                txt = d.get('text', '') or ''
+                d['text'] = txt
                 d['preview'] = txt[:300]
                 if d['timestamp']:
                     d['timestamp'] = d['timestamp'].isoformat()
@@ -791,9 +891,18 @@ class SummariesDB(Database):
 
     def get_recent_messages(self, limit: int = 200, offset: int = 0, allowed_bot_names: list = None,
                             topic: str = None, bot_name: str = None, days: int = None,
-                            source: str = None, search: str = None):
+                            source: str = None, search: str = None,
+                            bots: list = None, channels: list = None, topics: list = None,
+                            date_from: str = None, date_to: str = None):
         try:
-            """Returns the most recent messages with optional filters for topic, bot, days, source, search."""
+            """Returns the most recent messages with optional filters.
+
+            Single-value params (topic/bot_name/source) use ILIKE and are kept for
+            back-compat. The Monitor Messages tab passes the multi-value list params
+            (bots/channels/topics) plus date_from/date_to so all of its filters run
+            server-side — that way pagination covers the whole filtered dataset, not
+            just the pages already loaded in the browser.
+            """
             cursor = self._get_cursor()
             clauses = ["collection_name IS NOT NULL AND collection_name != ''"]
             params = []
@@ -813,6 +922,23 @@ class SummariesDB(Database):
             if search:
                 clauses.append("text ILIKE %s")
                 params.append(f"%{search}%")
+            if bots:
+                clauses.append("bot_name = ANY(%s)")
+                params.append(bots)
+            if channels:
+                clauses.append("channel_username = ANY(%s)")
+                params.append(channels)
+            if topics:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic) "
+                    "WHERE TRIM(t.topic) = ANY(%s))")
+                params.append(topics)
+            if date_from:
+                clauses.append("timestamp::date >= %s::date")
+                params.append(date_from)
+            if date_to:
+                clauses.append("timestamp::date <= %s::date")
+                params.append(date_to)
             if days:
                 clauses.append("timestamp >= NOW() - (%s * INTERVAL '1 day')")
                 params.append(days)
@@ -831,12 +957,85 @@ class SummariesDB(Database):
             result = []
             for row in cursor.fetchall():
                 d = dict(row)
-                txt = d.pop('text', '') or ''
+                txt = d.get('text', '') or ''
+                d['text'] = txt
                 d['preview'] = txt[:220]
                 if d['timestamp']:
                     d['timestamp'] = d['timestamp'].isoformat()
+                d['interim_text'] = ''
                 result.append(d)
+
+            # Attach the rolling interim output each message was batched into so
+            # the Messages-tab CSV export can include it. A message can belong to
+            # one interim per schedule chain; join multiple, each prefixed with
+            # its schedule name.
+            msg_ids = [d['id'] for d in result]
+            if msg_ids:
+                cursor.execute(
+                    """SELECT ms.message_id, tis.schedule_name, tis.summary_text
+                       FROM message_summarizations ms
+                       JOIN topic_interim_summaries tis ON tis.id = ms.interim_id
+                       WHERE ms.interim_id IS NOT NULL
+                         AND ms.message_id = ANY(%s)
+                       ORDER BY ms.message_id, tis.id""",
+                    (msg_ids,),
+                )
+                by_msg = {}
+                for r in cursor.fetchall():
+                    itxt = (r['summary_text'] or '').strip()
+                    if not itxt:
+                        continue
+                    label = r['schedule_name'] or 'interim'
+                    by_msg.setdefault(r['message_id'], []).append(f"[{label}] {itxt}")
+                for d in result:
+                    parts = by_msg.get(d['id'])
+                    if parts:
+                        d['interim_text'] = "\n\n---\n\n".join(parts)
             return result
+        finally:
+            self._commit()
+
+    def get_message_filter_facets(self, allowed_bot_names: list = None):
+        """Distinct bot / channel / topic values for the Monitor Messages-tab filter
+        dropdowns. Computed independently of the active filter so the dropdowns list
+        the full universe of options — otherwise server-side filtering would collapse
+        them to whatever is on the currently loaded page."""
+        try:
+            cursor = self._get_cursor()
+            base = "collection_name IS NOT NULL AND collection_name != ''"
+            bot_clause = ""
+            bot_param = ()
+            if allowed_bot_names is not None:
+                bot_clause = " AND bot_name = ANY(%s)"
+                bot_param = (allowed_bot_names,)
+
+            # Only list bots that still exist (the messages table keeps rows from
+            # since-deleted bots, whose names should not appear in the filter).
+            cursor.execute(
+                f"""SELECT DISTINCT bot_name FROM messages
+                    WHERE {base} AND bot_name IS NOT NULL AND bot_name != ''{bot_clause}
+                      AND bot_name IN (SELECT name FROM bots)
+                    ORDER BY bot_name LIMIT 500""",
+                bot_param or None)
+            bots = [r['bot_name'] for r in cursor.fetchall()]
+
+            cursor.execute(
+                f"""SELECT DISTINCT channel_username FROM messages
+                    WHERE {base} AND channel_username IS NOT NULL AND channel_username != ''{bot_clause}
+                    ORDER BY channel_username LIMIT 1000""",
+                bot_param or None)
+            channels = [r['channel_username'] for r in cursor.fetchall()]
+
+            cursor.execute(
+                f"""SELECT DISTINCT TRIM(t.topic) AS topic
+                    FROM messages, LATERAL UNNEST(STRING_TO_ARRAY(topics, ',')) AS t(topic)
+                    WHERE {base} AND topics IS NOT NULL AND topics != ''
+                      AND TRIM(t.topic) != ''{bot_clause}
+                    ORDER BY topic LIMIT 500""",
+                bot_param or None)
+            topics = [r['topic'] for r in cursor.fetchall()]
+
+            return {'bots': bots, 'channels': channels, 'topics': topics}
         finally:
             self._commit()
 
@@ -1466,6 +1665,363 @@ class SummariesDB(Database):
         finally:
             self._commit()
 
+    # ==================== SEO Library (mirror of external platform) ====================
+    #
+    # The SEO library (categories → groups → keywords) is owned by the external
+    # "telegram-api" platform. These local tables are a synced MIRROR keyed by
+    # ext_id (the platform's UUID), used by the categorizer hot path and topic ↔
+    # group attachment. Writes are write-through: the router calls the platform
+    # first (summaries/seo_external.py), then re-syncs this mirror.
+
+    def sync_seo_library(self, categories: list, groups: list):
+        """Reconcile the local mirror with an external library snapshot.
+
+        categories: [{id(ext), name, order, ...}]
+        groups:     [{id(ext), name, enabled, order, categoryId(ext),
+                      keywords:[{keyword}|str]}]
+        Upserts by ext_id; prunes local rows whose ext_id is gone (or legacy NULL).
+        Skips pruning when the snapshot is empty (guards against a transient
+        empty response wiping the mirror).
+        """
+        try:
+            cursor = self._get_cursor()
+            cat_local_by_ext: dict = {}
+            ext_cat_ids: list = []
+            for c in (categories or []):
+                ext = c.get('id')
+                if not ext:
+                    continue
+                ext_cat_ids.append(ext)
+                cursor.execute("""
+                    INSERT INTO seo_categories (ext_id, name, position)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (ext_id) DO UPDATE
+                        SET name = EXCLUDED.name, position = EXCLUDED.position
+                    RETURNING id
+                """, (ext, c.get('name') or '', c.get('order') or 0))
+                cat_local_by_ext[ext] = cursor.fetchone()['id']
+
+            ext_group_ids: list = []
+            for g in (groups or []):
+                ext = g.get('id')
+                if not ext:
+                    continue
+                ext_group_ids.append(ext)
+                cat_local = cat_local_by_ext.get(g.get('categoryId'))
+                cursor.execute("""
+                    INSERT INTO seo_groups (ext_id, category_id, name, enabled, position)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (ext_id) DO UPDATE
+                        SET category_id = EXCLUDED.category_id, name = EXCLUDED.name,
+                            enabled = EXCLUDED.enabled, position = EXCLUDED.position
+                    RETURNING id
+                """, (ext, cat_local, g.get('name') or '',
+                      bool(g.get('enabled', True)), g.get('order') or 0))
+                gid_local = cursor.fetchone()['id']
+                kws = []
+                for k in (g.get('keywords') or []):
+                    kw = k.get('keyword') if isinstance(k, dict) else k
+                    if kw:
+                        kws.append(kw)
+                cursor.execute("DELETE FROM seo_group_keywords WHERE group_id = %s", (gid_local,))
+                for kw in self._split_keywords(kws):
+                    cursor.execute("""INSERT INTO seo_group_keywords (group_id, keyword)
+                                      VALUES (%s, %s) ON CONFLICT DO NOTHING""", (gid_local, kw))
+
+            if ext_group_ids:
+                cursor.execute(
+                    "DELETE FROM seo_groups WHERE ext_id IS NULL OR NOT (ext_id = ANY(%s))",
+                    (ext_group_ids,),
+                )
+            if ext_cat_ids:
+                cursor.execute(
+                    "DELETE FROM seo_categories WHERE ext_id IS NULL OR NOT (ext_id = ANY(%s))",
+                    (ext_cat_ids,),
+                )
+            self._bump_config_version()
+        finally:
+            self._commit()
+
+    def get_seo_usage_by_ext(self) -> dict:
+        """Return {group_ext_id: [ {bot_name, category_name, topic_name} ]} of topics
+        that currently attach each group (the 'USED' info on the SEOs page)."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT g.ext_id, b.name AS bot_name, c.name AS category_name, t.name AS topic_name
+                FROM topic_seo_groups tsg
+                JOIN seo_groups g ON g.id = tsg.group_id
+                JOIN topics t     ON t.id = tsg.topic_id
+                JOIN categories c ON c.id = t.category_id
+                JOIN bots b       ON b.id = c.bot_id
+                ORDER BY b.name, c.name, t.name
+            """)
+            out: dict = {}
+            for r in cursor.fetchall():
+                if not r['ext_id']:
+                    continue
+                out.setdefault(r['ext_id'], []).append({
+                    'bot_name': r['bot_name'],
+                    'category_name': r['category_name'],
+                    'topic_name': r['topic_name'],
+                })
+            return out
+        finally:
+            self._commit()
+
+    def read_seo_library_mirror(self) -> dict:
+        """Read the SEO library straight from the local mirror — no external
+        platform call and no re-sync. Returns the same {status, categories}
+        shape as the external-backed builder, but with keyword_count instead of
+        full keyword lists (the attach-groups picker only renders counts). This
+        powers the fast topic 'Attach SEO Groups' modal; the mirror is kept
+        fresh by the full /seo/library sync run from the SEO Library page."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT g.ext_id     AS group_ext,
+                       g.name       AS group_name,
+                       g.enabled    AS enabled,
+                       g.position   AS group_pos,
+                       c.ext_id     AS cat_ext,
+                       c.name       AS cat_name,
+                       c.position   AS cat_pos,
+                       COUNT(gk.id) AS keyword_count
+                FROM seo_groups g
+                LEFT JOIN seo_categories c      ON c.id = g.category_id
+                LEFT JOIN seo_group_keywords gk ON gk.group_id = g.id
+                WHERE g.ext_id IS NOT NULL
+                GROUP BY g.id, g.ext_id, g.name, g.enabled, g.position,
+                         c.ext_id, c.name, c.position
+                ORDER BY c.position NULLS LAST, g.position, g.name
+            """)
+            rows = cursor.fetchall()
+        finally:
+            self._commit()
+
+        usage = self.get_seo_usage_by_ext()
+        cats: dict = {}
+        order: list = []
+        for r in rows:
+            cat_ext = r['cat_ext']
+            if cat_ext not in cats:
+                cats[cat_ext] = {
+                    'id': cat_ext,
+                    'name': r['cat_name'] if cat_ext else 'Uncategorized',
+                    'position': r['cat_pos'] if cat_ext else 9999,
+                    'groups': [],
+                }
+                order.append(cat_ext)
+            cats[cat_ext]['groups'].append({
+                'id': r['group_ext'],
+                'name': r['group_name'],
+                'enabled': bool(r['enabled']),
+                'position': r['group_pos'] or 0,
+                'keyword_count': r['keyword_count'] or 0,
+                'used_by': usage.get(r['group_ext'], []),
+            })
+        out = [cats[k] for k in order]
+        out.sort(key=lambda c: (c['position'] or 0))
+        return {'status': 'ok', 'categories': out}
+
+    # ---- Replace-term group mirror + bot attachment ----
+
+    def sync_replace_library(self, groups: list):
+        """Reconcile the local replace-group mirror with an external snapshot.
+
+        groups: [{id(ext), name, enabled, categoryId(ext), order, pairs:[{from,to,enabled}]}]
+        Upserts by ext_id; replaces each group's pairs; prunes vanished groups.
+        Skips pruning on an empty snapshot (guards against a transient wipe)."""
+        try:
+            cursor = self._get_cursor()
+            ext_ids: list = []
+            for g in (groups or []):
+                ext = g.get('id')
+                if not ext:
+                    continue
+                ext_ids.append(ext)
+                cursor.execute("""
+                    INSERT INTO seo_replace_groups (ext_id, name, enabled, category_ext, position)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (ext_id) DO UPDATE
+                        SET name = EXCLUDED.name, enabled = EXCLUDED.enabled,
+                            category_ext = EXCLUDED.category_ext, position = EXCLUDED.position
+                    RETURNING id
+                """, (ext, g.get('name') or '', bool(g.get('enabled', True)),
+                      g.get('categoryId'), g.get('order') or 0))
+                gid_local = cursor.fetchone()['id']
+                cursor.execute("DELETE FROM seo_replace_pairs WHERE group_id = %s", (gid_local,))
+                for pos, p in enumerate(g.get('pairs') or []):
+                    frm = (p.get('from') if isinstance(p, dict) else None) or ''
+                    if not str(frm).strip():
+                        continue
+                    cursor.execute("""
+                        INSERT INTO seo_replace_pairs (group_id, from_text, to_text, enabled, position)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (gid_local, frm, p.get('to') or '', bool(p.get('enabled', True)), pos))
+            if ext_ids:
+                cursor.execute(
+                    "DELETE FROM seo_replace_groups WHERE ext_id IS NULL OR NOT (ext_id = ANY(%s))",
+                    (ext_ids,),
+                )
+            self._bump_config_version()
+        finally:
+            self._commit()
+
+    def get_replace_usage_by_ext(self) -> dict:
+        """Return {group_ext_id: [bot_name, ...]} of bots that attach each replace group."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT g.ext_id, b.name AS bot_name, b.owner_id
+                FROM bot_replace_groups brg
+                JOIN seo_replace_groups g ON g.id = brg.group_id
+                JOIN bots b ON b.id = brg.bot_id
+                ORDER BY b.name
+            """)
+            out: dict = {}
+            for r in cursor.fetchall():
+                if not r['ext_id']:
+                    continue
+                out.setdefault(r['ext_id'], []).append({
+                    'bot_name': r['bot_name'],
+                    'owner_id': r['owner_id'],
+                })
+            return out
+        finally:
+            self._commit()
+
+    def read_replace_library_mirror(self) -> dict:
+        """Read the replace-group library straight from the local mirror — no
+        external platform call and no re-sync. Same {status, categories} shape as
+        the external-backed builder, but with pair_count instead of full pair
+        lists (the attach-groups picker only renders counts). Powers the fast bot
+        'Attach Replace Groups' modal; the mirror is kept fresh by the full
+        /seo/replace-library sync run from the SEO Library page."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT g.ext_id       AS group_ext,
+                       g.name         AS group_name,
+                       g.enabled      AS enabled,
+                       g.position     AS group_pos,
+                       c.ext_id       AS cat_ext,
+                       c.name         AS cat_name,
+                       c.position     AS cat_pos,
+                       COUNT(p.id)    AS pair_count
+                FROM seo_replace_groups g
+                LEFT JOIN seo_categories c    ON c.ext_id = g.category_ext
+                LEFT JOIN seo_replace_pairs p ON p.group_id = g.id
+                WHERE g.ext_id IS NOT NULL
+                GROUP BY g.id, g.ext_id, g.name, g.enabled, g.position,
+                         c.ext_id, c.name, c.position
+                ORDER BY c.position NULLS LAST, g.position, g.name
+            """)
+            rows = cursor.fetchall()
+        finally:
+            self._commit()
+
+        usage = self.get_replace_usage_by_ext()
+        cats: dict = {}
+        order: list = []
+        for r in rows:
+            cat_ext = r['cat_ext']
+            if cat_ext not in cats:
+                cats[cat_ext] = {
+                    'id': cat_ext,
+                    'name': r['cat_name'] if cat_ext else 'Uncategorized',
+                    'position': r['cat_pos'] if cat_ext else 9999,
+                    'groups': [],
+                }
+                order.append(cat_ext)
+            cats[cat_ext]['groups'].append({
+                'id': r['group_ext'],
+                'name': r['group_name'],
+                'enabled': bool(r['enabled']),
+                'position': r['group_pos'] or 0,
+                'pair_count': r['pair_count'] or 0,
+                'used_by': usage.get(r['group_ext'], []),
+            })
+        out = [cats[k] for k in order]
+        out.sort(key=lambda c: (c['position'] or 0))
+        return {'status': 'ok', 'categories': out}
+
+    def get_bot_id(self, bot_name: str, owner_id: int = None):
+        """Resolve a bot's integer id from its name + owner scope."""
+        try:
+            cursor = self._get_cursor()
+            if owner_id is None:
+                cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id IS NULL", (bot_name,))
+            else:
+                cursor.execute("SELECT id FROM bots WHERE name = %s AND owner_id = %s", (bot_name, owner_id))
+            row = cursor.fetchone()
+            return row['id'] if row else None
+        finally:
+            self._commit()
+
+    def set_bot_replace_groups(self, bot_id: int, group_ext_ids: list):
+        """Replace the replace-groups attached to a bot. Accepts external UUIDs."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("DELETE FROM bot_replace_groups WHERE bot_id = %s", (bot_id,))
+            ext_ids = [str(g) for g in (group_ext_ids or []) if g]
+            if ext_ids:
+                cursor.execute("SELECT id FROM seo_replace_groups WHERE ext_id = ANY(%s)", (ext_ids,))
+                for row in cursor.fetchall():
+                    cursor.execute(
+                        """INSERT INTO bot_replace_groups (bot_id, group_id) VALUES (%s, %s)
+                           ON CONFLICT DO NOTHING""",
+                        (bot_id, row['id']),
+                    )
+            self._bump_config_version()
+        finally:
+            self._commit()
+
+    # ---- Topic ↔ group attachment ----
+
+    def get_topic_id(self, bot_name: str, category_name: str, topic_name: str, owner_id: int = None):
+        """Resolve a topic's integer id from its bot/category/topic names + owner scope."""
+        try:
+            cursor = self._get_cursor()
+            if owner_id is None:
+                cursor.execute("""
+                    SELECT t.id FROM topics t
+                    JOIN categories c ON c.id = t.category_id
+                    JOIN bots b       ON b.id = c.bot_id
+                    WHERE b.name = %s AND c.name = %s AND t.name = %s AND b.owner_id IS NULL
+                """, (bot_name, category_name, topic_name))
+            else:
+                cursor.execute("""
+                    SELECT t.id FROM topics t
+                    JOIN categories c ON c.id = t.category_id
+                    JOIN bots b       ON b.id = c.bot_id
+                    WHERE b.name = %s AND c.name = %s AND t.name = %s AND b.owner_id = %s
+                """, (bot_name, category_name, topic_name, owner_id))
+            row = cursor.fetchone()
+            return row['id'] if row else None
+        finally:
+            self._commit()
+
+    def set_topic_seo_groups(self, topic_id: int, group_ext_ids: list):
+        """Replace the SEO groups attached to a topic. Accepts external group
+        UUIDs (the SEOs page works in external ids); resolves them to local
+        mirror ids before writing topic_seo_groups."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("DELETE FROM topic_seo_groups WHERE topic_id = %s", (topic_id,))
+            ext_ids = [str(g) for g in (group_ext_ids or []) if g]
+            if ext_ids:
+                cursor.execute("SELECT id FROM seo_groups WHERE ext_id = ANY(%s)", (ext_ids,))
+                for row in cursor.fetchall():
+                    cursor.execute(
+                        """INSERT INTO topic_seo_groups (topic_id, group_id) VALUES (%s, %s)
+                           ON CONFLICT DO NOTHING""",
+                        (topic_id, row['id']),
+                    )
+            self._bump_config_version()
+        finally:
+            self._commit()
+
     # ==================== Config DAL ====================
 
     def _bump_config_version(self, cursor=None):
@@ -1798,8 +2354,11 @@ class SummariesDB(Database):
                     'minimum_messages': b['minimum_messages'],
                     'rules': b['rules'] or {'remove': [], 'replace': []},
                     'default_schedules': b.get('default_schedules') or [],
+                    'replace_groups': [],        # attached replace groups (meta, for UI)
+                    'replace_group_pairs': [],   # flattened enabled pairs (runtime rewrite)
                     'categories': {},
                 }
+            bot_id_to_name = {b['id']: b['name'] for b in bots_rows}
 
             for c in cats_rows:
                 bn = c['bot_name']
@@ -1818,6 +2377,8 @@ class SummariesDB(Database):
                         'catch_all': bool(t.get('catch_all')),
                         'linked_topics': t['linked_topics'] or [],
                         'keywords': kws,
+                        'seo_groups': [],          # attached reusable groups (meta, for UI)
+                        'seo_group_keywords': [],  # flattened keywords from enabled groups (matching)
                         'schedules': [],
                     }
 
@@ -1857,6 +2418,80 @@ class SummariesDB(Database):
                     if s['end_minute'] is not None:
                         sch['end_minute'] = s['end_minute']
                     result[bn]['categories'][cn]['topics'][tn]['schedules'].append(sch)
+
+            # Attach reusable SEO groups (+ their keywords) to each topic. Group
+            # keywords merge into the topic's matching exactly like its own SEOs;
+            # disabled groups contribute meta only, no keywords.
+            topic_keys_by_id = {
+                t['id']: (t['bot_name'], t['category_name'], t['name']) for t in topics_rows
+            }
+            if topic_keys_by_id:
+                cursor.execute("""
+                    SELECT tsg.topic_id, g.id AS group_id, g.ext_id AS group_ext,
+                           g.name AS group_name, sc.name AS seo_category, g.enabled, gk.keyword
+                    FROM topic_seo_groups tsg
+                    JOIN seo_groups g      ON g.id = tsg.group_id
+                    JOIN seo_categories sc ON sc.id = g.category_id
+                    LEFT JOIN seo_group_keywords gk ON gk.group_id = g.id
+                    WHERE tsg.topic_id = ANY(%s)
+                    ORDER BY g.id, gk.id
+                """, (list(topic_keys_by_id.keys()),))
+                seen_groups: dict = {}  # topic_id → set(group_id) seen
+                for r in cursor.fetchall():
+                    key = topic_keys_by_id.get(r['topic_id'])
+                    if not key:
+                        continue
+                    bn, cn, tn = key
+                    try:
+                        tdict = result[bn]['categories'][cn]['topics'][tn]
+                    except KeyError:
+                        continue
+                    sg = seen_groups.setdefault(r['topic_id'], set())
+                    if r['group_id'] not in sg:
+                        sg.add(r['group_id'])
+                        # Expose the external UUID as the group's id — the SEOs
+                        # page and topic-attach UI work in external ids.
+                        tdict['seo_groups'].append({
+                            'id': r['group_ext'],
+                            'name': r['group_name'],
+                            'category': r['seo_category'],
+                            'enabled': r['enabled'],
+                        })
+                    if r['enabled'] and r['keyword']:
+                        tdict['seo_group_keywords'].append(r['keyword'])
+
+            # Attach reusable replace groups (+ their pairs) to each bot. Enabled
+            # groups' enabled pairs are flattened into replace_group_pairs, which
+            # the bot's "Replace in message" step applies after its inline rules.
+            if bot_id_to_name:
+                cursor.execute("""
+                    SELECT brg.bot_id, g.ext_id AS group_ext, g.name AS group_name, g.enabled,
+                           p.from_text, p.to_text, p.enabled AS pair_enabled, p.position
+                    FROM bot_replace_groups brg
+                    JOIN seo_replace_groups g ON g.id = brg.group_id
+                    LEFT JOIN seo_replace_pairs p ON p.group_id = g.id
+                    WHERE brg.bot_id = ANY(%s)
+                    ORDER BY g.id, p.position, p.id
+                """, (list(bot_id_to_name.keys()),))
+                seen_rg: dict = {}  # bot_id → set(group_ext)
+                for r in cursor.fetchall():
+                    bn = bot_id_to_name.get(r['bot_id'])
+                    if bn not in result:
+                        continue
+                    bdict = result[bn]
+                    sg = seen_rg.setdefault(r['bot_id'], set())
+                    if r['group_ext'] not in sg:
+                        sg.add(r['group_ext'])
+                        bdict['replace_groups'].append({
+                            'id': r['group_ext'],
+                            'name': r['group_name'],
+                            'enabled': r['enabled'],
+                        })
+                    if r['enabled'] and r['pair_enabled'] and r['from_text']:
+                        bdict['replace_group_pairs'].append({
+                            'match': r['from_text'],
+                            'replace_with': r['to_text'] or '',
+                        })
 
             return result
         finally:
@@ -2032,6 +2667,7 @@ class SummariesDB(Database):
 
             cursor.execute("SELECT * FROM categories WHERE bot_id = %s ORDER BY id", (admin_bot_id,))
             categories = cursor.fetchall()
+            topic_id_map: list = []  # (old_topic_id, new_topic_id) — to carry over SEO-group links
             for cat in categories:
                 cursor.execute("""
                     INSERT INTO categories (bot_id, name, enabled) VALUES (%s, %s, %s) RETURNING id
@@ -2047,6 +2683,7 @@ class SummariesDB(Database):
                     """, (new_cat_id, topic['name'], topic['enabled'],
                           topic.get('catch_all', False), topic.get('linked_topics', '[]')))
                     new_topic_id = cursor.fetchone()['id']
+                    topic_id_map.append((topic['id'], new_topic_id))
 
                     cursor.execute("SELECT * FROM schedules WHERE topic_id = %s", (topic['id'],))
                     schedules = cursor.fetchall()
@@ -2078,6 +2715,21 @@ class SummariesDB(Database):
                 FROM prompts WHERE bot_name = %s AND owner_id IS NULL
                 ON CONFLICT DO NOTHING
             """, (user_id, bot_name))
+
+            # Carry over the admin topics' SEO-group attachments to the new copy.
+            for old_tid, new_tid in topic_id_map:
+                cursor.execute("""
+                    INSERT INTO topic_seo_groups (topic_id, group_id)
+                    SELECT %s, group_id FROM topic_seo_groups WHERE topic_id = %s
+                    ON CONFLICT DO NOTHING
+                """, (new_tid, old_tid))
+
+            # Carry over the admin bot's replace-group attachments to the new copy.
+            cursor.execute("""
+                INSERT INTO bot_replace_groups (bot_id, group_id)
+                SELECT %s, group_id FROM bot_replace_groups WHERE bot_id = %s
+                ON CONFLICT DO NOTHING
+            """, (new_bot_id, admin_bot_id))
 
             self._bump_config_version()
             return True
@@ -2449,9 +3101,20 @@ class SummariesDB(Database):
                     # Pull defaults from the GLOBAL table. Scope by the bot's
                     # owner so admin bots see admin defaults and user bots see
                     # their owner's defaults.
-                    cursor.execute("SELECT owner_id FROM bots WHERE name = %s", (bot_name,))
-                    bot_row = cursor.fetchone()
-                    _bot_owner = bot_row['owner_id'] if bot_row else None
+                    #
+                    # Resolve the owner the SAME way _get_bot_id did when the
+                    # category was resolved: prefer the caller's own bot, and
+                    # only fall back to the admin bot. A bare "WHERE name = %s"
+                    # is ambiguous when two accounts share a bot name and would
+                    # leak another account's default schedules into this topic.
+                    _bot_owner = None
+                    if owner_id is not None:
+                        cursor.execute(
+                            "SELECT 1 FROM bots WHERE name = %s AND owner_id = %s",
+                            (bot_name, owner_id),
+                        )
+                        if cursor.fetchone():
+                            _bot_owner = owner_id
                     if _bot_owner is None:
                         cursor.execute(
                             "SELECT * FROM default_schedules_global WHERE owner_id IS NULL ORDER BY id"
@@ -2468,8 +3131,8 @@ class SummariesDB(Database):
                             INSERT INTO schedules (topic_id, name, type, enabled, prompt_key, header,
                                                    header_datetime, header_date_arabic, header_time_arabic,
                                                    minute, hour, hours, minutes, start_hour, start_minute,
-                                                   telegram_targets)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                   telegram_targets, bullet_points, bullet_points_count)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             topic_id,
                             (ds.get('name') or '').replace('{topic_name}', topic_name),
@@ -2487,6 +3150,8 @@ class SummariesDB(Database):
                             ds.get('start_hour'),
                             ds.get('start_minute'),
                             json.dumps(_parse_jsonb_list(ds.get('telegram_targets'))),
+                            bool(ds.get('bullet_points', False)),
+                            int(ds.get('bullet_points_count') or 0),
                         ))
                         if ds.get('telegram_targets'):
                             logger.info(f"[DEFAULT-SCH] Applied schedule '{ds.get('name')}' to topic '{topic_name}' with targets: {ds.get('telegram_targets')}")

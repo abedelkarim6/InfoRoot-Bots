@@ -37,7 +37,11 @@ export default function MultiSelect({ label = 'All', values, selected, onChange,
   }, [open]);
 
   // Prune selected set if the value list has shrunk (legacy behaviour).
+  // Skip while the option list is still empty — that means options haven't
+  // loaded yet (async facets / first page), not that the selection is stale.
+  // Without this guard a filter restored from the URL would be wiped on mount.
   useEffect(() => {
+    if (!values.length) return;
     let mutated = false;
     const next = new Set();
     for (const v of selected) {

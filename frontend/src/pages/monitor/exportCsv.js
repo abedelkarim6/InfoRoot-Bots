@@ -45,6 +45,9 @@ export const EXPORT_COLS = {
     { key: 'status', label: 'Status' },
     { key: 'msgs', label: 'Messages' },
     { key: 'prompt', label: 'Prompt' },
+    { key: 'model', label: 'Model (sent)' },
+    { key: 'summary', label: 'Summary (sent)' },
+    { key: 'alt_models', label: 'Alternate Model Outputs' },
     { key: 'error', label: 'Error' }
   ],
   messages: [
@@ -54,7 +57,8 @@ export const EXPORT_COLS = {
     { key: 'topics', label: 'Topics' },
     { key: 'categories', label: 'Categories' },
     { key: 'keywords', label: 'Keywords' },
-    { key: 'preview', label: 'Preview' }
+    { key: 'preview', label: 'Preview' },
+    { key: 'interim', label: 'Interim Output' }
   ],
   unclassified: [
     { key: 'time', label: 'Time' },
@@ -185,6 +189,20 @@ export function buildRowValues(tabName, row, colDefs) {
           return row.message_count ?? '';
         case 'prompt':
           return row.prompt_key || '';
+        case 'model':
+          return row.primary_model || '';
+        case 'summary':
+          return row.summary_text || '';
+        case 'alt_models': {
+          // Every compared model except the one that was sent, as
+          // "model:\n<text>" blocks separated by a blank line.
+          const outs = row.model_outputs || {};
+          const primary = row.primary_model;
+          const parts = Object.keys(outs)
+            .filter((m) => m !== primary)
+            .map((m) => `${m}:\n${outs[m] || ''}`);
+          return parts.join('\n\n');
+        }
         case 'error':
           return row.error_text || '';
         default:
@@ -206,7 +224,14 @@ export function buildRowValues(tabName, row, colDefs) {
         case 'keywords':
           return row.keywords_found || '';
         case 'preview':
-          return row.preview || '';
+          // Prefer the full message body when the API returns it; the table
+          // cell shows the truncated preview, but exports must be complete.
+          return row.text != null ? row.text : row.preview || '';
+        case 'interim':
+          // Rolling interim output(s) this message was batched into (one per
+          // schedule chain), supplied by get_recent_messages. Empty if the
+          // message hasn't been batched into an interim yet.
+          return row.interim_text || '';
         default:
           return '';
       }

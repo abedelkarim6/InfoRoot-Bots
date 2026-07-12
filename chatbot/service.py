@@ -32,10 +32,11 @@ def _load_gemini_config():
     """Read Vertex AI Gemini config from config.yaml."""
     from utils.helpers import load_config
     cfg = load_config()
+    from utils.gemini_models import get_gemini_model
     gemini_cfg = cfg.get("gemini", {})
     project  = gemini_cfg.get("project", "")
     location = gemini_cfg.get("location", "global")
-    model_id = gemini_cfg.get("model", "gemini-2.0-flash")
+    model_id = get_gemini_model(cfg)
     return project, location, model_id
 
 

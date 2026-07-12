@@ -77,10 +77,11 @@ export default function MonitorPage() {
     refetchIntervalInBackground: false
   });
 
+  // Push (not replace) so the browser Back button returns to the previous tab.
   function setTab(t) {
     // Push so browser back navigates between tabs. The initial URL backfill
     // above still uses replace — that's a URL-cleanup, not a user navigation.
-    setSearchParams({ tab: t });
+    setSearchParams({ tab: t }, { replace: false });
   }
 
   const data = monitor.data?.status === 'ok' ? monitor.data : null;

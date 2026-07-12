@@ -8,11 +8,13 @@
  *   - URLs are shareable / bookmarkable
  *
  * Setters default to `{ replace: true }` so typing in a filter doesn't spam
- * history entries. Pass `{ history: 'push' }` to the setter for transitions
- * the user should be able to undo with the browser back button — opening a
- * drill-down panel, switching tabs, etc.
+ * history entries — only the *current* state lives in the URL. Genuine view
+ * transitions (switching tabs, drilling into a detail panel) should instead
+ * push a new history entry so the browser Back button returns to the previous
+ * view. Both `{ push: true }` and `{ history: 'push' }` are accepted:
  *
- *   setSummaryId(2161, { history: 'push' }); // back closes the drill-down
+ *   setTab('history', { push: true });        // back returns to previous tab
+ *   setSummaryId(2161, { history: 'push' });  // back closes the drill-down
  *   setSearch(value);                         // filter typing — silent replace
  */
 
@@ -23,7 +25,9 @@ import { useSearchParams } from 'react-router-dom';
 // the optional second arg on every hook setter. Default is replace so
 // filter/search inputs don't pollute history.
 function _shouldReplace(opts) {
-  return (opts && opts.history === 'push') ? false : true;
+  if (!opts) return true;
+  // Accept both conventions: { push: true } and { history: 'push' }.
+  return (opts.push === true || opts.history === 'push') ? false : true;
 }
 
 /**

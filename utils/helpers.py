@@ -2,18 +2,15 @@ import asyncio
 import collections
 import copy
 import datetime
-import io
 import math
 import os
 import re
 import shutil
-import sys
 import tempfile
 import threading
 import time
 import yaml
 import logging
-from logging.handlers import RotatingFileHandler
 
 # ==================== In-memory log buffer ====================
 
@@ -146,7 +143,11 @@ def clear_log_records():
 # ==================== Configuration ====================
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(_BASE_DIR, "config.yaml")
-PROMPTS_FILE = os.path.join(_BASE_DIR, "prompts.yaml")
+# Prompt YAML files live together under prompts/. prompts.yaml is the legacy
+# per-bot seed (DB is the runtime source); system_prompts.yaml ships with the
+# code (git-tracked) and is editable at runtime via the admin UI.
+PROMPTS_FILE = os.path.join(_BASE_DIR, "prompts", "prompts.yaml")
+SYSTEM_PROMPTS_FILE = os.path.join(_BASE_DIR, "prompts", "system_prompts.yaml")
 
 # Hot-reload cache: serves the parsed YAML if the file mtime hasn't changed,
 # avoiding a disk read on every load_config() call (called per-request in many
@@ -213,47 +214,19 @@ def load_prompts():
 def save_prompts(prompts):
     atomic_write_yaml(PROMPTS_FILE, prompts)
 
-def setup_logging(config):
-    """Setup logging with file rotation."""
-    log_config = config["logging"]
-    
-    # Create logger
-    logger = logging.getLogger()
-    logger.setLevel(getattr(logging, log_config["level"]))
-    
-    # Console handler — explicitly use UTF-8 so Unicode chars (→, Arabic, etc.)
-    # don't crash on Windows where sys.stderr defaults to CP1252.
-    if hasattr(sys.stderr, 'buffer'):
-        _stream = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    else:
-        _stream = sys.stderr
-    console_handler = logging.StreamHandler(_stream)
-    console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
-        '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(console_format)
-    
-    # File handler with rotation (DISABLED)
-    # file_handler = RotatingFileHandler(
-    #     log_config["file"],
-    #     maxBytes=log_config["max_file_size_mb"] * 1024 * 1024,
-    #     backupCount=log_config["backup_count"],
-    #     encoding='utf-8',
-    # )
-    # file_handler.setLevel(getattr(logging, log_config["level"]))
-    # file_format = logging.Formatter(
-    #     '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-    #     datefmt='%Y-%m-%d %H:%M:%S'
-    # )
-    # file_handler.setFormatter(file_format)
-    
-    # Add handlers
-    logger.addHandler(console_handler)
-    # logger.addHandler(file_handler)
-    
-    return logger
+def load_system_prompts() -> dict:
+    """Return the system-prompt templates dict from system_prompts.yaml.
+    Returns {} if the file is missing so callers fall back to their hardcoded
+    defaults. Read fresh each call — the file is tiny and editable at runtime."""
+    try:
+        with open(SYSTEM_PROMPTS_FILE, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+def save_system_prompts(prompts: dict) -> None:
+    """Persist the system-prompt templates dict to system_prompts.yaml atomically."""
+    atomic_write_yaml(SYSTEM_PROMPTS_FILE, prompts)
 
 _BOT_RESTART_DELAY = 5  # seconds before auto-restart after unexpected exit
 
@@ -340,11 +313,12 @@ def _refresh_bots_cache(db=None):
     """Fetch bots config, compile per-topic patterns, and store in module globals."""
     global _bots_cache, _bots_cache_time, _topic_patterns
 
-    if db is not None:
-        bots = db.get_all_bots_config()
-    else:
-        cfg = load_config()
-        bots = cfg.get('bots', {})
+    # Bots live in the DB (source of truth); config.yaml no longer carries them.
+    # Resolve a db handle lazily if the caller didn't supply one.
+    if db is None:
+        from utils.database import get_db
+        db = get_db()
+    bots = db.get_all_bots_config()
 
     patterns: dict = {}
     for bot_name, bot_data in bots.items():
@@ -365,7 +339,9 @@ def _refresh_bots_cache(db=None):
                 linked_kws: list = []
                 for lt in (t_data.get('linked_topics') or []):
                     linked_kws.extend(all_topic_keywords.get(lt, []))
-                pat, kw_map = _build_topic_pattern(own_kws + linked_kws)
+                # Keywords from attached (enabled) reusable SEO groups merge in too.
+                group_kws = t_data.get('seo_group_keywords') or []
+                pat, kw_map = _build_topic_pattern(own_kws + linked_kws + group_kws)
                 patterns[bot_name][cat_name][t_name] = (pat, kw_map)
 
     _bots_cache = bots

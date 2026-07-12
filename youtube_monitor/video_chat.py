@@ -11,6 +11,8 @@ from datetime import datetime
 import google.genai as genai
 from google.genai import types
 
+from utils.gemini_models import get_gemini_model
+
 logger = logging.getLogger(__name__)
 
 # In-memory chat sessions: session_id -> {video_id, chat, created_at, messages, title, ...}
@@ -36,8 +38,10 @@ def _fetch_video_info(video_id: str) -> dict:
     try:
         from googleapiclient.discovery import build
         from youtube_monitor import yt_memory_cache
+        from youtube_monitor.db import record_api_usage
         youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
         resp = youtube.videos().list(part='snippet', id=video_id).execute()
+        record_api_usage('videos.list', context=video_id, source='video_chat', video_count=1)
         items = resp.get('items', [])
         if items:
             s = items[0]['snippet']
@@ -67,7 +71,7 @@ async def create_chat_session(video_id: str) -> dict:
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
     chat = client.chats.create(
-        model='gemini-2.5-flash',
+        model=get_gemini_model(),
         history=[
             types.Content(
                 role='user',
@@ -158,7 +162,7 @@ async def refine_text(text: str, instruction: str = "") -> str:
 
     def _refine():
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=get_gemini_model(),
             contents=f"{prompt}\n\n---\n\n{text}",
         )
         return response.text.strip()

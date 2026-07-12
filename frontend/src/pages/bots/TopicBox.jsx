@@ -15,6 +15,7 @@ import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import CatchAllToggle from './CatchAllToggle';
 import SeosSection from './SeosSection';
+import TopicSeoGroupsSection from './TopicSeoGroupsSection';
 import LinkedTopicsSection from './LinkedTopicsSection';
 import SchedulesSection from './SchedulesSection';
 
@@ -33,6 +34,7 @@ export default function TopicBox({
 
   const schedules = topic.schedules || [];
   const linkedTopics = topic.linked_topics || [];
+  const seoGroups = topic.seo_groups || [];
   const catchAll = !!topic.catch_all;
   const isDisabledByCategory = !categoryEnabled;
 
@@ -128,6 +130,9 @@ export default function TopicBox({
           {linkedTopics.length > 0 && (
             <span className="linked-badge">🔗 {linkedTopics.length} linked</span>
           )}
+          {seoGroups.length > 0 && (
+            <span className="linked-badge">🏷️ {seoGroups.length} group{seoGroups.length !== 1 ? 's' : ''}</span>
+          )}
           <span className="schedule-indicator">
             🕐 {schedules.length} schedule{schedules.length !== 1 ? 's' : ''}
           </span>
@@ -173,6 +178,12 @@ export default function TopicBox({
                 topic={topic}
               />
               <SeosSection
+                botName={botName}
+                catName={catName}
+                topicName={topicName}
+                topic={topic}
+              />
+              <TopicSeoGroupsSection
                 botName={botName}
                 catName={catName}
                 topicName={topicName}

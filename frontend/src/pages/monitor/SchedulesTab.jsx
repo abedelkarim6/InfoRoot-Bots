@@ -156,7 +156,7 @@ export default function SchedulesTab({ data, isLoading }) {
           fires={fires}
           nowMs={nowMs}
           onShowPending={(p) =>
-            setPendingKey(`${p.botName}::${p.topicName}::${p.schedType}`, { history: 'push' })
+            setPendingKey(`${p.botName}::${p.topicName}::${p.schedType}`, { push: true })
           }
         />
       )}

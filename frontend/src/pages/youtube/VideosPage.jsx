@@ -14,7 +14,7 @@
  * header toggles it; the polling stops automatically when the page unmounts.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, escapeHtml } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
@@ -23,7 +23,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { useGlobalConfig } from '../../config/ConfigProvider';
 import PageHeader from '../../components/PageHeader';
 import { useUrlInt, useUrlString } from '../../lib/useUrlState';
-import { estimateCost, timeAgo, todayISODate } from './shared';
+import { estimateCost, timeAgo, formatDuration } from './shared';
 
 const PAGE_SIZE = 50;
 
@@ -64,14 +64,29 @@ function friendlyYtError(err) {
   return null;
 }
 
+/**
+ * Live "time spent" counter for an in-flight item. Starts from the
+ * server-computed baseline (seconds elapsed at fetch time) and ticks up
+ * locally every second; resyncs whenever fresh data arrives (baseSecs changes).
+ */
+function ProcessingTimer({ baseSecs }) {
+  const [extra, setExtra] = useState(0);
+  useEffect(() => {
+    setExtra(0);
+    const t = setInterval(() => setExtra((e) => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [baseSecs]);
+  return <span>{formatDuration((Number(baseSecs) || 0) + extra)}</span>;
+}
+
 export default function VideosPage() {
   const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const { showNotification } = useDialogs();
 
   // ── Filter state — URL-backed so refresh and back-button preserve it.
-  // First entry to the page (no params in URL) defaults the date range to
-  // today; subsequent navigations honor whatever the URL says.
+  // No default date range: the page opens showing all recent videos. Date
+  // filters apply only when the user sets them.
   const [filterStatus, setFilterStatus] = useUrlString('status', '');
   const [filterChannel, setFilterChannel] = useUrlString('ch', '');
   const [filterKeyword, setFilterKeyword] = useUrlString('kw', '');
@@ -100,20 +115,6 @@ export default function VideosPage() {
     [filterStatus, filterChannel, filterKeyword, filterSource, filterDateFrom, filterDateTo]
   );
 
-  // Default the date range to today only on the very first visit (when no
-  // date params are in the URL). After that the URL is the source of truth.
-  const datesInitialized = useRef(false);
-  useEffect(() => {
-    if (datesInitialized.current) return;
-    const url = new URL(window.location.href);
-    if (!url.searchParams.get('from') && !url.searchParams.get('to')) {
-      const today = todayISODate();
-      setFilterDateFrom(today);
-      setFilterDateTo(today);
-    }
-    datesInitialized.current = true;
-  }, [setFilterDateFrom, setFilterDateTo]);
-
   const [page, setPage] = useUrlInt('page', 0);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
@@ -139,9 +140,21 @@ export default function VideosPage() {
     return `/api/youtube/videos?${params.toString()}`;
   }, [page, filters]);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['yt-videos', queryUrl],
-    queryFn: () => api(queryUrl),
+    queryFn: async () => {
+      const res = await api(queryUrl);
+      // api() never throws — it returns { status: 'error', ... } on failure.
+      // Re-throw here so React Query retries transient backend blips (stale DB
+      // connection, restart) with backoff instead of immediately painting the
+      // failure. On a stale-data refetch, the last good page stays visible.
+      if (res?.status !== 'ok') {
+        throw new Error(res?.message || 'Failed to load videos.');
+      }
+      return res;
+    },
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
     refetchInterval: autoRefresh ? 30000 : false,
     refetchIntervalInBackground: false
   });
@@ -176,6 +189,15 @@ export default function VideosPage() {
     errorMsg: 'Reset failed'
   });
 
+  const clearFailed = useApiMutation('/api/youtube/queue/clear-failed', {
+    invalidate: ['yt-videos'],
+    successMsg: (res) =>
+      res?.deleted > 0
+        ? `Deleted ${res.deleted} failed item(s)`
+        : 'No failed items to delete',
+    errorMsg: 'Failed to delete'
+  });
+
   // Clear All — chains queue/clear + summaries/clear
   async function doClearAll() {
     const r1 = await api('/api/youtube/queue/clear', {});
@@ -194,6 +216,15 @@ export default function VideosPage() {
   }
 
   const processingCount = stats.processing || 0;
+  const failedCount = stats.failed || 0;
+
+  function clearFailedConfirm() {
+    showConfirm(
+      `Delete all ${failedCount} failed item(s)? This cannot be undone.`,
+      () => clearFailed.mutate({}),
+      { title: 'Clear Failed', confirmLabel: 'Delete', confirmClass: 'btn-danger' }
+    );
+  }
 
   function clearFilters() {
     setFilters({
@@ -275,9 +306,6 @@ export default function VideosPage() {
           <span className="yt-budget-item yt-budget-source">
             📄 {daily.transcript || 0} transcript
           </span>
-          <span className="yt-budget-item yt-budget-source">
-            🏷️ {daily.metadata || 0} metadata
-          </span>
         </div>
       </div>
 
@@ -327,13 +355,35 @@ export default function VideosPage() {
           active={filters.status === 'done'}
           onClick={() => setStatusFilter('done')}
         />
-        <StatCard
-          icon="❌"
-          label="Failed"
-          value={stats.failed || 0}
-          active={filters.status === 'failed'}
+        <div
+          className={`dash-stat-card yt-stat-clickable${filters.status === 'failed' ? ' yt-stat-selected' : ''}`}
           onClick={() => setStatusFilter('failed')}
-        />
+          style={{ position: 'relative' }}
+        >
+          <div className="dash-stat-icon">❌</div>
+          <div className="dash-stat-value">{failedCount}</div>
+          <div className="dash-stat-label">Failed</div>
+          {failedCount > 0 && (
+            <button
+              className="btn btn-danger btn-sm"
+              style={{
+                position: 'absolute',
+                bottom: 8,
+                right: 8,
+                fontSize: 11,
+                padding: '2px 7px'
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                clearFailedConfirm();
+              }}
+              title="Delete all failed items"
+              disabled={clearFailed.isPending}
+            >
+              🗑️ Delete
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filters */}
@@ -348,7 +398,9 @@ export default function VideosPage() {
       {isLoading ? (
         <p className="mon-empty">Loading…</p>
       ) : !ok ? (
-        <p className="mon-empty">Failed to load videos.</p>
+        <p className="mon-empty">
+          {isError && error?.message ? error.message : 'Failed to load videos.'}
+        </p>
       ) : items.length === 0 ? (
         <p className="mon-empty">No videos found.</p>
       ) : (
@@ -484,8 +536,8 @@ function FilterBar({ filters, onChange, hasFilters, onClear }) {
           onChange={(e) => onChange((f) => ({ ...f, source: e.target.value }))}
         >
           <option value="">All Sources</option>
+          <option value="gemini_video">Video</option>
           <option value="transcript_api">Transcript</option>
-          <option value="metadata">Metadata</option>
         </select>
       </div>
       {hasFilters && (
@@ -628,6 +680,10 @@ function ManualSubmitCard() {
   const [url, setUrl] = useState('');
   const [target, setTarget] = useState('');
   const [promptKey, setPromptKey] = useState('');
+  const [lengthPct, setLengthPct] = useState('');
+  // Forced summarization method: '' = auto (video first, transcript fallback),
+  // 'gemini_video' = watch the video, 'transcript_api' = transcript only.
+  const [method, setMethod] = useState('');
 
   // Pull the logged-in account's joined channels and keep only the
   // writable ones (creator or admin_rights). Same endpoint used by the
@@ -666,7 +722,9 @@ function ManualSubmitCard() {
       {
         url: u,
         telegram_target: target.trim() || null,
-        prompt_key: promptKey || null
+        prompt_key: promptKey || null,
+        output_length_percent: lengthPct ? parseInt(lengthPct, 10) : null,
+        method: method || null
       },
       {
         onSuccess: (res) => {
@@ -739,6 +797,28 @@ function ManualSubmitCard() {
             <option key={k} value={k}>{k}</option>
           ))}
         </select>
+        <select
+          className="select"
+          value={method}
+          onChange={(e) => setMethod(e.target.value)}
+          style={{ flex: '0 0 130px' }}
+          title="How to summarize: Auto tries the video first then falls back to the transcript; Video / Transcript force one method"
+        >
+          <option value="">Auto (method)</option>
+          <option value="gemini_video">Video</option>
+          <option value="transcript_api">Transcript</option>
+        </select>
+        <input
+          type="number"
+          className="input"
+          value={lengthPct}
+          onChange={(e) => setLengthPct(e.target.value)}
+          placeholder="Len %"
+          min="1"
+          max="100"
+          style={{ flex: '0 0 90px' }}
+          title="Summary length as a % of the video's transcript length (blank = no limit / use default)"
+        />
         <button className="btn btn-primary" onClick={handleAdd} disabled={add.isPending}>
           Add & Queue
         </button>
@@ -894,6 +974,7 @@ function DefaultTargetsCard() {
   const { showNotification } = useDialogs();
   const [targets, setTargets] = useState([]);
   const [customDraft, setCustomDraft] = useState('');
+  const [lengthPct, setLengthPct] = useState('');
 
   // Same query key as ManualSubmitCard — React Query shares the cache, so
   // both cards on this page consume a single /api/telegram/userbot/dialogs
@@ -917,6 +998,10 @@ function DefaultTargetsCard() {
       if (cancelled || res?.status !== 'ok') return;
       setTargets(Array.isArray(res.default_targets) ? res.default_targets : []);
     });
+    api('/api/youtube/output-length').then((res) => {
+      if (cancelled || res?.status !== 'ok') return;
+      setLengthPct(res.percent ? String(res.percent) : '');
+    });
     return () => {
       cancelled = true;
     };
@@ -925,6 +1010,11 @@ function DefaultTargetsCard() {
   const save = useApiMutation('/api/youtube/default-targets/save', {
     successMsg: 'Default targets saved',
     errorMsg: 'Failed to save targets'
+  });
+
+  const saveLength = useApiMutation('/api/youtube/output-length', {
+    successMsg: 'Default summary length saved',
+    errorMsg: 'Failed to save summary length'
   });
 
   function addTarget(raw) {
@@ -1063,6 +1153,33 @@ function DefaultTargetsCard() {
           Add
         </button>
       </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', margin: '10px 0 8px' }} />
+      <label className="input-label">Default summary length</label>
+      <p className="text-muted" style={{ margin: '0 0 6px', fontSize: 12 }}>
+        Target output as a % of the video's transcript length. Overridden per
+        channel/tracker or per manually added video. Blank = no limit.
+      </p>
+      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <input
+          type="number"
+          className="input"
+          value={lengthPct}
+          onChange={(e) => setLengthPct(e.target.value)}
+          placeholder="e.g. 20"
+          min="1"
+          max="100"
+          style={{ flex: 1 }}
+        />
+        <span className="text-muted">%</span>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={() => saveLength.mutate({ percent: lengthPct ? parseInt(lengthPct, 10) : 0 })}
+          disabled={saveLength.isPending}
+        >
+          Save
+        </button>
+      </div>
     </div>
   );
 }
@@ -1078,8 +1195,7 @@ const STATUS_BADGE_CLASS = {
 
 const SOURCE_LABEL = {
   gemini_video: 'Video',
-  transcript_api: 'Transcript',
-  metadata: 'Metadata'
+  transcript_api: 'Transcript'
 };
 
 function VideoTable({ items, isAdmin }) {
@@ -1092,11 +1208,13 @@ function VideoTable({ items, isAdmin }) {
             <th>Channel</th>
             <th>Origin</th>
             <th>Status</th>
+            <th>Length</th>
             <th>Source</th>
             {isAdmin && <th>Cost</th>}
             <th>Target</th>
             <th>Sent</th>
             <th>Created</th>
+            <th>Time</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -1115,6 +1233,7 @@ function VideoRow({ item, isAdmin }) {
   const qc = useQueryClient();
   const [localProcessing, setLocalProcessing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [fetchingTranscript, setFetchingTranscript] = useState(false);
 
   const processOne = useApiMutation('/api/youtube/queue/process-one', {
     invalidate: ['yt-videos']
@@ -1198,6 +1317,36 @@ function VideoRow({ item, isAdmin }) {
     showAlert(html, { title: s.title || 'Summary', icon: '👁️' });
   }
 
+  // Retrieve the transcript for any video — Gemini-sourced or transcript-based —
+  // and show it in a popup. The backend serves a cached copy when available and
+  // otherwise fetches it live, saving it so the next request comes from the DB.
+  async function handleShowTranscript() {
+    setFetchingTranscript(true);
+    let res;
+    try {
+      res = await api(`/api/youtube/videos/${item.video_id}/transcript`);
+    } finally {
+      setFetchingTranscript(false);
+    }
+    if (res?.status !== 'ok' || !res.text) {
+      return showNotification(res?.message || 'No transcript available', 'error');
+    }
+    // A self-contained data: link so the popup can offer a download without a JS
+    // handler (showAlert renders static HTML). BOM keeps UTF-8 happy in editors.
+    const fileName = `${(item.title || item.video_id).replace(/[^\w\-]+/g, '_').slice(0, 60)}_${item.video_id}.txt`;
+    const dataUri = 'data:text/plain;charset=utf-8,' + encodeURIComponent('﻿' + res.text);
+    const html = `
+      <div class="yt-summary-meta" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+        <span>📺 ${escapeHtml(item.channel_name || '—')}</span>
+        <span>📄 ${res.text.length.toLocaleString()} chars${res.cached ? ' · cached' : ''}</span>
+        <span>🔗 <a href="https://youtube.com/watch?v=${escapeHtml(item.video_id)}" target="_blank" rel="noopener">${escapeHtml(item.video_id)}</a></span>
+        <a class="btn btn-secondary btn-sm" href="${dataUri}" download="${escapeHtml(fileName)}" style="margin-left:auto;">⬇ Download</a>
+      </div>
+      <div class="yt-summary-text" style="max-height:55vh;overflow:auto;white-space:pre-wrap;">${escapeHtml(res.text)}</div>
+    `;
+    showAlert(html, { title: item.title || 'Transcript', icon: '📄' });
+  }
+
   async function handleShowError() {
     const res = await api(`/api/youtube/queue/${item.id}`);
     if (res?.status !== 'ok') return showNotification('Failed to load details.', 'error');
@@ -1269,6 +1418,22 @@ function VideoRow({ item, isAdmin }) {
           <span className={`yt-status-badge ${statusClass}`}>{item.status}</span>
         )}
       </td>
+      <td
+        className="text-muted"
+        style={{ whiteSpace: 'nowrap' }}
+        title={
+          item.output_length_percent
+            ? `Summary length target: ${item.output_length_percent}% of transcript`
+            : undefined
+        }
+      >
+        {formatDuration(item.duration_secs)}
+        {item.output_length_percent ? (
+          <span className="yt-filter-tag" style={{ marginLeft: 6 }}>
+            {item.output_length_percent}%
+          </span>
+        ) : null}
+      </td>
       <td>
         {sourceLabel ? (
           <span className="yt-filter-tag">{sourceLabel}</span>
@@ -1306,6 +1471,14 @@ function VideoRow({ item, isAdmin }) {
         )}
       </td>
       <td className="text-muted">{timeAgo(item.created_at)}</td>
+      <td
+        className="text-muted"
+        title="Time the worker spent summarizing this item"
+      >
+        {item.status === 'processing'
+          ? <ProcessingTimer baseSecs={item.processing_secs} />
+          : formatDuration(item.processing_secs)}
+      </td>
       <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div className="yt-actions-cell">
           {item.summary_id && (
@@ -1317,6 +1490,14 @@ function VideoRow({ item, isAdmin }) {
               👁️
             </button>
           )}
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={handleShowTranscript}
+            disabled={fetchingTranscript}
+            title="View transcript"
+          >
+            {fetchingTranscript ? <span className="yt-spin">⟳</span> : '📄'}
+          </button>
           {(item.status === 'pending' || item.status === 'failed') && (
             <button
               className="btn btn-secondary btn-sm"

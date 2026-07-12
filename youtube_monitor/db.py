@@ -3,9 +3,11 @@ Database operations for the YouTube Monitor feature.
 All new tables — does not touch existing tables.
 """
 
+import functools
 import hashlib
 import logging
 import json
+import threading
 from datetime import datetime
 
 import psycopg2
@@ -15,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 # Module-level singleton (set by app.py at startup)
 _yt_db = None
+
+# YouTube Data API daily quota budget (units). Google's default project quota
+# is 10,000 units/day, resetting at midnight Pacific time. Override at startup
+# from config.yaml youtube.daily_quota_limit via set_quota_limit().
+_quota_limit = 10_000
+
+# Fixed quota cost per API call (YouTube Data API v3).
+QUOTA_COST = {'search.list': 100, 'videos.list': 1}
 
 
 def set_yt_db(db):
@@ -26,21 +36,96 @@ def get_yt_db():
     return _yt_db
 
 
+def set_quota_limit(n: int):
+    global _quota_limit
+    try:
+        _quota_limit = int(n)
+    except (TypeError, ValueError):
+        pass
+
+
+def get_quota_limit() -> int:
+    return _quota_limit
+
+
+def record_api_usage(call_type: str, units: int = None, context: str = None,
+                     source: str = None, video_count: int = 0, keyword_id: int = None):
+    """Record one YouTube Data API call against the daily quota. Safe no-op if
+    the DB isn't ready — quota tracking must never break a search."""
+    db = get_yt_db()
+    if db is None:
+        return
+    if units is None:
+        units = QUOTA_COST.get(call_type, 1)
+    db.record_api_usage(call_type, units, context=context, source=source,
+                        video_count=video_count, keyword_id=keyword_id)
+
+
 class YouTubeDB:
     def __init__(self, dsn: str):
         self.dsn = dsn
         self.connection = None
+        # A single shared psycopg2 connection is NOT safe for concurrent use by
+        # the web request handlers and the background scheduler/worker threads.
+        # Interleaved cursors/commits/rollbacks on the same connection can wedge
+        # it (the per-minute keyword scheduler made collisions frequent). This
+        # reentrant lock serializes every public DB operation — see _install_lock.
+        self._lock = threading.RLock()
         self._connect()
         self._create_tables()
+        self._install_lock()
+
+    def _install_lock(self):
+        """Wrap every public method of this instance so it runs while holding
+        self._lock. That makes each operation (get cursor → execute → commit)
+        atomic across threads, so two threads can never interleave on the shared
+        connection. Reentrant, so methods that call other public methods are fine.
+        Private (_-prefixed) helpers like _get_cursor are intentionally left
+        unwrapped — they only ever run inside an already-locked public method."""
+        for name, fn in list(vars(type(self)).items()):
+            if name.startswith('_') or not callable(fn):
+                continue
+
+            def _wrap(method):
+                @functools.wraps(method)
+                def wrapper(*args, **kwargs):
+                    with self._lock:
+                        try:
+                            return method(*args, **kwargs)
+                        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                            # The single shared connection died mid-operation
+                            # (server restart, idle timeout, network blip). The
+                            # failed statement never committed, so reconnecting
+                            # and retrying the whole operation once is safe and
+                            # turns a transient 500 into a successful response.
+                            logger.warning(
+                                f"[YT-DB] Connection error in {method.__name__}: {e!r}; "
+                                f"reconnecting and retrying once")
+                            self._connect()
+                            return method(*args, **kwargs)
+                return wrapper
+
+            setattr(self, name, _wrap(getattr(self, name)))
 
     def _connect(self):
         self.connection = psycopg2.connect(self.dsn)
         self.connection.autocommit = False
 
     def _get_cursor(self):
-        try:
-            self.connection.isolation_level
-        except Exception:
+        # Real liveness check: a connection dropped server-side (idle timeout,
+        # PG restart, network blip) is NOT detected by a cached attribute access
+        # like `isolation_level` — that never touches the socket. `poll()`
+        # round-trips to the server and raises on a dead connection, so we can
+        # reconnect BEFORE issuing the query instead of letting execute() 500.
+        # Mirrors the proven health check in utils/database.py's pool.
+        conn = self.connection
+        healthy = conn is not None and not conn.closed
+        if healthy:
+            try:
+                conn.poll()
+            except Exception:
+                healthy = False
+        if not healthy:
             self._connect()
         try:
             if self.connection.get_transaction_status() != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
@@ -97,6 +182,17 @@ class YouTubeDB:
             )
         """)
 
+        # Per-video transcript cache, decoupled from summaries so any video
+        # (Gemini-sourced, pending, or never summarized) can have its transcript
+        # fetched once and served from the DB on subsequent requests.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_transcripts (
+                video_id    TEXT PRIMARY KEY,
+                text        TEXT NOT NULL,
+                fetched_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS yt_video_queue (
                 id              SERIAL PRIMARY KEY,
@@ -143,6 +239,44 @@ class YouTubeDB:
             )
         """)
 
+        # Per-word last-run tracking. Each individual search term (the main
+        # keyword + every sub-keyword) is scheduled independently so searches
+        # can be spread across the hour instead of bursting all at once.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_keyword_word_runs (
+                keyword_id   INTEGER NOT NULL REFERENCES yt_keywords(id) ON DELETE CASCADE,
+                word         TEXT NOT NULL,
+                last_run_at  TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (keyword_id, word)
+            )
+        """)
+
+        # One-shot migration markers
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_migrations (
+                key         TEXT PRIMARY KEY,
+                applied_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # YouTube Data API quota usage — one row per API call, so the admin
+        # page can show how many of the daily quota units have been burned.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS yt_api_usage (
+                id           SERIAL PRIMARY KEY,
+                call_type    TEXT NOT NULL,        -- 'search.list' | 'videos.list'
+                units        INTEGER NOT NULL,     -- quota units charged by this call
+                context      TEXT,                 -- the word searched / video id
+                source       TEXT,                 -- 'keyword_search' | 'worker' | 'video_chat'
+                video_count  INTEGER DEFAULT 0,    -- videos returned/requested in the call
+                keyword_id   INTEGER,              -- keyword this call belongs to (for yield)
+                created_at   TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS yt_api_usage_created_idx ON yt_api_usage (created_at DESC)"
+        )
+
         # ── Safe column migrations ──────────────────────────────────
         def _ensure_col(table, col, col_type, default=None):
             self.connection.commit()  # flush any prior state before each migration
@@ -165,6 +299,10 @@ class YouTubeDB:
         _ensure_col('yt_keywords', 'schedule_interval_minutes', 'INTEGER')
         _ensure_col('yt_keywords', 'last_run_at', 'TIMESTAMP')
         _ensure_col('yt_keywords', 'sub_keywords', 'JSONB', "'[]'")
+        # Manual priority for quota-aware rotation: 1 = highest .. 5 = lowest.
+        _ensure_col('yt_keywords', 'priority', 'INTEGER', '3')
+        # Link each API call to its keyword so the SEO page can show per-keyword yield.
+        _ensure_col('yt_api_usage', 'keyword_id', 'INTEGER')
         _ensure_col('yt_video_queue', 'telegram_target', 'TEXT')
         _ensure_col('yt_video_queue', 'prompt', 'TEXT')
         _ensure_col('yt_summaries', 'telegram_target', 'TEXT')
@@ -191,11 +329,28 @@ class YouTubeDB:
         # Gemini 2.5 extended-thinking reasoning trace, captured when the
         # YouTube thinking toggle is on (yt_gemini_thinking setting).
         _ensure_col('yt_summaries', 'thoughts', 'TEXT')
+        # Cache the raw transcript text when Strategy 2 (transcript_api) is
+        # used, so the export endpoint can serve it without re-hitting YouTube.
+        _ensure_col('yt_summaries', 'transcript_text', 'TEXT')
 
         # Reference into the global prompts table (type='youtube'). NULL means
         # "use the first available YouTube prompt" — see prompts.resolve_yt_prompt.
         _ensure_col('yt_channels', 'prompt_key', 'TEXT')
         _ensure_col('yt_keywords', 'prompt_key', 'TEXT')
+
+        # Output-length control: target summary length as a percentage of the
+        # source transcript's character count. NULL means "no length constraint".
+        # Resolution order at summarization time: queue row > source channel/
+        # keyword > global default (system_settings 'yt_output_length_percent').
+        _ensure_col('yt_channels', 'output_length_percent', 'INTEGER')
+        _ensure_col('yt_keywords', 'output_length_percent', 'INTEGER')
+        _ensure_col('yt_video_queue', 'output_length_percent', 'INTEGER')
+        _ensure_col('yt_video_queue', 'processing_secs', 'INTEGER')
+        # Forced summarization strategy for a queue item (manual adds let the
+        # user pick): 'gemini_video' or 'transcript_api'. NULL = auto (try the
+        # native video strategy first, fall back to transcript).
+        _ensure_col('yt_video_queue', 'force_method', 'TEXT')
+        _ensure_col('yt_summaries', 'output_length_percent', 'INTEGER')
 
         # Migrate old single telegram_target into new telegram_targets array
         cursor.execute("""
@@ -210,6 +365,18 @@ class YouTubeDB:
             WHERE telegram_target IS NOT NULL AND telegram_target != ''
               AND (telegram_targets IS NULL OR telegram_targets = '[]'::jsonb)
         """)
+
+        # New keywords default to hourly per-word scheduling.
+        cursor.execute(
+            "ALTER TABLE yt_keywords ALTER COLUMN schedule_interval_minutes SET DEFAULT 60"
+        )
+
+        # One-time backfill: switch every existing keyword to hourly per-word
+        # scheduling (each main keyword + sub-keyword searched once per hour).
+        cursor.execute("SELECT 1 FROM yt_migrations WHERE key = %s", ('word_hourly_all_60_v1',))
+        if not cursor.fetchone():
+            cursor.execute("UPDATE yt_keywords SET schedule_interval_minutes = 60")
+            cursor.execute("INSERT INTO yt_migrations (key) VALUES (%s)", ('word_hourly_all_60_v1',))
 
         self.connection.commit()
         logger.info("[YT-DB] YouTube tables created/verified")
@@ -242,8 +409,8 @@ class YouTubeDB:
             INSERT INTO yt_channels (channel_id, channel_name, telegram_targets, prompt_key,
                 min_duration_seconds, max_duration_seconds,
                 title_must_include, title_must_exclude,
-                min_view_count, language, upload_type)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s)
+                min_view_count, language, upload_type, output_length_percent)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
             ON CONFLICT (channel_id) DO UPDATE SET
                 channel_name = COALESCE(EXCLUDED.channel_name, yt_channels.channel_name),
                 telegram_targets = EXCLUDED.telegram_targets,
@@ -254,12 +421,14 @@ class YouTubeDB:
                 title_must_exclude = EXCLUDED.title_must_exclude,
                 min_view_count = EXCLUDED.min_view_count,
                 language = EXCLUDED.language,
-                upload_type = EXCLUDED.upload_type
+                upload_type = EXCLUDED.upload_type,
+                output_length_percent = EXCLUDED.output_length_percent
             RETURNING id
         """, (channel_id, data.get('channel_name'), targets_json, data.get('prompt_key'),
               data.get('min_duration_seconds'), data.get('max_duration_seconds'),
               title_inc, title_exc,
-              data.get('min_view_count', 0), data.get('language'), data.get('upload_type')))
+              data.get('min_view_count', 0), data.get('language'), data.get('upload_type'),
+              data.get('output_length_percent')))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
@@ -274,12 +443,14 @@ class YouTubeDB:
             SET channel_name = %s, telegram_targets = %s::jsonb, prompt_key = %s,
                 min_duration_seconds = %s, max_duration_seconds = %s,
                 title_must_include = %s::jsonb, title_must_exclude = %s::jsonb,
-                min_view_count = %s, language = %s, upload_type = %s
+                min_view_count = %s, language = %s, upload_type = %s,
+                output_length_percent = %s
             WHERE channel_id = %s
         """, (data.get('channel_name'), targets_json, data.get('prompt_key'),
               data.get('min_duration_seconds'), data.get('max_duration_seconds'),
               title_inc, title_exc,
               data.get('min_view_count', 0), data.get('language'), data.get('upload_type'),
+              data.get('output_length_percent'),
               channel_id))
         self.connection.commit()
 
@@ -360,6 +531,28 @@ class YouTubeDB:
             return d
         return None
 
+    def get_channel_activity(self) -> dict:
+        """Per-channel video activity in one pass: count of videos discovered
+        today (server date) and the most-recent video timestamp. Keyed by
+        channel_id. Used by the Schedules page channel-status panel."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT channel_id,
+                   COUNT(*) FILTER (WHERE discovered_at >= CURRENT_DATE) AS videos_today,
+                   MAX(discovered_at) AS last_video_at
+            FROM yt_seen_videos
+            WHERE channel_id IS NOT NULL
+            GROUP BY channel_id
+        """)
+        out = {}
+        for r in cursor.fetchall():
+            last = r['last_video_at']
+            out[r['channel_id']] = {
+                'videos_today': r['videos_today'] or 0,
+                'last_video_at': last.isoformat() if last else None,
+            }
+        return out
+
     # ── yt_keywords ──────────────────────────────────────────────
 
     def get_keywords(self, active_only=False):
@@ -390,8 +583,9 @@ class YouTubeDB:
                 channel_allowlist, channel_blocklist,
                 title_must_include, title_must_exclude,
                 min_view_count, language, upload_type,
-                schedule_interval_minutes, sub_keywords
-            ) VALUES (%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                schedule_interval_minutes, sub_keywords, priority,
+                output_length_percent
+            ) VALUES (%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
             RETURNING id
         """, (
             data['keyword'],
@@ -408,8 +602,10 @@ class YouTubeDB:
             data.get('min_view_count', 0),
             data.get('language'),
             data.get('upload_type', 'video'),
-            data.get('schedule_interval_minutes'),
+            data.get('schedule_interval_minutes') or 60,
             json.dumps(data.get('sub_keywords', [])),
+            data.get('priority') or 3,
+            data.get('output_length_percent'),
         ))
         row = cursor.fetchone()
         self.connection.commit()
@@ -435,7 +631,9 @@ class YouTubeDB:
                 language = %s,
                 upload_type = %s,
                 schedule_interval_minutes = %s,
-                sub_keywords = %s::jsonb
+                sub_keywords = %s::jsonb,
+                priority = %s,
+                output_length_percent = %s
             WHERE id = %s
         """, (
             data['keyword'],
@@ -452,8 +650,10 @@ class YouTubeDB:
             data.get('min_view_count', 0),
             data.get('language'),
             data.get('upload_type', 'video'),
-            data.get('schedule_interval_minutes'),
+            data.get('schedule_interval_minutes') or 60,
             json.dumps(data.get('sub_keywords', [])),
+            data.get('priority') or 3,
+            data.get('output_length_percent'),
             kw_id,
         ))
         self.connection.commit()
@@ -500,6 +700,195 @@ class YouTubeDB:
             if not r.get('telegram_targets'):
                 r['telegram_targets'] = [r['telegram_target']] if r.get('telegram_target') else []
         return rows
+
+    def get_due_keyword_words(self, limit: int = 1):
+        """Return the most-overdue individual search words across all active
+        keywords (main keyword + each sub-keyword) whose per-word interval has
+        elapsed. Callers run only a few per scheduler tick, so search.list calls
+        are spread across the hour instead of bursting together.
+        Each row: {'keyword_id': int, 'word': str}."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            WITH words AS (
+                SELECT k.id AS keyword_id,
+                       k.keyword AS word,
+                       k.schedule_interval_minutes AS interval_min
+                FROM yt_keywords k
+                WHERE k.active = TRUE
+                UNION ALL
+                SELECT k.id,
+                       sk.value,
+                       k.schedule_interval_minutes
+                FROM yt_keywords k,
+                     jsonb_array_elements_text(COALESCE(k.sub_keywords, '[]'::jsonb)) AS sk(value)
+                WHERE k.active = TRUE
+            )
+            SELECT w.keyword_id, w.word
+            FROM words w
+            LEFT JOIN yt_keyword_word_runs r
+                   ON r.keyword_id = w.keyword_id AND r.word = w.word
+            WHERE w.word IS NOT NULL AND w.word <> ''
+              AND (w.interval_min IS NULL OR w.interval_min > 0)
+              AND (r.last_run_at IS NULL
+                   OR r.last_run_at + (COALESCE(w.interval_min, 60) || ' minutes')::INTERVAL <= NOW())
+            ORDER BY r.last_run_at ASC NULLS FIRST
+            LIMIT %s
+        """, (limit,))
+        return [dict(r) for r in cursor.fetchall()]
+
+    def update_word_last_run(self, keyword_id: int, word: str):
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO yt_keyword_word_runs (keyword_id, word, last_run_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (keyword_id, word) DO UPDATE SET last_run_at = NOW()
+        """, (keyword_id, word))
+        self.connection.commit()
+
+    def get_active_words(self) -> list:
+        """Every individual search word (main keyword + each sub-keyword) of all
+        active keywords, with its interval, priority, and minutes since last run
+        (age_min is None if never run). Used for budget-aware rotation."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            WITH words AS (
+                SELECT k.id AS keyword_id, k.keyword AS word,
+                       k.schedule_interval_minutes AS interval_min,
+                       COALESCE(k.priority, 3) AS priority
+                FROM yt_keywords k
+                WHERE k.active = TRUE
+                UNION ALL
+                SELECT k.id, sk.value, k.schedule_interval_minutes, COALESCE(k.priority, 3)
+                FROM yt_keywords k,
+                     jsonb_array_elements_text(COALESCE(k.sub_keywords, '[]'::jsonb)) AS sk(value)
+                WHERE k.active = TRUE
+            )
+            SELECT w.keyword_id, w.word, w.interval_min, w.priority,
+                   EXTRACT(EPOCH FROM (NOW() - r.last_run_at)) / 60.0 AS age_min
+            FROM words w
+            LEFT JOIN yt_keyword_word_runs r
+                   ON r.keyword_id = w.keyword_id AND r.word = w.word
+            WHERE w.word IS NOT NULL AND w.word <> ''
+        """)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_keyword_yield(self, days: int = 7) -> dict:
+        """Per-keyword search yield over the last N days, from recorded API calls.
+        Returns {keyword_id: {'searches': int, 'found': int, 'yield': float}}."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT keyword_id,
+                   COUNT(*)                      AS searches,
+                   COALESCE(SUM(video_count), 0) AS found
+            FROM yt_api_usage
+            WHERE call_type = 'search.list'
+              AND keyword_id IS NOT NULL
+              AND created_at >= NOW() - (%s || ' days')::INTERVAL
+            GROUP BY keyword_id
+        """, (str(days),))
+        out = {}
+        for r in cursor.fetchall():
+            searches = r['searches'] or 0
+            found = r['found'] or 0
+            out[r['keyword_id']] = {
+                'searches': searches,
+                'found': found,
+                'yield': (found / searches) if searches else 0.0,
+            }
+        return out
+
+    def get_keyword_searches_today(self) -> dict:
+        """Count of search.list calls per keyword since local midnight today.
+        Returns {keyword_id: searches_done_today}. Used for the Schedules
+        'Summary' tab (sent vs remaining)."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT keyword_id, COUNT(*) AS searches
+            FROM yt_api_usage
+            WHERE call_type = 'search.list'
+              AND keyword_id IS NOT NULL
+              AND created_at >= CURRENT_DATE
+            GROUP BY keyword_id
+        """)
+        return {r['keyword_id']: (r['searches'] or 0) for r in cursor.fetchall()}
+
+    # ── yt_api_usage (YouTube Data API quota tracking) ──────────
+
+    def record_api_usage(self, call_type: str, units: int, context: str = None,
+                         source: str = None, video_count: int = 0, keyword_id: int = None):
+        """Insert one API-call usage row. Wrapped so a tracking failure never
+        propagates into the search/worker code path."""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute("""
+                INSERT INTO yt_api_usage (call_type, units, context, source, video_count, keyword_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (call_type, units, context, source, video_count, keyword_id))
+            self.connection.commit()
+        except Exception as e:
+            logger.error(f"[YT-DB] record_api_usage failed: {e}")
+
+    def get_quota_today(self) -> dict:
+        """Units used since midnight Pacific (YouTube's quota reset boundary)."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT
+                COALESCE(SUM(units), 0)                                                  AS units,
+                COALESCE(SUM(CASE WHEN call_type = 'search.list' THEN 1 ELSE 0 END), 0)  AS search_calls,
+                COALESCE(SUM(CASE WHEN call_type = 'videos.list' THEN 1 ELSE 0 END), 0)  AS video_calls,
+                COUNT(*)                                                                 AS total_calls
+            FROM yt_api_usage
+            WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'America/Los_Angeles')
+                                AT TIME ZONE 'America/Los_Angeles'
+        """)
+        return dict(cursor.fetchone())
+
+    def get_hourly_api_usage(self, hours: int = 24) -> list:
+        """Per-hour quota usage for the last N hours (hour labels in Beirut time)."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT
+                date_trunc('hour', created_at AT TIME ZONE 'Asia/Beirut')               AS hour_lbn,
+                COALESCE(SUM(units), 0)                                                  AS units,
+                COALESCE(SUM(CASE WHEN call_type = 'search.list' THEN 1 ELSE 0 END), 0)  AS search_calls,
+                COALESCE(SUM(CASE WHEN call_type = 'videos.list' THEN 1 ELSE 0 END), 0)  AS video_calls
+            FROM yt_api_usage
+            WHERE created_at >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1
+            ORDER BY 1 DESC
+        """, (str(hours),))
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_ai_usage_history(self, date_from: str, date_to: str, granularity: str = 'day') -> list:
+        """Per-bucket (day|month) YouTube summarization runs + Gemini token totals
+        between two dates (inclusive). For the admin AI Usage history section.
+        YouTube has no per-user ownership — all usage counts as admin-owned."""
+        gran = granularity if granularity in ('day', 'month') else 'day'
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT DATE_TRUNC(%s, created_at)::date AS bucket,
+                   COUNT(*)                          AS runs,
+                   SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
+            FROM yt_summaries
+            WHERE created_at::date BETWEEN %s AND %s
+            GROUP BY 1 ORDER BY 1
+        """, (gran, date_from, date_to))
+        out = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            d['bucket'] = d['bucket'].isoformat() if d['bucket'] else None
+            out.append(d)
+        return out
+
+    def get_recent_api_calls(self, limit: int = 100) -> list:
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT id, call_type, units, context, source, video_count, created_at
+            FROM yt_api_usage
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        return [dict(r) for r in cursor.fetchall()]
 
     # ── yt_blocked_channels ─────────────────────────────────────
 
@@ -585,11 +974,14 @@ class YouTubeDB:
 
     # ── yt_video_queue ───────────────────────────────────────────
 
-    def is_video_already_queued_or_summarized(self, video_id: str, prompt: str = None) -> str | None:
+    def is_video_already_queued_or_summarized(self, video_id: str, prompt: str = None,
+                                              check_summarized: bool = True) -> str | None:
         """Return a reason string if the video is already queued or summarized, else None.
 
         The 'already summarized' check is scoped to (video_id, prompt_hash) so that
-        changing the prompt allows re-processing the same video.
+        changing the prompt allows re-processing the same video. Pass
+        check_summarized=False (manual re-runs) to allow summarizing a video that
+        already has a summary — only the live queue (pending/processing) blocks.
         """
         cursor = self._get_cursor()
         # Check if already in the queue (pending or processing) regardless of prompt
@@ -601,6 +993,8 @@ class YouTubeDB:
         row = cursor.fetchone()
         if row:
             return f"already in queue ({row['status']})"
+        if not check_summarized:
+            return None
         # Check if already summarized with the same prompt
         if prompt:
             ph = hashlib.md5(prompt.encode('utf-8')).hexdigest()
@@ -618,17 +1012,22 @@ class YouTubeDB:
 
     def enqueue_video(self, video_id: str, telegram_target: str = None, prompt: str = None,
                       source_channel_id: str = None, source_keyword_id: int = None,
-                      added_by_user_id: int = None):
-        reason = self.is_video_already_queued_or_summarized(video_id, prompt=prompt)
+                      added_by_user_id: int = None, output_length_percent: int = None,
+                      force_method: str = None, allow_resummarize: bool = False):
+        # Manual re-runs (allow_resummarize) only block on a live queue entry, so
+        # the same video can be summarized again — possibly with a different
+        # method/prompt. Monitoring keeps the stricter "already summarized" guard.
+        reason = self.is_video_already_queued_or_summarized(
+            video_id, prompt=prompt, check_summarized=not allow_resummarize)
         if reason:
             logger.info(f"[YT-DB] Skipping enqueue for {video_id}: {reason}")
             return None
         cursor = self._get_cursor()
         cursor.execute("""
-            INSERT INTO yt_video_queue (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO yt_video_queue (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id, output_length_percent, force_method)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id))
+        """, (video_id, telegram_target, prompt, source_channel_id, source_keyword_id, added_by_user_id, output_length_percent, force_method))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
@@ -666,7 +1065,8 @@ class YouTubeDB:
         self.connection.commit()
         return won
 
-    def update_queue_status(self, queue_id: int, status: str, error_log: str = None):
+    def update_queue_status(self, queue_id: int, status: str, error_log: str = None,
+                            processing_secs: int = None):
         cursor = self._get_cursor()
         processed = datetime.utcnow() if status in ('done', 'failed') else None
         # Only increment attempts on done/failed, not on 'processing' transition
@@ -674,9 +1074,10 @@ class YouTubeDB:
             cursor.execute("""
                 UPDATE yt_video_queue
                 SET status = %s, error_log = %s, attempts = attempts + 1,
-                    processed_at = %s, updated_at = NOW()
+                    processed_at = %s, updated_at = NOW(),
+                    processing_secs = COALESCE(%s, processing_secs)
                 WHERE id = %s
-            """, (status, error_log, processed, queue_id))
+            """, (status, error_log, processed, processing_secs, queue_id))
         else:
             cursor.execute("""
                 UPDATE yt_video_queue
@@ -754,8 +1155,7 @@ class YouTubeDB:
             cursor.execute("""
                 SELECT
                     COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE s.transcript_source = 'transcript_api') AS transcript,
-                    COUNT(*) FILTER (WHERE s.transcript_source = 'metadata') AS metadata
+                    COUNT(*) FILTER (WHERE s.transcript_source = 'transcript_api') AS transcript
                 FROM yt_summaries s
                 WHERE s.created_at >= CURRENT_DATE
                   AND EXISTS (
@@ -769,8 +1169,7 @@ class YouTubeDB:
             cursor.execute("""
                 SELECT
                     COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE transcript_source = 'transcript_api') AS transcript,
-                    COUNT(*) FILTER (WHERE transcript_source = 'metadata') AS metadata
+                    COUNT(*) FILTER (WHERE transcript_source = 'transcript_api') AS transcript
                 FROM yt_summaries
                 WHERE created_at >= CURRENT_DATE
             """)
@@ -803,7 +1202,6 @@ class YouTubeDB:
             'daily': {
                 'summaries': daily.get('total', 0),
                 'transcript': daily.get('transcript', 0),
-                'metadata': daily.get('metadata', 0),
                 'processed': daily_queue.get('processed_today', 0),
                 'failed': daily_queue.get('failed_today', 0),
                 'queued': daily_queue.get('queued_today', 0),
@@ -980,8 +1378,7 @@ class YouTubeDB:
     def get_videos_unified(self, limit: int = 50, offset: int = 0,
                            status_filter: str = None, channel_filter: str = None,
                            source_filter: str = None, keyword_filter: str = None,
-                           date_from: str = None,
-                           date_to: str = None,
+                           date_from: str = None, date_to: str = None,
                            yt_ch_ids=None, kw_ids=None, user_id=None):
         """Return queue items joined with their summaries in one unified view with pagination.
 
@@ -1016,6 +1413,9 @@ class YouTubeDB:
         if source_filter:
             clauses.append("s.transcript_source = %s")
             params.append(source_filter)
+        if keyword_filter:
+            clauses.append("kw.keyword ILIKE %s")
+            params.append(f"%{keyword_filter}%")
         if date_from:
             clauses.append("q.created_at >= %s::date")
             params.append(date_from)
@@ -1032,7 +1432,8 @@ class YouTubeDB:
             LEFT JOIN yt_keywords kw ON q.source_keyword_id = kw.id
             LEFT JOIN LATERAL (
                 SELECT id, title, channel_name, transcript_source, summary_text,
-                       telegram_sent, duration_secs, input_tokens, output_tokens
+                       telegram_sent, duration_secs, input_tokens, output_tokens,
+                       output_length_percent
                 FROM yt_summaries
                 WHERE video_id = q.video_id
                 ORDER BY created_at DESC LIMIT 1
@@ -1051,10 +1452,14 @@ class YouTubeDB:
         cursor.execute(f"""
             SELECT q.id, q.video_id, q.telegram_target, q.status, q.attempts,
                    q.error_log, q.created_at, q.processed_at,
+                   CASE WHEN q.status = 'processing' AND q.updated_at IS NOT NULL
+                        THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW() - q.updated_at))::int)
+                        ELSE q.processing_secs END AS processing_secs,
                    COALESCE(sv.title, s.title, q.video_id) AS title,
                    COALESCE(ch.channel_name, s.channel_name, sv.channel_id) AS channel_name,
                    s.id AS summary_id, s.transcript_source, s.summary_text,
                    s.telegram_sent, s.duration_secs, s.input_tokens, s.output_tokens,
+                   COALESCE(s.output_length_percent, q.output_length_percent) AS output_length_percent,
                    q.source_keyword_id,
                    kw.keyword AS source_keyword_name,
                    q.source_channel_id
@@ -1076,21 +1481,55 @@ class YouTubeDB:
                      published_at, transcript_source: str, summary_text: str,
                      telegram_target: str = None,
                      duration_secs: int = None, input_tokens: int = None, output_tokens: int = None,
-                     prompt: str = None, thoughts: str = None):
+                     prompt: str = None, thoughts: str = None,
+                     transcript_text: str = None,
+                     output_length_percent: int = None):
         prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
-                 telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash, thoughts)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
+                 thoughts, transcript_text, output_length_percent)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
               telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-              thoughts or None))
+              thoughts or None, transcript_text, output_length_percent))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
+
+    def get_cached_transcript(self, video_id: str) -> str | None:
+        """Return a cached transcript for a video, or None.
+
+        Checks the dedicated yt_transcripts cache first, then falls back to the
+        legacy transcript_text saved on transcript_api summaries (so transcripts
+        captured before the dedicated cache existed still serve from the DB)."""
+        cursor = self._get_cursor()
+        cursor.execute("SELECT text FROM yt_transcripts WHERE video_id = %s", (video_id,))
+        row = cursor.fetchone()
+        if row:
+            return row['text']
+        cursor.execute("""
+            SELECT transcript_text FROM yt_summaries
+            WHERE video_id = %s AND transcript_text IS NOT NULL
+            ORDER BY created_at DESC LIMIT 1
+        """, (video_id,))
+        row = cursor.fetchone()
+        return row['transcript_text'] if row else None
+
+    def cache_transcript(self, video_id: str, text: str):
+        """Upsert a fetched transcript into the dedicated cache so subsequent
+        retrievals serve from the DB instead of re-hitting YouTube."""
+        cursor = self._get_cursor()
+        cursor.execute("""
+            INSERT INTO yt_transcripts (video_id, text)
+            VALUES (%s, %s)
+            ON CONFLICT (video_id) DO UPDATE
+                SET text = EXCLUDED.text, fetched_at = NOW()
+        """, (video_id, text))
+        self.connection.commit()
 
     def mark_telegram_sent(self, summary_id: int):
         cursor = self._get_cursor()
@@ -1208,6 +1647,13 @@ class YouTubeDB:
     def clear_queue(self):
         cursor = self._get_cursor()
         cursor.execute("DELETE FROM yt_video_queue")
+        deleted = cursor.rowcount
+        self.connection.commit()
+        return deleted
+
+    def delete_queue_items_by_status(self, status: str) -> int:
+        cursor = self._get_cursor()
+        cursor.execute("DELETE FROM yt_video_queue WHERE status = %s", (status,))
         deleted = cursor.rowcount
         self.connection.commit()
         return deleted

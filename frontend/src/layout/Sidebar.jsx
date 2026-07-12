@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { useGlobalConfig } from '../config/ConfigProvider';
-import SidebarSearch from './SidebarSearch';
 
 const THEME_KEY = 'theme';
 // Match the legacy localStorage keys so a user's saved sidebar state
@@ -30,7 +29,7 @@ export default function Sidebar() {
   const { user, isAdmin, logout } = useAuth();
   const { config } = useGlobalConfig();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark');
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'light');
   const sidebarRef = useRef(null);
 
   useEffect(() => {
@@ -118,8 +117,6 @@ export default function Sidebar() {
         </div>
       </div>
 
-      <SidebarSearch />
-
       <nav className="sidebar-nav">
         <NavItem to="/" icon="🔌" label="Main Dashboard" end />
         {/* Telegram Setup was a separate page in legacy; merged into Profile now. */}
@@ -130,7 +127,7 @@ export default function Sidebar() {
             <span className="nav-section-label">Summaries</span>
             <NavItem to="/dashboard" icon="📊" label="Summaries Dashboard" />
             <NavItem to="/bots" icon="🤖" label="Summaries Bots" badge={Object.keys(bots).length} />
-            <NavItem to="/seos" icon="🔍" label="SEOs" />
+            <NavItem to="/seos" icon="🏷️" label="SEOs" />
             <NavItem to="/monitor" icon="📡" label="Schedules Monitor" />
           </>
         )}
@@ -143,6 +140,7 @@ export default function Sidebar() {
             <NavItem to="/yt-videos" icon="📋" label="Youtube Dashboard" />
             <NavItem to="/yt-channels" icon="📺" label="Youtube Channels" />
             <NavItem to="/yt-keywords" icon="🔎" label="YouTube SEOs" />
+            {isAdmin && <NavItem to="/yt-schedules" icon="🗓️" label="Youtube Schedules" />}
             <NavItem to="/youtube-prompts" icon="📝" label="Youtube Prompts" />
           </>
         )}
@@ -169,6 +167,7 @@ export default function Sidebar() {
             <NavItem to="/tg-tester" icon="🧪" label="TG Tester" />
             <NavItem to="/logs" icon="📋" label="Logs" />
             <NavItem to="/ai-usage" icon="⚡" label="AI Usage" />
+            <NavItem to="/youtube-quota" icon="📺" label="YouTube Quota" />
           </>
         )}
       </nav>

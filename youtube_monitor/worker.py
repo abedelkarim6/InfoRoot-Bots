@@ -6,12 +6,15 @@ sends results via Telegram, and marks items done/failed.
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 
 import google.genai as genai
 from google.genai import types
 
-from youtube_monitor.db import get_yt_db
+from youtube_monitor import transcript_api
+from youtube_monitor.db import get_yt_db, record_api_usage
+from utils.gemini_models import get_gemini_model
 from youtube_monitor.keyword_search import _parse_duration
 from youtube_monitor.prompts import (
     DEFAULT_PROMPT,
@@ -19,7 +22,12 @@ from youtube_monitor.prompts import (
     _get_fixed_prefix_video,
     _get_fixed_prefix_transcript,
     _get_global_prompt,
+    build_length_directive,
 )
+
+# Rough speech density used only as a fallback when no transcript is available
+# but an output-length percentage is requested — ~150 wpm × ~4.7 chars/word.
+_CHARS_PER_SEC = 14
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +135,7 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
     Returns (summary_text, input_tokens, output_tokens, thoughts)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
-        model='gemini-2.5-flash',
+        model=get_gemini_model(),
         contents=types.Content(
             role="user",
             parts=[
@@ -142,9 +150,9 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
     return answer, inp, out, thoughts
 
 
-def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int, str]:
-    """Strategy 2: Fetch transcript via youtube-transcript-api, send text to Gemini.
-    Returns (summary_text, input_tokens, output_tokens, thoughts)."""
+def _fetch_transcript_text(video_id: str) -> str:
+    """Fetch the full transcript text for a video via youtube-transcript-api.
+    Raises if no transcript is available."""
     from youtube_transcript_api import YouTubeTranscriptApi
 
     ytt_api = YouTubeTranscriptApi()
@@ -156,37 +164,91 @@ def _summarize_via_transcript(video_id: str, prompt: str) -> tuple[str, int, int
         if not available:
             raise
         transcript_list = available[0].fetch()
-    full_text = ' '.join(entry.text for entry in transcript_list)
+    return '\n'.join(entry.text for entry in transcript_list)
 
-    if len(full_text) > 30_000:
-        full_text = full_text[:30000] + "... [truncated]"
+
+def _get_transcript_cached(video_id: str) -> str | None:
+    """Return the transcript for a video, serving the DB cache first and
+    otherwise fetching live and caching it. Returns None if unavailable.
+
+    Called up front for every queue item so the transcript character count is
+    always known (it's the basis for the output-length percentage) — even when
+    Strategy 1 (native Gemini video) ends up producing the summary."""
+    db = get_yt_db()
+    cached = db.get_cached_transcript(video_id)
+    if cached:
+        return cached
+    try:
+        text = _fetch_transcript_text(video_id)
+    except Exception as e:
+        logger.info(f"[YT-WORKER] No transcript available for {video_id}: {e}")
+        return None
+    if text:
+        try:
+            db.cache_transcript(video_id, text)
+        except Exception:
+            pass
+    return text
+
+
+async def _fetch_external_video(video_id: str) -> dict | None:
+    """Fetch transcript + metadata from the external transcript API.
+
+    Runs the synchronous client in a thread and handles a single rate-limit
+    backoff (503 → wait retry_after → retry once). Returns the video dict or
+    None when the API is unconfigured, rate-limited twice, or errors."""
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, transcript_api.fetch_video, video_id)
+    except transcript_api.TranscriptApiRateLimited as e:
+        wait = e.retry_after or 40
+        logger.info(f"[YT-WORKER] Transcript API rate-limited for {video_id}; "
+                    f"waiting {wait}s then retrying once")
+        await asyncio.sleep(wait)
+        try:
+            return await loop.run_in_executor(None, transcript_api.fetch_video, video_id)
+        except Exception as e2:
+            logger.warning(f"[YT-WORKER] Transcript API retry failed for {video_id}: {e2}")
+            return None
+    except Exception as e:
+        logger.warning(f"[YT-WORKER] Transcript API error for {video_id}: {e}")
+        return None
+
+
+def _summarize_via_transcript(video_id: str, prompt: str,
+                              transcript_text: str = None) -> tuple[str, str, int, int, str]:
+    """Strategy 2: send transcript text to Gemini.
+    Returns (summary_text, transcript_text, input_tokens, output_tokens, thoughts).
+    The returned transcript_text is the full (untruncated) raw text so it can
+    be cached for later export — the prompt itself still gets truncated.
+    A pre-fetched transcript can be passed to avoid a second YouTube round-trip.
+    `thoughts` is the Gemini reasoning trace (empty unless the YouTube thinking
+    toggle is on)."""
+    full_text = transcript_text if transcript_text is not None else _fetch_transcript_text(video_id)
+
+    prompt_text = full_text
+    if len(prompt_text) > 30_000:
+        prompt_text = prompt_text[:30000] + "... [truncated]"
 
     # If the prompt already has a {transcript} placeholder (from the fixed prefix),
     # replace it in-place; otherwise fall back to appending the transcript at the end.
     if '{transcript}' in prompt:
-        final_prompt = prompt.replace('{transcript}', full_text)
+        final_prompt = prompt.replace('{transcript}', prompt_text)
     else:
-        final_prompt = prompt + f"\n\nVideo transcript:\n\n{full_text}"
+        final_prompt = prompt + f"\n\nVideo transcript:\n\n{prompt_text}"
 
     response = _gemini_client.models.generate_content(
-        model='gemini-2.5-flash',
+        model=get_gemini_model(),
         contents={'text': final_prompt},
         config=_yt_gen_config(),
     )
     inp, out = _extract_tokens(response)
     answer, thoughts = _split_response_parts(response)
-    return answer, inp, out, thoughts
+    return answer, full_text, inp, out, thoughts
 
 
-# Per-strategy processing timeout (seconds). Gemini video can be slow but
-# rarely > 3 min. Two strategies run sequentially in the worst case so the
-# outer scheduler budget below has to accommodate both.
+# Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
 _ITEM_TIMEOUT_SECS = 180
-# Outer budget for one full queue item: both strategies + Telegram send +
-# safety buffer. The previous value (_ITEM_TIMEOUT_SECS + 30 = 210s) was
-# tighter than the inner budgets and could cancel mid-delivery, producing
-# duplicate sends after stuck-row reset.
-_OUTER_ITEM_TIMEOUT_SECS = 2 * _ITEM_TIMEOUT_SECS + 60  # 420s
 
 
 
@@ -206,27 +268,7 @@ def _fetch_video_metadata(video_id: str) -> dict:
         logger.warning("[YT-WORKER] youtube.data_api_key not set — cannot fetch metadata")
         return {}
     youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
-    try:
-        resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
-    except HttpError as e:
-        # quotaExceeded is the common case; surface it specifically so logs
-        # are obvious. Any other HttpError also degrades to "no metadata".
-        reason = ""
-        try:
-            reason = (e.error_details or [{}])[0].get('reason', '')
-        except Exception:
-            pass
-        if e.resp.status == 403 and 'quota' in (reason or str(e)).lower():
-            logger.warning(f"[YT-WORKER] YouTube Data API quota exceeded — "
-                            f"proceeding without metadata for {video_id}")
-        else:
-            logger.warning(f"[YT-WORKER] YouTube Data API error for {video_id} "
-                            f"({e.resp.status} {reason}) — proceeding without metadata")
-        return {}
-    except Exception as e:
-        logger.warning(f"[YT-WORKER] Unexpected metadata fetch error for {video_id}: {e} "
-                        f"— proceeding without metadata")
-        return {}
+    resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
     items = resp.get('items', [])
     if items:
         item = items[0]
@@ -237,6 +279,8 @@ def _fetch_video_metadata(video_id: str) -> dict:
             'channel_name': s.get('channelTitle', ''),
             'published_at': s.get('publishedAt'),
             'tags': s.get('tags', []),
+            'language': s.get('defaultAudioLanguage') or s.get('defaultLanguage'),
+            'live_broadcast_content': s.get('liveBroadcastContent'),
         }
         cd = item.get('contentDetails', {})
         if cd.get('duration'):
@@ -244,8 +288,44 @@ def _fetch_video_metadata(video_id: str) -> dict:
         st = item.get('statistics', {})
         if st.get('viewCount'):
             result['view_count'] = int(st['viewCount'])
+        lsd = item.get('liveStreamingDetails') or {}
+        if lsd.get('actualEndTime'):
+            result['actual_end_time'] = lsd['actualEndTime']
         return result
     return {}
+
+
+def _resolve_output_length_percent(db, queue_item: dict,
+                                   source_channel_id: str = None,
+                                   source_keyword_id: int = None) -> int | None:
+    """Resolve the output-length percentage for a queue item.
+
+    Most-specific wins: the queue row (manual add) overrides the source
+    channel/keyword setting, which overrides the global default stored in
+    system_settings under 'yt_output_length_percent'. None at every level
+    means no length constraint."""
+    pct = queue_item.get('output_length_percent')
+    if pct:
+        return int(pct)
+
+    if source_keyword_id:
+        kw = db.get_keyword_by_id(source_keyword_id)
+        if kw and kw.get('output_length_percent'):
+            return int(kw['output_length_percent'])
+    if source_channel_id:
+        ch = db.get_channel_by_yt_id(source_channel_id)
+        if ch and ch.get('output_length_percent'):
+            return int(ch['output_length_percent'])
+
+    try:
+        from utils.database import get_db
+        val = get_db().get_setting('yt_output_length_percent') or {}
+        gpct = val.get('percent') if isinstance(val, dict) else val
+        if gpct:
+            return int(gpct)
+    except Exception:
+        pass
+    return None
 
 
 async def process_queue_item(queue_item: dict) -> bool:
@@ -262,6 +342,10 @@ async def process_queue_item(queue_item: dict) -> bool:
     queue_id = queue_item['id']
     video_id = queue_item['video_id']
     telegram_target = queue_item.get('telegram_target')
+    # Optional user-forced strategy (manual adds): 'gemini_video' or
+    # 'transcript_api'. When set, only that strategy runs — no fallback.
+    force_method = queue_item.get('force_method')
+    t_start = time.monotonic()
 
     # Atomically claim the item (pending → processing). If another run — e.g.
     # the scheduler and a manual /queue/process trigger picking overlapping
@@ -290,24 +374,79 @@ async def process_queue_item(queue_item: dict) -> bool:
     # Per-item prompt from the queue row, fall back to global config prompt
     user_prompt = queue_item.get('prompt') or _get_global_prompt()
 
-    # Fetch metadata for all tiers
-    meta = _fetch_video_metadata(video_id)
+    # Fetch transcript + metadata up front — even when Strategy 1 (native Gemini
+    # video) will produce the summary — so the transcript char count can serve as
+    # the basis for the output-length percentage, and so it's cached for export.
+    #
+    # Primary source is the external transcript API (headless scraper): one call
+    # returns both transcript and metadata, and unlike the gated library it isn't
+    # IP-blocked. The DB cache is served first; metadata falls back to the Data
+    # API and the transcript to the library when the scraper is off or empty.
+    transcript_full = db.get_cached_transcript(video_id)
+    ext_meta = {}
+    if transcript_api.is_configured():
+        external_video = await _fetch_external_video(video_id)
+        if external_video:
+            ext_meta = transcript_api.extract_metadata(external_video)
+            if not transcript_full:
+                ext_text = transcript_api.extract_transcript_text(external_video)
+                if ext_text:
+                    transcript_full = ext_text
+                    try:
+                        db.cache_transcript(video_id, ext_text)
+                    except Exception:
+                        logger.warning(f"[YT-WORKER] Failed to cache transcript for {video_id}")
+            logger.info(f"[YT-WORKER] Transcript API returned for {video_id} "
+                        f"(transcript chars={len(transcript_full or '')})")
+
+    # Metadata: prefer the external scraper; fall back to the YouTube Data API.
+    meta = ext_meta or _fetch_video_metadata(video_id)
     title = meta.get('title', video_id)
     channel_name = meta.get('channel_name', '')
     published_at = meta.get('published_at')
     tags = meta.get('tags', [])
     description = meta.get('description', '')
 
+    # Compute duration_secs unconditionally (needed for video-hour tracking).
+    # The external API returns duration_seconds (int); the Data API returns an
+    # ISO-8601 duration string — handle whichever the metadata source provided.
+    if meta.get('duration_seconds'):
+        duration_secs = int(meta['duration_seconds'])
+    elif meta.get('duration'):
+        duration_secs = _parse_duration(meta['duration'])
+    else:
+        duration_secs = 0
+
+    # Library last-resort fallback for the transcript (cache-first inside).
+    if not transcript_full:
+        transcript_full = _get_transcript_cached(video_id)
+
+    # Resolve the output-length percentage: queue row > source channel/keyword
+    # > global default. None at every level means "no length constraint".
+    output_length_percent = _resolve_output_length_percent(db, queue_item,
+                                                            source_channel_id, source_keyword_id)
+
+    # Build a length directive from the transcript char count (fall back to a
+    # duration-based estimate when no transcript is available).
+    length_directive = ""
+    if output_length_percent:
+        base_chars = len(transcript_full) if transcript_full else int(duration_secs * _CHARS_PER_SEC)
+        if base_chars > 0:
+            target_chars = int(base_chars * output_length_percent / 100)
+            length_directive = build_length_directive(
+                target_chars, output_length_percent,
+                duration_secs=duration_secs, source_chars=base_chars)
+            logger.info(f"[YT-WORKER] {video_id}: output length {output_length_percent}% of "
+                        f"{base_chars} chars → ~{target_chars} chars")
+    user_prompt_with_len = user_prompt + length_directive
+
     # Build the two strategy-specific prompts (fixed prefix + user prompt, metadata injected).
     # {transcript} in the transcript prompt is resolved inside _summarize_via_transcript.
     video_link = f"https://www.youtube.com/watch?v={video_id}"
-    prompt_video      = _build_yt_prompt(_get_fixed_prefix_video(),      user_prompt,
+    prompt_video      = _build_yt_prompt(_get_fixed_prefix_video(),      user_prompt_with_len,
                                          title, channel_name, video_link)
-    prompt_transcript = _build_yt_prompt(_get_fixed_prefix_transcript(), user_prompt,
+    prompt_transcript = _build_yt_prompt(_get_fixed_prefix_transcript(), user_prompt_with_len,
                                          title, channel_name, video_link)
-
-    # Compute duration_secs unconditionally (needed for video-hour tracking)
-    duration_secs = _parse_duration(meta.get('duration')) if meta.get('duration') else 0
 
     # Apply channel-level duration/view filters (title filters already applied in WebSub)
     if source_channel_id:
@@ -337,6 +476,9 @@ async def process_queue_item(queue_item: dict) -> bool:
 
     summary_text = None
     transcript_source = None
+    # Persist the transcript we already fetched (if any) regardless of which
+    # strategy ultimately produces the summary.
+    transcript_text = transcript_full
     inp_tokens = 0
     out_tokens = 0
     thoughts = ''  # Gemini reasoning trace — populated when thinking is enabled
@@ -344,26 +486,30 @@ async def process_queue_item(queue_item: dict) -> bool:
     strat2_err = None  # Transcript reason-for-failure
 
     # Strategy 1: Gemini native video (URL) — best quality, sees/hears actual content
-    # Guard: skip if daily 8-hour video quota is exhausted
-    _video_allowed = True
-    try:
-        from utils.gemini_usage import get_gemini_video_seconds_used, VIDEO_SECS_LIMIT
-        if get_gemini_video_seconds_used() + duration_secs > VIDEO_SECS_LIMIT:
-            logger.warning(f"[YT-WORKER] Daily video-hour quota reached — skipping native video for {video_id}")
-            _video_allowed = False
-    except Exception:
-        pass
+    # Guard: skip if daily 8-hour video quota is exhausted, or if the user forced
+    # the transcript-only strategy for this item.
+    _video_allowed = force_method != 'transcript_api'
+    if _video_allowed:
+        try:
+            from utils.gemini_usage import get_gemini_video_seconds_used, VIDEO_SECS_LIMIT
+            if get_gemini_video_seconds_used() + duration_secs > VIDEO_SECS_LIMIT:
+                logger.warning(f"[YT-WORKER] Daily video-hour quota reached — skipping native video for {video_id}")
+                _video_allowed = False
+        except Exception:
+            pass
 
     loop = asyncio.get_event_loop()
+    t_s1 = time.monotonic()
     try:
         if not _video_allowed:
-            raise RuntimeError("Daily Gemini video-hour quota reached")
+            raise RuntimeError("Daily video-hour quota reached")
         summary_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
             loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
         )
         transcript_source = 'gemini_video'
-        logger.info(f"[YT-WORKER] Strategy 1 (gemini video) success for {video_id}")
+        logger.info(f"[YT-WORKER] Strategy 1 (gemini video) success for {video_id} "
+                    f"in {time.monotonic() - t_s1:.1f}s")
         try:
             from utils.gemini_usage import record_gemini_request, record_gemini_video_seconds
             record_gemini_video_seconds(duration_secs)
@@ -379,17 +525,22 @@ async def process_queue_item(queue_item: dict) -> bool:
         if delay:
             logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
             await asyncio.sleep(delay)
-        logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) failed for {video_id}: {e}")
+        logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) failed for {video_id} "
+                       f"after {time.monotonic() - t_s1:.1f}s: {e}")
 
-    # Strategy 2: Transcript text → Gemini (fallback — no video quota used)
-    if not summary_text:
+    # Strategy 2: Transcript text → Gemini (fallback — no video quota used).
+    # Skipped when the user forced the native video strategy: an explicit method
+    # choice should not silently fall back to the other one.
+    if not summary_text and force_method != 'gemini_video':
+        t_s2 = time.monotonic()
         try:
-            summary_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
-                loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript),
+            summary_text, transcript_text, inp_tokens, out_tokens, thoughts = await asyncio.wait_for(
+                loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript, transcript_full),
                 timeout=_ITEM_TIMEOUT_SECS,
             )
             transcript_source = 'transcript_api'
-            logger.info(f"[YT-WORKER] Strategy 2 (transcript) success for {video_id}")
+            logger.info(f"[YT-WORKER] Strategy 2 (transcript) success for {video_id} "
+                        f"in {time.monotonic() - t_s2:.1f}s")
             try:
                 from utils.gemini_usage import record_gemini_request
                 record_gemini_request(total_tokens=inp_tokens + out_tokens)
@@ -404,19 +555,20 @@ async def process_queue_item(queue_item: dict) -> bool:
             if delay:
                 logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
                 await asyncio.sleep(delay)
-            logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id}: {e}")
+            logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id} "
+                           f"after {time.monotonic() - t_s2:.1f}s: {e}")
 
     # All strategies exhausted — mark as failed so user can retry. Keep both
     # per-strategy reasons in the error_log so the UI can show what actually
     # broke instead of the generic "both failed" string.
     if not summary_text:
-        reason = (
-            "Both summarization strategies failed.\n"
-            f"  - Gemini video: {strat1_err or 'unknown'}\n"
-            f"  - Transcript:   {strat2_err or 'unknown'}"
-        )
-        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}")
-        db.update_queue_status(queue_id, 'failed', error_log=reason)
+        reason = 'No transcript available (gemini video and transcript API both failed)'
+        if strat1_err or strat2_err:
+            reason += f"\n\nStrategy 1 (gemini video): {strat1_err or 'not attempted'}" \
+                      f"\nStrategy 2 (transcript): {strat2_err or 'not attempted'}"
+        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}: {reason}")
+        db.update_queue_status(queue_id, 'failed', error_log=reason,
+                               processing_secs=round(time.monotonic() - t_start))
         return False
 
     # Save summary
@@ -433,45 +585,30 @@ async def process_queue_item(queue_item: dict) -> bool:
         output_tokens=out_tokens or None,
         prompt=user_prompt,
         thoughts=thoughts or None,
+        transcript_text=transcript_text,
+        output_length_percent=output_length_percent,
     )
 
-    # Telegram delivery — wrapped in asyncio.shield() so a cancellation of
-    # process_pending_queue's outer wait_for cannot split the send from the
-    # post-send DB updates. Without the shield, cancellation between
-    # _telegram_send_fn() succeeding and update_queue_status('done') leaves
-    # the row stuck 'processing' → reset_stuck_processing_items flips it to
-    # 'pending' → next tick re-processes and re-sends. That was the duplicate
-    # outcome bug.
-    #
-    # was_telegram_sent() is a second defence: if a previous (potentially
-    # stuck-then-retried) run already delivered this (video, target), don't
-    # send again — just flip statuses and move on.
-    async def _deliver_and_close():
-        if telegram_target and _telegram_send_fn:
-            if db.was_telegram_sent(video_id, telegram_target):
-                logger.info(f"[YT-WORKER] Skipping Telegram send for {video_id} → "
-                            f"{telegram_target}: already delivered to this target "
-                            f"(idempotency check)")
-                db.mark_telegram_sent(summary_id)
-            else:
-                try:
-                    await _telegram_send_fn(telegram_target, summary_text)
-                    db.mark_telegram_sent(summary_id)
-                    logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
-                except Exception as e:
-                    logger.error(f"[YT-WORKER] Telegram send FAILED for {video_id} → "
-                                  f"{telegram_target}: {e}", exc_info=True)
-        elif telegram_target and not _telegram_send_fn:
-            logger.warning(f"[YT-WORKER] No Telegram send function registered — "
-                            f"skipping send for {video_id}")
-        db.update_queue_status(queue_id, 'done')
+    # Mark done the moment the summary is persisted, BEFORE the best-effort
+    # Telegram send. This guarantees a generated summary can never be flipped
+    # back to 'failed' by a slow/failing send, and (together with
+    # claim_queue_item) that an overlapping run can't re-process and re-send it.
+    elapsed = time.monotonic() - t_start
+    db.update_queue_status(queue_id, 'done', processing_secs=round(elapsed))
+    logger.info(f"[YT-WORKER] Done {video_id} via {transcript_source} in {elapsed:.1f}s total")
 
-    try:
-        await asyncio.shield(_deliver_and_close())
-    except asyncio.CancelledError:
-        logger.warning(f"[YT-WORKER] Outer cancellation arrived while delivering "
-                        f"{video_id}; shielded delivery is finishing in the background")
-        raise
+    # Send via Telegram if target is set and sender is available (best-effort —
+    # a send failure must NOT change the item status; the summary is already saved)
+    if telegram_target and _telegram_send_fn:
+        try:
+            await _telegram_send_fn(telegram_target, summary_text)
+            db.mark_telegram_sent(summary_id)
+            logger.info(f"[YT-WORKER] Telegram sent for {video_id} → {telegram_target}")
+        except Exception as e:
+            logger.error(f"[YT-WORKER] Telegram send FAILED for {video_id} → {telegram_target}: {e}", exc_info=True)
+    elif telegram_target and not _telegram_send_fn:
+        logger.warning(f"[YT-WORKER] No Telegram send function registered — skipping send for {video_id}")
+
     return True
 
 
@@ -485,8 +622,12 @@ async def process_pending_queue():
         logger.debug("[YT-WORKER] System disabled — skipping queue processing")
         return 0
     db = get_yt_db()
-    # Reset items stuck in 'processing' for >10 min (e.g. from a crashed run)
-    stuck = db.reset_stuck_processing_items(stuck_minutes=10)
+    # Reset items stuck in 'processing' (e.g. from a crashed run). Must stay
+    # comfortably above the worst-case live item time — both strategies can run
+    # back-to-back at _ITEM_TIMEOUT_SECS each (300+300=10 min) plus fetch overhead
+    # — so a still-running item is never wrongly reset (matters when a manual
+    # process-queue trigger overlaps the scheduled run).
+    stuck = db.reset_stuck_processing_items(stuck_minutes=15)
     if stuck:
         logger.warning(f"[YT-WORKER] Reset {stuck} stuck-processing item(s) back to pending")
     items = db.get_pending_queue_items(limit=3)
@@ -499,12 +640,12 @@ async def process_pending_queue():
             db.update_queue_status(item['id'], 'failed', error_log='Max attempts reached')
             continue
         try:
-            success = await asyncio.wait_for(process_queue_item(item), timeout=_OUTER_ITEM_TIMEOUT_SECS)
+            success = await asyncio.wait_for(process_queue_item(item), timeout=_ITEM_TIMEOUT_SECS + 30)
             if success:
                 processed += 1
         except asyncio.TimeoutError:
             logger.error(f"[YT-WORKER] Item {item['video_id']} timed out in scheduler")
-            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_OUTER_ITEM_TIMEOUT_SECS}s')
+            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_ITEM_TIMEOUT_SECS + 30}s')
         except Exception as e:
             logger.error(f"[YT-WORKER] Unhandled error processing {item['video_id']}: {e}")
             db.update_queue_status(item['id'], 'failed', error_log=str(e))

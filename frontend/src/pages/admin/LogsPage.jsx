@@ -82,7 +82,8 @@ const VALID_LOG_TABS = new Set(['system', 'failures']);
 export default function LogsPage() {
   const [tabParam, setTabParam] = useUrlString('tab', 'system');
   const activeTab = VALID_LOG_TABS.has(tabParam) ? tabParam : 'system';
-  const setActiveTab = setTabParam;
+  // Push so the browser Back button returns to the previous tab.
+  const setActiveTab = (t) => setTabParam(t, { push: true });
 
   return (
     <div className="page active" id="logs-page">

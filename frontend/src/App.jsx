@@ -3,8 +3,6 @@ import { QueryClientProvider } from '@tanstack/react-query';
 
 import { AuthProvider } from './auth/AuthContext';
 import ProtectedRoute from './auth/ProtectedRoute';
-import LoginPage from './auth/LoginPage';
-import RegisterPage from './auth/RegisterPage';
 import { DialogsProvider } from './dialogs/DialogsProvider';
 import { ConfigProvider } from './config/ConfigProvider';
 import { queryClient } from './lib/queryClient';
@@ -12,6 +10,7 @@ import AppShell from './layout/AppShell';
 
 import BotsPage from './pages/bots/BotsPage';
 import MonitorPage from './pages/monitor/MonitorPage';
+import SeoLibraryPage from './pages/seo/SeoLibraryPage';
 
 // Real (ported) pages — import directly so the placeholder in pages/index.jsx
 // is not used. As more pages get ported in Phase 3 they move out of the
@@ -23,15 +22,16 @@ import DashboardPage from './pages/DashboardPage';
 import AccountsPage from './pages/AccountsPage';
 import LogsPage from './pages/admin/LogsPage';
 import AiUsagePage from './pages/admin/AiUsagePage';
+import YoutubeQuotaPage from './pages/admin/YoutubeQuotaPage';
 import TgTesterPage from './pages/admin/TgTesterPage';
 import YtVideosPage from './pages/youtube/VideosPage';
 import YtChannelsPage from './pages/youtube/ChannelsPage';
 import YtKeywordsPage from './pages/youtube/KeywordsPage';
+import YtSchedulesPage from './pages/youtube/SchedulesPage';
 import PromptsPage from './pages/PromptsPage';
 import SummariesPromptsPage from './pages/SummariesPromptsPage';
 import YoutubePromptsPage from './pages/YoutubePromptsPage';
 import DefaultSchedulesPage from './pages/DefaultSchedulesPage';
-import SeosPage from './pages/SeosPage';
 import YtChatPage from './pages/chat/VideoChatPage';
 import AgentChatPage from './pages/chat/AgentChatPage';
 import LegalPage from './pages/LegalPage';
@@ -48,8 +48,9 @@ export default function App() {
         <AuthProvider>
           <DialogsProvider>
             <Routes>
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/register" element={<RegisterPage />} />
+              {/* /login and /register are gone — authentication is handled by
+                  Keycloak. ProtectedRoute triggers the redirect to the Keycloak
+                  hosted login page directly. */}
               <Route path="/terms" element={<LegalPage kind="terms" />} />
               <Route path="/privacy" element={<LegalPage kind="privacy" />} />
               {/* /app/* — legacy basename. Redirect anything that still uses it to root. */}
@@ -73,7 +74,7 @@ export default function App() {
                 <Route path="collections"  element={<Navigate to="/bots" replace />} />
                 <Route path="bots"             element={<BotsPage />} />
                 <Route path="bots/:botName"    element={<BotsPage />} />
-                <Route path="seos"             element={<SeosPage />} />
+                <Route path="seos"             element={<SeoLibraryPage />} />
                 <Route path="prompts"            element={<PromptsPage />} />
                 <Route path="summaries-prompts"  element={<SummariesPromptsPage />} />
                 <Route path="youtube-prompts"    element={<YoutubePromptsPage />} />
@@ -84,6 +85,7 @@ export default function App() {
                 <Route path="yt-videos"    element={<YtVideosPage />} />
                 <Route path="yt-channels"  element={<YtChannelsPage />} />
                 <Route path="yt-keywords"  element={<YtKeywordsPage />} />
+                <Route path="yt-schedules" element={<YtSchedulesPage />} />
                 <Route path="yt-chat"      element={<YtChatPage />} />
                 <Route path="agent-chat"   element={<AgentChatPage />} />
 
@@ -94,6 +96,7 @@ export default function App() {
                 <Route path="tg-tester"    element={<ProtectedRoute adminOnly><TgTesterPage /></ProtectedRoute>} />
                 <Route path="logs"         element={<ProtectedRoute adminOnly><LogsPage /></ProtectedRoute>} />
                 <Route path="ai-usage"     element={<ProtectedRoute adminOnly><AiUsagePage /></ProtectedRoute>} />
+                <Route path="youtube-quota" element={<ProtectedRoute adminOnly><YoutubeQuotaPage /></ProtectedRoute>} />
 
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>

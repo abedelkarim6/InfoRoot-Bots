@@ -841,13 +841,13 @@ class YouTubeControlToolkit(Toolkit):
         return _ok({"keyword": name, "active": active})
 
     def add_yt_keyword(self, keyword: str, telegram_targets: str = "",
-                       schedule_interval_minutes: int = 360) -> str:
+                       schedule_interval_minutes: int = 60) -> str:
         """Add a new YouTube keyword tracker.
 
         Args:
             keyword: The keyword text to track.
             telegram_targets: Comma-separated Telegram channel usernames to send results to.
-            schedule_interval_minutes: How often to run the search (default 360 = 6 hours).
+            schedule_interval_minutes: How often each word is searched (default 60 = 1 hour).
         """
         yt_db = get_yt_db()
         targets = [t.strip() for t in telegram_targets.split(",") if t.strip()] if telegram_targets else []

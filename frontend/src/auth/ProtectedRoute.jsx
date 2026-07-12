@@ -5,23 +5,24 @@ const ADMIN_ONLY_PATHS = new Set([
   '/accounts',
   '/tg-tester',
   '/logs',
-  '/ai-usage'
+  '/ai-usage',
+  '/youtube-quota',
 ]);
 
+/**
+ * Authentication is handled entirely by keycloak-js (onLoad: 'login-required'
+ * in main.jsx). By the time this component renders, the user is signed in.
+ *
+ * Responsibilities here are purely authorization:
+ *   - wait for the DB user record (/api/auth/me) so role checks are reliable
+ *   - block admin-only routes for non-admin users
+ */
 export default function ProtectedRoute({ children, adminOnly = false }) {
-  const { isAuthenticated, isAdmin, loading, user } = useAuth();
+  const { isAdmin, loading, user } = useAuth();
   const location = useLocation();
 
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  }
-
-  // Wait for /api/auth/me before letting admin-only pages render — otherwise a
-  // non-admin could briefly see an admin page on first paint.
-  if (loading || (isAuthenticated && !user)) {
-    return (
-      <div style={{ padding: 40, color: 'var(--text-muted)' }}>Loading…</div>
-    );
+  if (loading || !user) {
+    return <div style={{ padding: 40, color: 'var(--text-muted)' }}>Loading…</div>;
   }
 
   const requiresAdmin = adminOnly || ADMIN_ONLY_PATHS.has(location.pathname);

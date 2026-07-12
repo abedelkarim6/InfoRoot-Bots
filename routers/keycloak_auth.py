@@ -20,12 +20,41 @@ of the auth stack continues to use the native opaque-token flow only.
 import os
 import time
 import logging
+from pathlib import Path
 from typing import Optional
 
 import jwt
 from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
+
+
+def _load_dotenv_into_environ() -> None:
+    """Minimal .env loader (no extra dependency). Reads KEY=VALUE lines from
+    a .env file in the project root and seeds them into os.environ if not
+    already set. Lets you pin KEYCLOAK_ISSUER without fighting PowerShell
+    session lifetimes."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / ".env",  # project root
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+        except Exception as e:
+            logger.warning(f"[keycloak] .env load failed at {path}: {e}")
+
+
+_load_dotenv_into_environ()
 
 KEYCLOAK_ISSUER = os.environ.get("KEYCLOAK_ISSUER", "").rstrip("/")
 KEYCLOAK_JWKS_URL = os.environ.get("KEYCLOAK_JWKS_URL") or (

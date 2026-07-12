@@ -275,6 +275,19 @@ class Database:
             # is True) and store it here for inspection on the AI Usage page.
             if 'thoughts' not in cols2:
                 cursor.execute('ALTER TABLE summaries ADD COLUMN thoughts TEXT')
+            # `schedule_id`: written by save_summary; guard-add in case an older
+            # DB predates it (otherwise every INSERT referencing it would fail).
+            if 'schedule_id' not in cols2:
+                cursor.execute('ALTER TABLE summaries ADD COLUMN schedule_id INTEGER')
+            # Multi-model A/B testing. When the admin selects "compare" models,
+            # each is run on the same input as the sent (primary) summary.
+            # `model_outputs` is a JSON map {model_name: summary_text} of every
+            # model that ran (primary included); `primary_model` records which
+            # one was sent to Telegram so the UI can flag the canonical tab.
+            if 'model_outputs' not in cols2:
+                cursor.execute('ALTER TABLE summaries ADD COLUMN model_outputs JSONB')
+            if 'primary_model' not in cols2:
+                cursor.execute('ALTER TABLE summaries ADD COLUMN primary_model TEXT')
 
             # ==================== Config tables (replaces config.yaml) ====================
 
@@ -401,7 +414,7 @@ class Database:
             if cursor.fetchone()['cnt'] == 0:
                 try:
                     import yaml
-                    with open("prompts.yaml", "r", encoding="utf-8") as f:
+                    with open("prompts/prompts.yaml", "r", encoding="utf-8") as f:
                         prompts_cfg = yaml.safe_load(f) or {}
                     # Build case-insensitive map from YAML bot names to actual DB bot names
                     cursor.execute("SELECT name FROM bots")
@@ -894,6 +907,93 @@ class Database:
             """)
 
             self._migrate_comma_keywords()
+
+            # ============ SEO Library (reusable keyword groups) ============
+            # A global, admin-managed library: categories → groups → keywords.
+            # Groups are attached to topics (topic_seo_groups) so their keywords
+            # merge into that topic's matching, same OR-regex logic as its own SEOs.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seo_categories (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    position INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seo_groups (
+                    id SERIAL PRIMARY KEY,
+                    category_id INTEGER REFERENCES seo_categories(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    enabled BOOLEAN DEFAULT TRUE,
+                    position INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(category_id, name)
+                )
+            """)
+            # ext_id mirrors the external platform's UUID for each row. The SEO
+            # library is sourced from the external "telegram-api" platform; these
+            # local tables are a synced mirror used by the categorizer hot path.
+            cursor.execute("ALTER TABLE seo_categories ADD COLUMN IF NOT EXISTS ext_id TEXT")
+            cursor.execute("ALTER TABLE seo_groups      ADD COLUMN IF NOT EXISTS ext_id TEXT")
+            # The local name UNIQUE constraints get in the way of an external
+            # source of truth (two categories may legitimately share a name after
+            # a rename race); drop them and dedupe on ext_id instead.
+            cursor.execute("ALTER TABLE seo_categories DROP CONSTRAINT IF EXISTS seo_categories_name_key")
+            cursor.execute("ALTER TABLE seo_groups      DROP CONSTRAINT IF EXISTS seo_groups_category_id_name_key")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS seo_categories_ext_idx ON seo_categories(ext_id)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS seo_groups_ext_idx ON seo_groups(ext_id)")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seo_group_keywords (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER REFERENCES seo_groups(id) ON DELETE CASCADE,
+                    keyword TEXT NOT NULL,
+                    UNIQUE(group_id, keyword)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS topic_seo_groups (
+                    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                    group_id INTEGER REFERENCES seo_groups(id) ON DELETE CASCADE,
+                    PRIMARY KEY (topic_id, group_id)
+                )
+            """)
+
+            # Replace-term groups: a mirror of the external platform's
+            # replace-groups (from→to pairs), attachable to bots so their pairs
+            # apply in the bot's "Replace in message" rewrite step.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seo_replace_groups (
+                    id SERIAL PRIMARY KEY,
+                    ext_id TEXT,
+                    name TEXT,
+                    enabled BOOLEAN DEFAULT TRUE
+                )
+            """)
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS seo_replace_groups_ext_idx ON seo_replace_groups(ext_id)")
+            # Category linkage + ordering mirrored from the platform so the fast
+            # local-mirror read (read_replace_library_mirror) can group/sort the
+            # 'Attach Replace Groups' picker without an external call. category_ext
+            # holds the platform's category UUID (joined to seo_categories.ext_id).
+            cursor.execute("ALTER TABLE seo_replace_groups ADD COLUMN IF NOT EXISTS category_ext TEXT")
+            cursor.execute("ALTER TABLE seo_replace_groups ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seo_replace_pairs (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER REFERENCES seo_replace_groups(id) ON DELETE CASCADE,
+                    from_text TEXT NOT NULL,
+                    to_text TEXT DEFAULT '',
+                    enabled BOOLEAN DEFAULT TRUE,
+                    position INTEGER DEFAULT 0
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_replace_groups (
+                    bot_id INTEGER REFERENCES bots(id) ON DELETE CASCADE,
+                    group_id INTEGER REFERENCES seo_replace_groups(id) ON DELETE CASCADE,
+                    PRIMARY KEY (bot_id, group_id)
+                )
+            """)
 
             # Schedule run history — one row per schedule fire (success or failed)
             cursor.execute("""

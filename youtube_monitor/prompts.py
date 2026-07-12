@@ -1,6 +1,6 @@
 """
 YouTube monitor prompt constants and builder functions.
-Admins can override the fixed prefixes via the UI (stored in config.yaml under system_prompts).
+Admins can override the fixed prefixes via the UI (stored in system_prompts.yaml).
 """
 
 DEFAULT_PROMPT = """You are a video content summarizer. Provide a clear, concise summary of the following YouTube video.
@@ -103,19 +103,58 @@ User Prompt:
 
 
 def _get_fixed_prefix_video() -> str:
-    """Read the video fixed prefix from config.yaml, falling back to the hardcoded default."""
-    from utils.helpers import load_config
-    cfg = load_config()
-    val = cfg.get("system_prompts", {}).get("youtube_prefix_video", "")
+    """Read the video fixed prefix from system_prompts.yaml, falling back to the hardcoded default."""
+    from utils.helpers import load_system_prompts
+    val = load_system_prompts().get("youtube_prefix_video", "")
     return val or _DEFAULT_FIXED_PREFIX_VIDEO
 
 
 def _get_fixed_prefix_transcript() -> str:
-    """Read the transcript fixed prefix from config.yaml, falling back to the hardcoded default."""
-    from utils.helpers import load_config
-    cfg = load_config()
-    val = cfg.get("system_prompts", {}).get("youtube_prefix_transcript", "")
+    """Read the transcript fixed prefix from system_prompts.yaml, falling back to the hardcoded default."""
+    from utils.helpers import load_system_prompts
+    val = load_system_prompts().get("youtube_prefix_transcript", "")
     return val or _DEFAULT_FIXED_PREFIX_TRANSCRIPT
+
+
+def _format_hms(secs: int) -> str:
+    """Format a duration in seconds as H:MM:SS or M:SS."""
+    secs = int(secs or 0)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def build_length_directive(target_chars: int, percent: int,
+                           duration_secs: int = None, source_chars: int = None) -> str:
+    """Return an instruction telling the model how long the video is and how long
+    its summary should be — roughly `target_chars` characters (≈ `percent`% of the
+    source content). Auto-inserted into the prompt so it applies to every strategy.
+    Empty string when there is nothing to constrain."""
+    if not target_chars or target_chars <= 0:
+        return ""
+    target_words = max(1, round(target_chars / 6))  # ~6 chars/word incl. spaces
+
+    # Arabic block (matches the Arabic fixed-prefix prompts).
+    ar = ["تعليمات الطول (مهمة):"]
+    if duration_secs:
+        ar.append(f"- مدة الفيديو: {_format_hms(duration_secs)} (أي {int(duration_secs)} ثانية).")
+    src = f" من أصل {source_chars} حرف" if source_chars else ""
+    ar.append(
+        f"- الطول المتوقع للناتج: حوالي {target_chars} حرف (≈ {target_words} كلمة)، "
+        f"أي ما يقارب {percent}%{src} من طول المحتوى الأصلي."
+    )
+    ar.append("- التزم بهذا الطول قدر الإمكان دون حذف النقاط الأساسية.")
+
+    # English mirror.
+    en = ["Length instruction:"]
+    if duration_secs:
+        en.append(f"- Video length: {_format_hms(duration_secs)} ({int(duration_secs)} seconds).")
+    en.append(
+        f"- Expected output: about {target_chars} characters (~{target_words} words), "
+        f"roughly {percent}% of the source length."
+    )
+
+    return "\n\n---\n" + "\n".join(ar) + "\n\n" + "\n".join(en)
 
 
 def _build_yt_prompt(prefix_template: str, user_prompt: str,
@@ -132,8 +171,7 @@ def _build_yt_prompt(prefix_template: str, user_prompt: str,
 
 def _get_global_prompt() -> str:
     """Return the first YouTube prompt (the default) from the global prompts
-    table. Falls back to the legacy config.yaml `youtube.prompt`, then to the
-    hardcoded DEFAULT_PROMPT."""
+    table, or the hardcoded DEFAULT_PROMPT if none is stored."""
     try:
         from utils.database import get_db
         db = get_db()
@@ -145,12 +183,7 @@ def _get_global_prompt() -> str:
                 return text
     except Exception:
         pass
-    try:
-        from utils.helpers import load_config
-        cfg = load_config()
-        return cfg.get("youtube", {}).get("prompt", "") or DEFAULT_PROMPT
-    except Exception:
-        return DEFAULT_PROMPT
+    return DEFAULT_PROMPT
 
 
 def resolve_yt_prompt(prompt_key: str = None) -> str:
