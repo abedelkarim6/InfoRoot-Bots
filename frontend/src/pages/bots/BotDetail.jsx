@@ -23,31 +23,38 @@ import { useUrlString } from '../../lib/useUrlState';
 import BasicSettings from './BasicSettings';
 import Rules from './Rules';
 import TopicsSection from './TopicsSection';
-import BotChannelsModal from './BotChannelsModal';
+import TelegramChannelsTab from './TelegramChannelsTab';
+import PromptListPage from '../PromptListPage';
 import Icon from '../../components/icons';
 
-// Prompts are global now — managed on the top-level /prompts page.
+// Figma tab strip: Basic Settings | Telegram Sources | Telegram Destinations |
+// Replace Terms (n) | Blocked SEOs | Ai Prompts. The categories list is the
+// default landing view (?tab=categories or none) — no tab highlighted there.
 const TABS = [
-  { id: 'basic',      label: 'Basic Settings' },
-  { id: 'rules',      label: 'Rules' },
-  { id: 'categories', label: 'Categories & Topics' }
+  { id: 'basic',        label: 'Basic Settings',        icon: 'settings' },
+  { id: 'sources',      label: 'Telegram Sources',      icon: 'broadcast' },
+  { id: 'destinations', label: 'Telegram Destinations', icon: 'send' },
+  { id: 'replace',      label: 'Replace Terms',         icon: 'repeat', countKey: 'replace' },
+  { id: 'blocked',      label: 'Blocked SEOs',          icon: 'ban' },
+  { id: 'prompts',      label: 'Ai Prompts',            icon: 'fileText' }
 ];
-const VALID_TABS = new Set(TABS.map((t) => t.id));
+const VALID_TABS = new Set([...TABS.map((t) => t.id), 'categories', 'rules']);
 
 export default function BotDetail({ botName }) {
   const { config } = useGlobalConfig();
   const bot = (config?.bots || {})[botName];
   const navigate = useNavigate();
-  // ?tab=basic|rules|categories — falls back to categories.
+  // ?tab=… — falls back to the categories landing view. Legacy 'rules' links
+  // map to the new Replace Terms tab.
   const [tabParam, setTabParam] = useUrlString('tab', 'categories');
-  const activeTab = VALID_TABS.has(tabParam) ? tabParam : 'categories';
+  let activeTab = VALID_TABS.has(tabParam) ? tabParam : 'categories';
+  if (activeTab === 'rules') activeTab = 'replace';
   // Push so the browser Back button returns to the previous tab.
   const setActiveTab = (t) => setTabParam(t, { push: true });
 
   // Resolve the bot's current source / target channels from the union of all
-  // collections it references. This is what the per-bot Sources/Destinations
-  // modals start from (read-side); on save, the modal collapses everything
-  // into a single auto-collection named after the bot.
+  // collections it references. The Sources/Destinations tabs edit these; on
+  // save they collapse into a single auto-collection named after the bot.
   const collections = config?.collections || {};
   const sources = unionChannels(bot?.collections, collections, 'source_channels');
   const targets = unionChannels(bot?.collections, collections, 'target_channels');
@@ -60,53 +67,78 @@ export default function BotDetail({ botName }) {
     );
   }
 
+  const replaceCount =
+    (bot.rules?.replace?.length || 0) + (bot.replace_groups?.length || 0);
+
   return (
     <div className="page active" id="bots-page">
       <BotDetailHeader
         bot={bot}
         botName={botName}
-        sources={sources}
-        targets={targets}
         onBack={() => navigate('/bots')}
+        onTitleClick={() => setActiveTab('categories')}
       />
 
-      <div className="bot-config-card" id={`bot-${botName}`}>
-        <div className="bot-tab-bar">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`bot-tab-btn ${activeTab === t.id ? 'active' : ''}`}
-              data-tab={t.id}
-              onClick={() => setActiveTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="bot-config-body">
-          <div className={`bot-tab-pane ${activeTab === 'basic' ? 'active' : ''}`} data-tab="basic">
+      <div className="bot-tab-bar" id={`bot-${botName}`}>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={`bot-tab-btn ${activeTab === t.id ? 'active' : ''}`}
+            data-tab={t.id}
+            onClick={() => setActiveTab(activeTab === t.id ? 'categories' : t.id)}
+            title={activeTab === t.id ? 'Back to Categories & Topics' : undefined}
+          >
+            <Icon name={t.icon} size={15} />
+            {t.label}
+            {t.countKey === 'replace' && replaceCount > 0 && (
+              <span className="tab-count">{replaceCount}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'categories' && (
+        <TopicsSection botName={botName} bot={bot} />
+      )}
+
+      {activeTab !== 'categories' && (
+        <div className="bot-config-card">
+          <div className="bot-config-body">
             {activeTab === 'basic' && <BasicSettings botName={botName} bot={bot} />}
-          </div>
-          <div className={`bot-tab-pane ${activeTab === 'rules' ? 'active' : ''}`} data-tab="rules">
-            {activeTab === 'rules' && <Rules botName={botName} bot={bot} />}
-          </div>
-          <div className={`bot-tab-pane ${activeTab === 'categories' ? 'active' : ''}`} data-tab="categories">
-            {activeTab === 'categories' && (
-              <TopicsSection botName={botName} bot={bot} />
+            {activeTab === 'sources' && (
+              <TelegramChannelsTab
+                botName={botName} bot={bot} kind="source"
+                sources={sources} targets={targets}
+              />
+            )}
+            {activeTab === 'destinations' && (
+              <TelegramChannelsTab
+                botName={botName} bot={bot} kind="target"
+                sources={sources} targets={targets}
+              />
+            )}
+            {activeTab === 'replace' && <Rules botName={botName} bot={bot} section="replace" />}
+            {activeTab === 'blocked' && <Rules botName={botName} bot={bot} section="blocked" />}
+            {activeTab === 'prompts' && (
+              <div className="embedded-prompts">
+                <PromptListPage
+                  kind="summaries"
+                  title="Ai Prompts"
+                  subtitle="Global prompt library shared across every summaries bot. Pick one per schedule."
+                />
+              </div>
             )}
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
 
 // ─── Detail Header ──────────────────────────────────────────────────────────
 
-function BotDetailHeader({ botName, bot, sources, targets, onBack }) {
+function BotDetailHeader({ botName, bot, onBack, onTitleClick }) {
   const [renameOpen, setRenameOpen] = useState(false);
-  const [channelsModal, setChannelsModal] = useState(null); // 'source' | 'target' | null
-
   const save = useApiMutation('/api/bot/save', {
     invalidate: ['config'],
     successMsg: (res, vars) => `Bot ${vars.enabled ? 'enabled' : 'disabled'}`,
@@ -150,11 +182,18 @@ function BotDetailHeader({ botName, bot, sources, targets, onBack }) {
           Summaries Bots
         </button>
         <span className="breadcrumb-sep">/</span>
-        <span className="breadcrumb-current">{botName}</span>
+        <button className="breadcrumb-link breadcrumb-current" onClick={onTitleClick} title="Categories & Topics">
+          {botName}
+        </button>
       </nav>
 
       <div className="bot-detail-header" style={{ flexWrap: 'wrap', rowGap: 8 }}>
-        <h2 className="page-title" style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <h2
+          className="page-title"
+          style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+          onClick={onTitleClick}
+          title="Categories & Topics"
+        >
           {botName}
           {inherited && (
             <span
@@ -169,25 +208,11 @@ function BotDetailHeader({ botName, bot, sources, targets, onBack }) {
               className="btn-icon"
               style={{ fontSize: 16 }}
               title="Rename bot"
-              onClick={() => setRenameOpen(true)}
-            >✏️</button>
+              onClick={(e) => { e.stopPropagation(); setRenameOpen(true); }}
+            ><Icon name="pencil" size={15} /></button>
           )}
         </h2>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={() => setChannelsModal('source')}
-            title="Channels this bot reads from"
-          >
-            Sources <span style={{ opacity: 0.7 }}>({sources.length})</span>
-          </button>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={() => setChannelsModal('target')}
-            title="Channels this bot sends summaries to"
-          >
-            Destinations <span style={{ opacity: 0.7 }}>({targets.length})</span>
-          </button>
           {!inherited && (
             <>
               <label className="toggle-switch">
@@ -214,15 +239,6 @@ function BotDetailHeader({ botName, bot, sources, targets, onBack }) {
         <RenameBotModal
           oldName={botName}
           onClose={() => setRenameOpen(false)}
-        />
-      )}
-
-      {channelsModal && (
-        <BotChannelsModal
-          botName={botName}
-          kind={channelsModal}
-          bot={{ ...bot, source_channels: sources, target_channels: targets }}
-          onClose={() => setChannelsModal(null)}
         />
       )}
     </>

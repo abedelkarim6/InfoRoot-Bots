@@ -46,6 +46,22 @@ def _expand_search_terms(question: str) -> list[str]:
         )
         terms = [t.strip() for t in response.text.strip().split("\n") if t.strip()]
         result = terms[:5] if terms else [question]
+
+        # Cost tracking — per-search query expansion (flash-lite). This helper
+        # has no user/session context, so it's attributed to admin under the
+        # chatbot feature; the tiny flash-lite cost makes exact per-user
+        # attribution not worth threading through the toolkits.
+        try:
+            from utils.database import get_db
+            from utils.ai_pricing import extract_gemini_tokens
+            _i, _o, _t = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+            _db = get_db()
+            if _db is not None:
+                _db.log_ai_usage(None, "chatbot", "gemini-2.5-flash-lite", _i, _o,
+                                 context="search-expansion", thinking_tokens=_t)
+        except Exception:
+            pass
+
         logger.info(f"[CHATBOT] Query expansion: {question!r} → {result}")
         return result
     except Exception as exc:

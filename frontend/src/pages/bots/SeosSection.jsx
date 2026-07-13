@@ -1,15 +1,19 @@
 /**
- * SeosSection — keyword tag list for a topic, with select-all / delete-selected
- * / delete-all and AI suggest. Also handles the admin-hidden-keywords case
- * (`topic._keyword_count` set, raw keywords absent) — user-added keywords are
- * tracked locally so they remain removable in the same session.
+ * SeosSection — Figma "Keywords" section inside a topic:
+ *
+ *   ▾ ⚿ Keywords  [⚿ 180 Keywords]   [✨ Suggest With AI] [⬇ Import] [+ Keywords] [🗑 Mass Delete] [⋮]
+ *   [Title ×] [Title ×] [Title ×] …
+ *
+ * Also handles the admin-hidden-keywords case (`topic._keyword_count` set,
+ * raw keywords absent) — user-added keywords are tracked locally so they
+ * remain removable in the same session.
  *
  * Backend endpoints used:
  *   POST /api/topic/keyword/add      (single insert, used for hidden-mode)
  *   POST /api/topic/keyword/delete   (delete by keyword text — hidden-mode)
  *   POST /api/topic/update           (overwrites the full keywords array — open mode)
  *   POST /api/topic/suggest-seos     (via SeoSuggestModal)
- *   POST /api/topic/keyword/add-bulk (via SeoSuggestModal)
+ *   POST /api/topic/keyword/add-bulk (via SeoSuggestModal / AddKeywordsModal)
  */
 
 import { useState } from 'react';
@@ -19,12 +23,13 @@ import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useQueryClient } from '@tanstack/react-query';
 import SeoSuggestModal from './SeoSuggestModal';
 import AddKeywordsModal from './AddKeywordsModal';
+import Icon from '../../components/icons';
 
 // Local (per-session) tracking of user-added keywords when admin has hidden
 // the master list — keyed by 'bot|cat|topic'.
 const _userAddedKeywords = {};
 
-export default function SeosSection({ botName, catName, topicName, topic, inherited = false }) {
+export default function SeosSection({ botName, catName, topicName, topic, inherited = false, sortMode = '' }) {
   const seoHidden = topic._keyword_count != null;
   const keywords = topic.keywords || [];
   const ukKey = `${botName}|${catName}|${topicName}`;
@@ -38,7 +43,7 @@ export default function SeosSection({ botName, catName, topicName, topic, inheri
   const seoCount = (seoHidden ? topic._keyword_count : keywords.length) + userKws.length;
   const catchAll = !!topic.catch_all;
 
-  const [selected, setSelected] = useState(new Set());
+  const [open, setOpen] = useState(true);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const { showNotification } = useDialogs();
@@ -49,10 +54,10 @@ export default function SeosSection({ botName, catName, topicName, topic, inheri
     errorMsg: 'Failed to update keywords'
   });
 
-  const removeAll = useApiMutation('/api/topic/update', {
-    invalidate: ['config'],
-    errorMsg: 'Failed to delete keywords'
-  });
+  // Display order — the "Sort By" subbar only affects presentation; deletes
+  // always map back to the canonical index.
+  const displayKeywords = keywords.map((kw, idx) => ({ kw, idx }));
+  if (sortMode === 'alpha') displayKeywords.sort((a, b) => a.kw.localeCompare(b.kw));
 
   // ── Delete a single keyword (open mode: index-based) ──────────────────────
   function removeKeyword(idx) {
@@ -63,7 +68,6 @@ export default function SeosSection({ botName, catName, topicName, topic, inheri
       topic_name: topicName,
       keywords: next
     });
-    setSelected(new Set());
   }
 
   // ── Hidden-mode user-added single keyword removal ─────────────────────────
@@ -85,48 +89,14 @@ export default function SeosSection({ botName, catName, topicName, topic, inheri
     showNotification('SEO removed', 'success');
   }
 
-  // ── Selection ─────────────────────────────────────────────────────────────
-  function toggleSelected(idx) {
-    setSelected((cur) => {
-      const next = new Set(cur);
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
-      return next;
-    });
-  }
-
-  function toggleSelectAll() {
-    if (selected.size === keywords.length) setSelected(new Set());
-    else setSelected(new Set(keywords.map((_, i) => i)));
-  }
-
-  const deleteSelected = useConfirmedMutation(updateTopic, {
-    message: `Delete ${selected.size} selected keyword${selected.size > 1 ? 's' : ''}?`,
-    title: 'Delete Keywords',
-    confirmLabel: 'Delete',
-    confirmClass: 'btn-danger'
-  });
-
-  function onDeleteSelected() {
-    if (!selected.size) return;
-    const next = keywords.filter((_, i) => !selected.has(i));
-    deleteSelected({
-      bot_name: botName,
-      category_name: catName,
-      topic_name: topicName,
-      keywords: next
-    });
-    setSelected(new Set());
-  }
-
-  const deleteAll = useConfirmedMutation(removeAll, {
+  const deleteAll = useConfirmedMutation(updateTopic, {
     message: `Delete all ${keywords.length} keywords from this topic?`,
-    title: 'Delete All Keywords',
-    confirmLabel: 'Delete',
+    title: 'Mass Delete Keywords',
+    confirmLabel: 'Delete All',
     confirmClass: 'btn-danger'
   });
 
-  function onDeleteAll() {
+  function onMassDelete() {
     if (!keywords.length) return;
     deleteAll({
       bot_name: botName,
@@ -134,121 +104,87 @@ export default function SeosSection({ botName, catName, topicName, topic, inheri
       topic_name: topicName,
       keywords: []
     });
-    setSelected(new Set());
   }
+
+  const canEdit = !seoHidden && !inherited;
 
   return (
     <div
-      className="form-group"
+      className={`tsec ${open ? 'open' : ''}`}
       style={catchAll ? { opacity: 0.4, pointerEvents: 'none' } : undefined}
     >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 8,
-          gap: 10,
-          flexWrap: 'wrap'
-        }}
-      >
-        <label className="form-label" style={{ margin: 0 }}>
-          SEOs ({seoCount})
-        </label>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn-kw-action kw-add" onClick={() => setAddOpen(true)}>
-            ➕ Add Keywords
-          </button>
-          {!seoHidden && !inherited && keywords.length > 0 && (
-            <>
-              <button className="btn-kw-action kw-neutral" onClick={toggleSelectAll}>
-                ☑ Select All
-              </button>
-              {selected.size > 0 && (
-                <button className="btn-kw-action kw-danger" onClick={onDeleteSelected}>
-                  🗑 Delete Selected
-                </button>
-              )}
-              <button className="btn-kw-action kw-danger" onClick={onDeleteAll}>
-                🗑 Delete All
-              </button>
-            </>
-          )}
+      <div className="tsec-head" onClick={() => setOpen((v) => !v)}>
+        <span className="collapsible-toggle cat-chevron">▼</span>
+        <span className="tsec-icon"><Icon name="key" size={16} /></span>
+        <span className="tsec-title">Keywords</span>
+        <span className="kw-count-chip">
+          <Icon name="key" size={12} />
+          {seoCount} Keyword{seoCount !== 1 ? 's' : ''}
+        </span>
+        <div className="tsec-actions" onClick={(e) => e.stopPropagation()}>
           <button className="btn-ai-suggest" onClick={() => setSuggestOpen(true)}>
-            <span className="btn-ai-shine"></span>✨ Suggest with AI
+            <span className="btn-ai-shine"></span>✨ Suggest With AI
           </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => setAddOpen(true)}>
+            <Icon name="importBox" size={13} style={{ marginRight: 5 }} />
+            Import
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => setAddOpen(true)}>
+            <Icon name="plus" size={13} style={{ marginRight: 5 }} />
+            Keywords
+          </button>
+          {canEdit && (
+            <button
+              className="btn btn-secondary btn-sm btn-outline-danger"
+              onClick={onMassDelete}
+              disabled={!keywords.length}
+            >
+              <Icon name="trash" size={13} style={{ marginRight: 5 }} />
+              Mass Delete
+            </button>
+          )}
         </div>
       </div>
 
-      <div
-        className="tags-container tags-scrollable"
-        id={`kw-tags-${botName}-${catName}-${topicName}`}
-      >
-        {seoHidden ? (
-          <>
-            <span
-              className="tag"
-              style={{
-                background: 'rgba(99,102,241,.12)',
-                color: 'var(--text-muted)',
-                border: '1px dashed var(--border-color)',
-                cursor: 'default',
-                pointerEvents: 'none'
-              }}
-            >
-              🔒 {topic._keyword_count} SEO{topic._keyword_count !== 1 ? 's' : ''} active —{' '}
-              {inherited ? 'inherited group (keywords managed by admin)' : 'details hidden by admin'}
-            </span>
-            {userKws.map((kw) => (
-              <span className="tag tag-user-kw" key={kw}>
-                {kw}
-                <span
-                  className="tag-remove"
-                  onClick={() => removeUserKeyword(kw)}
-                >
-                  ×
+      {open && (
+        <div className="tsec-body">
+          <div
+            className="tags-container tags-scrollable"
+            id={`kw-tags-${botName}-${catName}-${topicName}`}
+          >
+            {seoHidden ? (
+              <>
+                <span className="tag tag-readonly" style={{ borderStyle: 'dashed', cursor: 'default' }}>
+                  🔒 {topic._keyword_count} SEO{topic._keyword_count !== 1 ? 's' : ''} active —{' '}
+                  {inherited ? 'inherited group (keywords managed by admin)' : 'details hidden by admin'}
                 </span>
-              </span>
-            ))}
-          </>
-        ) : (
-          <>
-            {keywords.map((kw, idx) => (
-              <span className="tag kw-selectable" key={`${kw}-${idx}`}>
-                <input
-                  type="checkbox"
-                  className="kw-cb"
-                  style={{
-                    margin: '0 4px 0 0',
-                    accentColor: 'var(--accent-primary)',
-                    cursor: 'pointer'
-                  }}
-                  checked={selected.has(idx)}
-                  onChange={() => toggleSelected(idx)}
-                />
-                {kw}
-                <span className="tag-remove" onClick={() => removeKeyword(idx)}>
-                  ×
-                </span>
-              </span>
-            ))}
-            {keywords.length === 0 && (
-              <span
-                className="tag"
-                style={{
-                  background: 'transparent',
-                  color: 'var(--text-muted)',
-                  border: '1px dashed var(--border-color)',
-                  cursor: 'default',
-                  pointerEvents: 'none'
-                }}
-              >
-                No SEOs yet — click ➕ Add Keywords to add some
-              </span>
+                {userKws.map((kw) => (
+                  <span className="tag tag-user-kw" key={kw}>
+                    {kw}
+                    <span className="tag-remove" onClick={() => removeUserKeyword(kw)}>×</span>
+                  </span>
+                ))}
+              </>
+            ) : (
+              <>
+                {displayKeywords.map(({ kw, idx }) => (
+                  <span className="tag" key={`${kw}-${idx}`}>
+                    {kw}
+                    {canEdit && (
+                      <span className="tag-remove" onClick={() => removeKeyword(idx)}>×</span>
+                    )}
+                  </span>
+                ))}
+                {keywords.length === 0 && (
+                  <span className="tsec-empty">
+                    No keywords yet — click "+ Keywords" or "Import" to add some
+                  </span>
+                )}
+              </>
             )}
-          </>
-        )}
-      </div>
+          </div>
+        </div>
+      )}
 
       {suggestOpen && (
         <SeoSuggestModal

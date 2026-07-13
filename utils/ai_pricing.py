@@ -45,23 +45,55 @@ PRICING_SETTING_KEY = "ai_model_pricing"
 
 
 class TokenUsage(int):
-    """A total token count that also carries the input/output split.
+    """A total token count that also carries the input/output/thinking split.
 
     Subclasses int so every existing `total += tokens` call site keeps working
-    unchanged; cost-aware callers read `.input` / `.output` for exact pricing.
+    unchanged; cost-aware callers read `.input` / `.output` / `.thinking`.
+    `.output` is the ANSWER (visible) output only; `.thinking` is the reasoning
+    trace, which Gemini bills at the output rate but reports as a distinct SKU
+    ("Thinking Text Output"). The int value is input+output+thinking.
     Note: arithmetic results (e.g. `a + b`) degrade to plain int — accumulate
     the splits explicitly where they matter.
     """
-    def __new__(cls, total, input_tokens=0, output_tokens=0):
+    def __new__(cls, total, input_tokens=0, output_tokens=0, thinking_tokens=0):
         obj = super().__new__(cls, int(total or 0))
         obj.input = int(input_tokens or 0)
         obj.output = int(output_tokens or 0)
+        obj.thinking = int(thinking_tokens or 0)
         return obj
 
 
 def client_model(llm) -> str:
     """Model name of a GeminiClient (`model_name`) or OpenAIClient (`model`)."""
     return getattr(llm, 'model_name', None) or getattr(llm, 'model', None)
+
+
+def extract_gemini_tokens(usage_metadata) -> tuple:
+    """Return (input_tokens, output_tokens, thinking_tokens) from a Gemini
+    `usage_metadata`.
+
+    - `output` = the ANSWER (visible) tokens (`candidates_token_count`).
+    - `thinking` = the reasoning trace (`thoughts_token_count`), which Gemini
+      bills at the output rate but reports as a distinct SKU ("Thinking Text
+      Output"). Broken out so cost can be attributed to thinking specifically.
+
+    Both are derived defensively: total billed output = `total_token_count -
+    prompt_token_count` (robust — includes thinking even when `include_thoughts`
+    is off and the trace isn't returned). Thinking = `thoughts_token_count` if
+    reported, else whatever of that total isn't the visible answer. Falls back to
+    the raw fields when the total is missing, then to 0.
+    """
+    if not usage_metadata:
+        return 0, 0, 0
+    um = usage_metadata
+    prompt = getattr(um, "prompt_token_count", 0) or 0
+    candidates = getattr(um, "candidates_token_count", 0) or 0
+    thoughts = getattr(um, "thoughts_token_count", 0) or 0
+    total = getattr(um, "total_token_count", 0) or 0
+    out_total = (total - prompt) if (total and total >= prompt) else (candidates + thoughts)
+    thinking = thoughts if thoughts else max(0, out_total - candidates)
+    answer = max(0, out_total - thinking)
+    return prompt, answer, thinking
 
 
 def get_pricing(db=None) -> dict:
@@ -107,10 +139,18 @@ def resolve_rates(model: str, pricing: dict = None) -> dict:
     return p["default"]
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int, pricing: dict = None) -> float:
-    """Exact cost for a run with a known input/output split."""
+def cost_usd(model: str, input_tokens: int, output_tokens: int,
+             thinking_tokens: int = 0, pricing: dict = None) -> float:
+    """Exact cost for a run with a known token split. Thinking tokens bill at
+    the output rate (Gemini's "Thinking Text Output" SKU == output rate)."""
     rates = resolve_rates(model, pricing)
-    return ((input_tokens or 0) * rates["input"] + (output_tokens or 0) * rates["output"]) / 1_000_000
+    return ((input_tokens or 0) * rates["input"]
+            + ((output_tokens or 0) + (thinking_tokens or 0)) * rates["output"]) / 1_000_000
+
+
+def thinking_cost_usd(model: str, thinking_tokens: int, pricing: dict = None) -> float:
+    """Cost of just the thinking (reasoning) tokens — for the visibility split."""
+    return (thinking_tokens or 0) * resolve_rates(model, pricing)["output"] / 1_000_000
 
 
 def blended_cost_usd(model: str, total_tokens: int, pricing: dict = None) -> float:
@@ -119,7 +159,7 @@ def blended_cost_usd(model: str, total_tokens: int, pricing: dict = None) -> flo
     p = pricing or get_pricing()
     ratio = p["input_ratio"]
     total = total_tokens or 0
-    return cost_usd(model, int(total * ratio), total - int(total * ratio), p)
+    return cost_usd(model, int(total * ratio), total - int(total * ratio), pricing=p)
 
 
 # ── Per-user monthly cost caps ───────────────────────────────────────────────
@@ -141,7 +181,8 @@ def get_user_month_costs(db, user_id: int, pricing: dict = None) -> dict:
                 continue
             if row.get("input_tokens") is not None or row.get("output_tokens") is not None:
                 out[feature] += cost_usd(row.get("model"), row.get("input_tokens") or 0,
-                                         row.get("output_tokens") or 0, p)
+                                         row.get("output_tokens") or 0,
+                                         row.get("thinking_tokens") or 0, p)
             else:
                 out[feature] += blended_cost_usd(row.get("model"), row.get("tokens") or 0, p)
     except Exception as e:

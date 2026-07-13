@@ -591,7 +591,8 @@ Example: ["keyword1", "keyword2", ...]"""
                 db.log_ai_usage(_req_user_id, 'seo', client_model(llm),
                                 input_tokens=getattr(sug_tokens, 'input', 0) or int(sug_tokens or 0),
                                 output_tokens=getattr(sug_tokens, 'output', 0),
-                                context=f"suggest-seos {bot_name}/{topic_name}")
+                                context=f"suggest-seos {bot_name}/{topic_name}",
+                                thinking_tokens=getattr(sug_tokens, 'thinking', 0))
             except Exception:
                 pass
 

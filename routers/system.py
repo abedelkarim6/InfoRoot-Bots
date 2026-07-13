@@ -258,7 +258,7 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
             from fastapi.responses import JSONResponse
             return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
         from datetime import date, datetime
-        from utils.ai_pricing import get_pricing, cost_usd, blended_cost_usd
+        from utils.ai_pricing import get_pricing, cost_usd, blended_cost_usd, thinking_cost_usd
 
         def _parse(d, fallback):
             try:
@@ -289,10 +289,10 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         pricing = get_pricing(db)
 
         def _row_cost(feat, r):
-            """Exact cost of a row's recorded input/output split, plus a
+            """Exact cost of a row's recorded input/output/thinking split, plus a
             blended estimate for any legacy combined-only tokens."""
             c = cost_usd(r.get('model'), int(r.get('input_tokens') or 0),
-                         int(r.get('output_tokens') or 0), pricing)
+                         int(r.get('output_tokens') or 0), int(r.get('thinking_tokens') or 0), pricing)
             legacy = int(r.get('legacy_tokens') or 0)
             if legacy:
                 c += blended_cost_usd(r.get('model'), legacy, pricing)
@@ -302,7 +302,7 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
             t = r.get('tokens')
             if t is not None:
                 return int(t)
-            return (r.get('input_tokens') or 0) + (r.get('output_tokens') or 0)
+            return (r.get('input_tokens') or 0) + (r.get('output_tokens') or 0) + (r.get('thinking_tokens') or 0)
 
         def _fold_series(feat, rows):
             by_bucket = {}
@@ -407,17 +407,21 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         for b in by_bot:
             b['cost'] = round(b['cost'], 4)
 
-        # ── per-model breakdown (usage + current rates + cost) ───────────────
+        # ── per-model breakdown (usage + current rates + cost, incl. thinking) ─
         from utils.ai_pricing import resolve_rates
         model_fold = {}
 
         def _add_model_rows(feat, rows):
             for r in rows:
                 m = r.get('model') or '(unknown)'
-                e = model_fold.setdefault(m, {'model': m, 'runs': 0, 'tokens': 0, 'cost': 0.0})
+                e = model_fold.setdefault(m, {'model': m, 'runs': 0, 'tokens': 0, 'cost': 0.0,
+                                              'thinking_tokens': 0, 'thinking_cost': 0.0})
                 e['runs'] += int(r.get('runs') or 0)
                 e['tokens'] += _row_tokens(r)
                 e['cost'] += _row_cost(feat, r)
+                th = int(r.get('thinking_tokens') or 0)
+                e['thinking_tokens'] += th
+                e['thinking_cost'] += thinking_cost_usd(r.get('model'), th, pricing)
 
         if 'summaries' in wanted:
             _add_model_rows('summaries', hist['series'])
@@ -428,9 +432,16 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         by_model = sorted(model_fold.values(), key=lambda m: m['cost'], reverse=True)
         for m in by_model:
             m['cost'] = round(m['cost'], 4)
+            m['thinking_cost'] = round(m['thinking_cost'], 4)
             rates = resolve_rates(None if m['model'] == '(unknown)' else m['model'], pricing)
             m['rate_input'] = rates['input']
             m['rate_output'] = rates['output']
+
+        totals = {
+            'thinking_tokens': sum(m['thinking_tokens'] for m in by_model),
+            'thinking_cost': round(sum(m['thinking_cost'] for m in by_model), 4),
+            'cost': round(sum(m['cost'] for m in by_model), 4),
+        }
 
         users = [{"id": u["id"], "username": u["username"]} for u in all_users]
         return {
@@ -442,6 +453,7 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
             "by_user": by_user,
             "by_bot": by_bot,
             "by_model": by_model,
+            "totals": totals,
             "users": users,
             "pricing": pricing,
         }

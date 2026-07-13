@@ -8,9 +8,10 @@
  */
 
 import { useState } from 'react';
-import { useApiMutation } from '../../lib/useApiMutation';
+import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useGlobalConfig } from '../../config/ConfigProvider';
+import Icon from '../../components/icons';
 
 export default function LinkedTopicsSection({
   botName,
@@ -20,6 +21,7 @@ export default function LinkedTopicsSection({
 }) {
   const linked = topic.linked_topics || [];
   const [linkOpen, setLinkOpen] = useState(false);
+  const [open, setOpen] = useState(true);
 
   const update = useApiMutation('/api/topic/update', {
     invalidate: ['config'],
@@ -42,28 +44,62 @@ export default function LinkedTopicsSection({
     });
   }
 
+  const massUnlink = useConfirmedMutation(unlink, {
+    message: `Unlink all ${linked.length} topic${linked.length !== 1 ? 's' : ''}?`,
+    title: 'Mass Delete Linked Topics',
+    confirmLabel: 'Unlink All',
+    confirmClass: 'btn-danger'
+  });
+
   return (
-    <div className="form-group">
-      <label className="form-label">Linked Topics (inherit SEOs)</label>
-      <div className="tags-container">
-        {linked.map((lt, idx) => (
-          <span className="tag" key={`${lt}-${idx}`}>
-            🔗 {lt}
-            <span className="tag-remove" onClick={() => removeAt(idx)}>
-              ×
-            </span>
-          </span>
-        ))}
+    <div className={`tsec ${open ? 'open' : ''}`}>
+      <div className="tsec-head" onClick={() => setOpen((v) => !v)}>
+        <span className="collapsible-toggle cat-chevron">▼</span>
+        <span className="tsec-icon"><Icon name="link" size={15} /></span>
+        <span className="tsec-title">Linked Topics</span>
+        <div className="tsec-actions" onClick={(e) => e.stopPropagation()}>
+          <button className="btn btn-secondary btn-sm" onClick={() => setLinkOpen(true)}>
+            <Icon name="link" size={13} style={{ marginRight: 5 }} />
+            Link Existing Topic
+          </button>
+          <button
+            className="btn btn-secondary btn-sm btn-outline-danger"
+            disabled={!linked.length}
+            onClick={() =>
+              massUnlink({
+                bot_name: botName,
+                category_name: catName,
+                topic_name: topicName,
+                linked_topics: []
+              })
+            }
+          >
+            <Icon name="trash" size={13} style={{ marginRight: 5 }} />
+            Mass Delete
+          </button>
+        </div>
       </div>
-      <button
-        className="btn btn-secondary btn-sm mt-1"
-        onClick={() => setLinkOpen(true)}
-      >
-        + Link Existing Topic
-      </button>
-      <small className="text-muted d-block mt-1">
-        Link to other topics to inherit their SEOs
-      </small>
+
+      {open && (
+        <div className="tsec-body">
+          <div className="tags-container">
+            {linked.map((lt, idx) => (
+              <span className="tag" key={`${lt}-${idx}`}>
+                <Icon name="link" size={11} />
+                {lt}
+                <span className="tag-remove" onClick={() => removeAt(idx)}>
+                  ×
+                </span>
+              </span>
+            ))}
+            {linked.length === 0 && (
+              <span className="tsec-empty">
+                No linked topics — link others to inherit their SEOs
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {linkOpen && (
         <LinkTopicModal

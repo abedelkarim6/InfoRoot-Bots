@@ -573,6 +573,7 @@ function UsageHistoryCard() {
   const byUser = ok ? data.by_user || [] : [];
   const byBot = ok ? data.by_bot || [] : [];
   const byModel = ok ? data.by_model || [] : [];
+  const grandTotals = ok ? data.totals || {} : {};
   const users = ok ? data.users || [] : [];
 
   const includedFeatures = HIST_FEATURES.filter((f) => features[f.key]);
@@ -705,12 +706,15 @@ function UsageHistoryCard() {
           <div className="dash-stat-value">{fmtUsd(totals.cost)}</div>
           <div className="dash-stat-label">Est. cost in period</div>
         </div>
-        <div className="dash-stat-card">
-          <div className="dash-stat-icon">📊</div>
-          <div className="dash-stat-value">
-            {totals.runs > 0 ? fmtUsd(totals.cost / totals.runs) : '—'}
+        <div className="dash-stat-card" title="Cost of Gemini reasoning (thinking) tokens — billed at the output rate. Google lists this as the 'Thinking Text Output' SKU.">
+          <div className="dash-stat-icon">🧠</div>
+          <div className="dash-stat-value">{fmtUsd(grandTotals.thinking_cost || 0)}</div>
+          <div className="dash-stat-label">
+            Thinking cost
+            {totals.cost > 0 && (grandTotals.thinking_cost || 0) > 0
+              ? ` (${Math.round((grandTotals.thinking_cost / totals.cost) * 100)}%)`
+              : ''}
           </div>
-          <div className="dash-stat-label">Avg cost / run</div>
         </div>
       </div>
 
@@ -734,7 +738,7 @@ function UsageHistoryCard() {
                   {metric === 'cost' ? 'Cost' : metric === 'tokens' ? 'Tokens' : 'AI runs'} over time
                 </span>
                 <span className="dash-chart-sub">
-                  per {gran}{metric === 'cost' ? ' · pre-tracking summaries rows are blended estimates' : ''}
+                  per {gran}
                 </span>
               </div>
               <div className="dash-canvas-wrap">
@@ -871,37 +875,53 @@ function HistBreakdownTable({ rows }) {
 function HistModelTable({ rows }) {
   return (
     <div style={{ overflowX: 'auto' }}>
-      <table className="yt-table" style={{ fontSize: 12 }}>
+      <table className="yt-table" style={{ fontSize: 12, minWidth: 720 }}>
         <thead>
           <tr>
             <th>Model</th>
             <th style={{ textAlign: 'center' }}>Runs</th>
             <th style={{ textAlign: 'right' }}>Tokens</th>
-            <th style={{ textAlign: 'right' }}>Input $/1M</th>
-            <th style={{ textAlign: 'right' }}>Output $/1M</th>
+            <th style={{ textAlign: 'right' }} title="Reasoning (thinking) tokens — Google's 'Thinking Text Output' SKU">🧠 Thinking tok</th>
+            <th style={{ textAlign: 'right' }}>In $/1M</th>
+            <th style={{ textAlign: 'right' }}>Out $/1M</th>
+            <th style={{ textAlign: 'right' }} title="Cost of thinking tokens alone (billed at the output rate)">🧠 Thinking $</th>
             <th style={{ textAlign: 'right', paddingRight: 20 }}>Est. cost</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
+              <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
             </tr>
           ) : (
-            rows.map((r) => (
-              <tr key={r.model}>
-                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.model}</td>
-                <td style={{ textAlign: 'center' }}>{fmtNum(r.runs)}</td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                  {(r.tokens || 0).toLocaleString()}
-                </td>
-                <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_input}</td>
-                <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_output}</td>
-                <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>
-                  {fmtUsd(r.cost)}
-                </td>
-              </tr>
-            ))
+            rows.map((r) => {
+              const thinkPct = r.cost > 0 && r.thinking_cost > 0
+                ? Math.round((r.thinking_cost / r.cost) * 100) : 0;
+              return (
+                <tr key={r.model}>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.model}</td>
+                  <td style={{ textAlign: 'center' }}>{fmtNum(r.runs)}</td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {(r.tokens || 0).toLocaleString()}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                    {r.thinking_tokens > 0 ? (r.thinking_tokens).toLocaleString() : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_input}</td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_output}</td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                      title={thinkPct ? `${thinkPct}% of this model's cost` : ''}>
+                    {r.thinking_cost > 0 ? fmtUsd(r.thinking_cost) : '—'}
+                    {thinkPct >= 10 && (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> ({thinkPct}%)</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>
+                    {fmtUsd(r.cost)}
+                  </td>
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>
@@ -1122,8 +1142,10 @@ function HistUsersBar({ rows, metric }) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Model pricing editor — $/1M token rates per model + blended input ratio.
-// Rates feed every cost figure on this page and the monthly $ caps.
+// Model pricing editor — $/1M input & output token rates per model. Rates feed
+// every cost figure on this page and the monthly $ caps. (The legacy blended
+// input_ratio is preserved server-side for pre-tracking rows but no longer
+// editable here — all new usage is priced from exact input/output/thinking.)
 // ────────────────────────────────────────────────────────────────────────────
 
 function PricingCard() {
@@ -1221,15 +1243,8 @@ function PricingCard() {
                 </table>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  Blended input ratio (summaries estimate):
-                </span>
-                <input type="number" className="input" min="0" max="1" step="0.05"
-                  style={{ width: 80 }}
-                  value={ratio}
-                  onChange={(e) => setRatio(e.target.value)} />
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Share of a combined token total priced as input when no split was recorded.
+                  Thinking tokens are priced at the output rate.
                 </span>
                 <button
                   className="btn btn-primary btn-sm"

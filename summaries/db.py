@@ -539,25 +539,28 @@ class SummariesDB(Database):
                      message_ids: list = None, tokens_used: int = 0,
                      thoughts: str = None, schedule_id: int = None,
                      model_outputs: dict = None, primary_model: str = None,
-                     input_tokens: int = None, output_tokens: int = None) -> int:
+                     input_tokens: int = None, output_tokens: int = None,
+                     thinking_tokens: int = None) -> int:
         try:
             """Save a generated summary and return its id.
 
             `model_outputs` (optional) is a {model_name: summary_text} map of all
             models that ran for an A/B test; `primary_model` is the one sent to
             Telegram (== the model that produced `summary_text`).
-            `input_tokens`/`output_tokens` are the exact split of the PRIMARY
-            model's calls (NULL = unknown → blended cost estimate)."""
+            `input_tokens`/`output_tokens`/`thinking_tokens` are the exact split
+            of the PRIMARY model's calls — output is the visible answer, thinking
+            is the reasoning trace (own billing SKU). NULL = pre-tracking row →
+            blended cost estimate."""
             import json
             ids_str = ",".join(str(i) for i in message_ids) if message_ids else None
             outputs_json = json.dumps(model_outputs) if model_outputs else None
             cursor = self._get_cursor()
             cursor.execute(
                 """INSERT INTO summaries
-                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id, model_outputs, primary_model, input_tokens, output_tokens)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, message_ids, tokens_used, thoughts, schedule_id, model_outputs, primary_model, input_tokens, output_tokens, thinking_tokens)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id, outputs_json, primary_model, input_tokens, output_tokens)
+                (summary_text, message_count, summary_type, target_entity, bot_name, topic_name, ids_str, tokens_used or 0, thoughts or None, schedule_id, outputs_json, primary_model, input_tokens, output_tokens, thinking_tokens)
             )
             row = cursor.fetchone()
             return row['id']
@@ -699,7 +702,7 @@ class SummariesDB(Database):
             ),
             su AS (
                 SELECT s.id, s.bot_name, s.timestamp, s.tokens_used, s.message_count, s.primary_model,
-                       s.input_tokens, s.output_tokens,
+                       s.input_tokens, s.output_tokens, s.thinking_tokens,
                        CASE WHEN so.found THEN so.owner_id ELSE nm.owner_id END AS eff_owner_id
                 FROM summaries s
                 LEFT JOIN sched_owner so ON so.schedule_id = s.schedule_id
@@ -712,6 +715,7 @@ class SummariesDB(Database):
         split_sums = """
                        SUM(CASE WHEN su.input_tokens IS NOT NULL THEN su.input_tokens ELSE 0 END) AS input_tokens,
                        SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.output_tokens, 0) ELSE 0 END) AS output_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.thinking_tokens, 0) ELSE 0 END) AS thinking_tokens,
                        SUM(CASE WHEN su.input_tokens IS NULL THEN COALESCE(su.tokens_used, 0) ELSE 0 END) AS legacy_tokens
         """
         date_params = [date_from, date_to]
@@ -790,7 +794,8 @@ class SummariesDB(Database):
                        COALESCE(u.username, 'Admin')       AS username,
                        COUNT(*)                            AS runs,
                        SUM(COALESCE(l.input_tokens, 0))    AS input_tokens,
-                       SUM(COALESCE(l.output_tokens, 0))   AS output_tokens
+                       SUM(COALESCE(l.output_tokens, 0))   AS output_tokens,
+                       SUM(COALESCE(l.thinking_tokens, 0)) AS thinking_tokens
                 FROM ai_usage_log l
                 LEFT JOIN users u ON u.id = l.user_id
                 WHERE l.created_at::date BETWEEN %s AND %s {owner_sql}
@@ -832,7 +837,7 @@ class SummariesDB(Database):
                     SELECT DISTINCT ON (name) name, owner_id FROM bots ORDER BY name, id
                 ),
                 su AS (
-                    SELECT s.tokens_used, s.primary_model, s.input_tokens, s.output_tokens,
+                    SELECT s.tokens_used, s.primary_model, s.input_tokens, s.output_tokens, s.thinking_tokens,
                            CASE WHEN so.found THEN so.owner_id ELSE nm.owner_id END AS eff_owner_id
                     FROM summaries s
                     LEFT JOIN sched_owner so ON so.schedule_id = s.schedule_id
@@ -842,6 +847,7 @@ class SummariesDB(Database):
                 SELECT su.primary_model AS model,
                        SUM(CASE WHEN su.input_tokens IS NOT NULL THEN su.input_tokens ELSE 0 END) AS input_tokens,
                        SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.output_tokens, 0) ELSE 0 END) AS output_tokens,
+                       SUM(CASE WHEN su.input_tokens IS NOT NULL THEN COALESCE(su.thinking_tokens, 0) ELSE 0 END) AS thinking_tokens,
                        SUM(CASE WHEN su.input_tokens IS NULL THEN COALESCE(su.tokens_used, 0) ELSE 0 END) AS legacy_tokens
                 FROM su WHERE {owner_sql}
                 GROUP BY 1
@@ -849,9 +855,10 @@ class SummariesDB(Database):
             rows = []
             for r in cursor.fetchall():
                 # Exact split rows price precisely; legacy totals price blended.
-                if (r['input_tokens'] or 0) + (r['output_tokens'] or 0) > 0:
+                if (r['input_tokens'] or 0) + (r['output_tokens'] or 0) + (r['thinking_tokens'] or 0) > 0:
                     rows.append({'feature': 'summaries', 'model': r['model'],
-                                 'input_tokens': r['input_tokens'], 'output_tokens': r['output_tokens']})
+                                 'input_tokens': r['input_tokens'], 'output_tokens': r['output_tokens'],
+                                 'thinking_tokens': r['thinking_tokens']})
                 if (r['legacy_tokens'] or 0) > 0:
                     rows.append({'feature': 'summaries', 'model': r['model'],
                                  'tokens': r['legacy_tokens']})
@@ -859,7 +866,8 @@ class SummariesDB(Database):
             cursor.execute(f"""
                 SELECT l.feature, l.model,
                        SUM(COALESCE(l.input_tokens, 0))  AS input_tokens,
-                       SUM(COALESCE(l.output_tokens, 0)) AS output_tokens
+                       SUM(COALESCE(l.output_tokens, 0)) AS output_tokens,
+                       SUM(COALESCE(l.thinking_tokens, 0)) AS thinking_tokens
                 FROM ai_usage_log l
                 WHERE l.created_at >= DATE_TRUNC('month', CURRENT_TIMESTAMP) AND {log_sql}
                 GROUP BY 1, 2

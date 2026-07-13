@@ -309,6 +309,7 @@ class YouTubeDB:
         _ensure_col('yt_summaries', 'duration_secs',  'INTEGER')
         _ensure_col('yt_summaries', 'input_tokens',   'INTEGER')
         _ensure_col('yt_summaries', 'output_tokens',  'INTEGER')
+        _ensure_col('yt_summaries', 'thinking_tokens', 'INTEGER')
         _ensure_col('yt_summaries', 'model',          'TEXT')
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
@@ -872,7 +873,8 @@ class YouTubeDB:
                    COUNT(*)                          AS runs,
                    SUM(COALESCE(input_tokens, 0))    AS input_tokens,
                    SUM(COALESCE(output_tokens, 0))   AS output_tokens,
-                   SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
+                   SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens,
+                   SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(thinking_tokens, 0)) AS tokens
             FROM yt_summaries
             WHERE created_at::date BETWEEN %s AND %s
             GROUP BY 1, 2 ORDER BY 1
@@ -1488,19 +1490,19 @@ class YouTubeDB:
                      prompt: str = None, thoughts: str = None,
                      transcript_text: str = None,
                      output_length_percent: int = None,
-                     model: str = None):
+                     model: str = None, thinking_tokens: int = None):
         prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
                  telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-                 thoughts, transcript_text, output_length_percent, model)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 thoughts, transcript_text, output_length_percent, model, thinking_tokens)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
               telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-              thoughts or None, transcript_text, output_length_percent, model))
+              thoughts or None, transcript_text, output_length_percent, model, thinking_tokens))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']

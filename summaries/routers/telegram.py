@@ -76,6 +76,7 @@ async def _live_fetch_admin_channels():
                 'is_broadcast': is_broadcast,
                 'is_megagroup': is_megagroup,
                 'can_post': can_post,
+                'participants_count': getattr(entity, 'participants_count', None),
             })
 
     await client.disconnect()
@@ -238,6 +239,7 @@ async def get_userbot_dialogs(request: Request):
                         "is_broadcast": getattr(entity, 'broadcast', False),
                         "is_megagroup": getattr(entity, "megagroup", False),
                         "can_post": can_post,
+                        "participants_count": getattr(entity, "participants_count", None),
                     })
 
             await client.disconnect()

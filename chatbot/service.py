@@ -215,17 +215,21 @@ def _log_chat_usage(session: dict, metrics, prompt_text: str, reply_text: str):
     Uses Agno run metrics when available (exact input/output tokens across the
     team run); falls back to a chars/4 estimate. Best-effort — never raises."""
     try:
-        inp = out = 0
+        inp = out = think = 0
         if metrics is not None:
             inp = int(getattr(metrics, "input_tokens", 0) or 0)
             out = int(getattr(metrics, "output_tokens", 0) or 0)
-        if not (inp or out):
+            # Gemini bills thinking at the output rate; Agno may surface it as
+            # reasoning_tokens. Track it separately for the thinking cost split.
+            think = int(getattr(metrics, "reasoning_tokens", 0) or 0)
+        if not (inp or out or think):
             inp = len(prompt_text or "") // 4
             out = len(reply_text or "") // 4
         from utils.database import get_db
         db = get_db()
         if db is not None:
-            db.log_ai_usage(session.get("user_id"), "chatbot", session.get("model_id"), inp, out)
+            db.log_ai_usage(session.get("user_id"), "chatbot", session.get("model_id"),
+                            inp, out, thinking_tokens=think)
     except Exception as e:
         logger.warning(f"[CHATBOT] usage logging failed: {e}")
 
@@ -425,6 +429,17 @@ Lines 4-6: Analytical questions (trends, comparisons, patterns, why)"""
             )
         )
         text = response.text.strip()
+
+        # Cost tracking — hourly/system suggestion generation (flash-lite),
+        # attributed to admin. Small but real chatbot-feature usage.
+        try:
+            from utils.ai_pricing import extract_gemini_tokens
+            _i, _o, _t = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+            db.log_ai_usage(None, "chatbot", "gemini-2.5-flash-lite", _i, _o,
+                            context="suggestions", thinking_tokens=_t)
+        except Exception:
+            pass
+
         questions = [q.strip().lstrip("0123456789.-) ") for q in text.split("\n") if q.strip()]
 
         informative = questions[:3]

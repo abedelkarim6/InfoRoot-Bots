@@ -1043,11 +1043,15 @@ class Database:
             cursor.execute("ALTER TABLE topic_interim_summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
             cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS schedule_id INTEGER")
 
-            # Migrate: exact input/output token split for the PRIMARY model's
-            # calls of a summary run (tokens_used stays the combined total for
-            # display). NULL input_tokens = pre-migration row → blended pricing.
+            # Migrate: exact input/output/thinking token split for the PRIMARY
+            # model's calls of a summary run (tokens_used stays the combined
+            # total for display). `output_tokens` is the visible ANSWER;
+            # `thinking_tokens` is the reasoning trace (Gemini "Thinking Text
+            # Output" SKU — billed at the output rate, tracked separately for
+            # cost visibility). NULL input_tokens = pre-migration → blended.
             cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS input_tokens INTEGER")
             cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS output_tokens INTEGER")
+            cursor.execute("ALTER TABLE summaries ADD COLUMN IF NOT EXISTS thinking_tokens INTEGER")
 
             # Generic AI usage event log — features without their own storage
             # (chatbot agent runs, SEO suggestions). Summaries / YouTube keep
@@ -1064,6 +1068,8 @@ class Database:
                     context       TEXT
                 )
             """)
+            # thinking (reasoning) tokens — added after initial table creation
+            cursor.execute("ALTER TABLE ai_usage_log ADD COLUMN IF NOT EXISTS thinking_tokens INTEGER DEFAULT 0")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS ai_usage_log_created_idx
                 ON ai_usage_log (created_at DESC)
@@ -1399,15 +1405,18 @@ class Database:
             self._commit()
 
     def log_ai_usage(self, user_id, feature: str, model: str,
-                     input_tokens: int = 0, output_tokens: int = 0, context: str = None):
-        """Record one AI call for cost tracking (chatbot / seo — features
-        without their own storage table). Best-effort: never raises."""
+                     input_tokens: int = 0, output_tokens: int = 0, context: str = None,
+                     thinking_tokens: int = 0):
+        """Record one AI call for cost tracking (chatbot / seo, plus auxiliary
+        summaries calls). `output_tokens` is the visible answer; `thinking_tokens`
+        is the reasoning trace (own billing SKU). Best-effort: never raises."""
         try:
             cursor = self._get_cursor()
             cursor.execute(
-                """INSERT INTO ai_usage_log (user_id, feature, model, input_tokens, output_tokens, context)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (user_id, feature, model, int(input_tokens or 0), int(output_tokens or 0), context)
+                """INSERT INTO ai_usage_log (user_id, feature, model, input_tokens, output_tokens, context, thinking_tokens)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (user_id, feature, model, int(input_tokens or 0), int(output_tokens or 0),
+                 context, int(thinking_tokens or 0))
             )
         except Exception as e:
             logger.warning(f"[AI-USAGE] log_ai_usage failed: {e}")
