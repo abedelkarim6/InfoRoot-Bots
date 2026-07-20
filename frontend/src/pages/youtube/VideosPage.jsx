@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, debounce, escapeHtml } from '../../lib/api';
+import { api, escapeHtml } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import { useAuth } from '../../auth/AuthContext';
@@ -26,6 +26,43 @@ import { useUrlInt, useUrlString } from '../../lib/useUrlState';
 import { estimateCost, timeAgo, formatDuration } from './shared';
 
 const PAGE_SIZE = 50;
+
+// Map known YouTube worker error patterns to short, human-readable labels.
+// Returns { label, icon } when matched, or null to fall back to the raw text.
+function friendlyYtError(err) {
+  if (!err) return null;
+  const s = String(err);
+  const low = s.toLowerCase();
+  if (low.includes('quotaexceeded') || (low.includes('quota') && low.includes('exceed')))
+    return { icon: '📊', label: 'YouTube Data API daily quota exceeded' };
+  if (low.includes('gemini video-hour quota') || low.includes('video-hour quota'))
+    return { icon: '⏱️', label: 'Daily Gemini video-hour quota reached' };
+  if (low.includes('scheduler timeout') || low.includes('processing timed out'))
+    return { icon: '⏳', label: 'Processing timed out — try Retry' };
+  if (low.includes('both summarization strategies failed'))
+    return { icon: '🚫', label: 'Both summarization strategies failed (see details below)' };
+  if (low.includes('no transcript available'))
+    return { icon: '🚫', label: 'No transcript available and Gemini video failed' };
+  if (low.includes('429') || low.includes('resource_exhausted'))
+    return { icon: '🐢', label: 'Gemini rate-limited (429)' };
+  if (low.includes('source channel inactive'))
+    return { icon: '⏸️', label: 'Skipped — source channel is inactive' };
+  if (low.includes('source keyword inactive'))
+    return { icon: '⏸️', label: 'Skipped — source keyword is inactive' };
+  if (low.includes('max attempts reached'))
+    return { icon: '🔁', label: 'Max retry attempts reached' };
+  if (low.includes('reset from stuck processing state'))
+    return { icon: '♻️', label: 'Recovered from stuck processing — will retry' };
+  if (low.includes('video too short'))
+    return { icon: '📏', label: 'Skipped — video shorter than channel minimum' };
+  if (low.includes('video too long'))
+    return { icon: '📏', label: 'Skipped — video longer than channel maximum' };
+  if (low.includes('not enough views'))
+    return { icon: '👁️', label: 'Skipped — below channel minimum view count' };
+  if (low.includes('cannot find any entity'))
+    return { icon: '📮', label: 'Telegram target not reachable from this account' };
+  return null;
+}
 
 /**
  * Live "time spent" counter for an in-flight item. Starts from the
@@ -52,12 +89,14 @@ export default function VideosPage() {
   // filters apply only when the user sets them.
   const [filterStatus, setFilterStatus] = useUrlString('status', '');
   const [filterChannel, setFilterChannel] = useUrlString('ch', '');
+  const [filterKeyword, setFilterKeyword] = useUrlString('kw', '');
   const [filterSource, setFilterSource] = useUrlString('src', '');
   const [filterDateFrom, setFilterDateFrom] = useUrlString('from', '');
   const [filterDateTo, setFilterDateTo] = useUrlString('to', '');
   const filters = {
     status: filterStatus,
     channel: filterChannel,
+    keyword: filterKeyword,
     source: filterSource,
     dateFrom: filterDateFrom,
     dateTo: filterDateTo
@@ -67,12 +106,13 @@ export default function VideosPage() {
       const v = typeof next === 'function' ? next(filters) : next;
       setFilterStatus(v.status || '');
       setFilterChannel(v.channel || '');
+      setFilterKeyword(v.keyword || '');
       setFilterSource(v.source || '');
       setFilterDateFrom(v.dateFrom || '');
       setFilterDateTo(v.dateTo || '');
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterStatus, filterChannel, filterSource, filterDateFrom, filterDateTo]
+    [filterStatus, filterChannel, filterKeyword, filterSource, filterDateFrom, filterDateTo]
   );
 
   const [page, setPage] = useUrlInt('page', 0);
@@ -80,7 +120,7 @@ export default function VideosPage() {
 
   // Reset page when filters change — uses a JSON-stringified key so we don't
   // depend on filters' object identity (rebuilt every render from URL state).
-  const filterKey = `${filterStatus}|${filterChannel}|${filterSource}|${filterDateFrom}|${filterDateTo}`;
+  const filterKey = `${filterStatus}|${filterChannel}|${filterKeyword}|${filterSource}|${filterDateFrom}|${filterDateTo}`;
   useEffect(() => {
     setPage(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,6 +133,7 @@ export default function VideosPage() {
     params.set('offset', String(offset));
     if (filters.status) params.set('status', filters.status);
     if (filters.channel) params.set('channel', filters.channel);
+    if (filters.keyword) params.set('keyword', filters.keyword);
     if (filters.source) params.set('source', filters.source);
     if (filters.dateFrom) params.set('date_from', filters.dateFrom);
     if (filters.dateTo) params.set('date_to', filters.dateTo);
@@ -125,7 +166,12 @@ export default function VideosPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const hasFilters =
-    filters.status || filters.channel || filters.source || filters.dateFrom || filters.dateTo;
+    filters.status ||
+    filters.channel ||
+    filters.keyword ||
+    filters.source ||
+    filters.dateFrom ||
+    filters.dateTo;
 
   // ── Mutations ────────────────────────────────────────────────
   const triggerProcess = useApiMutation('/api/youtube/queue/process', {
@@ -181,7 +227,14 @@ export default function VideosPage() {
   }
 
   function clearFilters() {
-    setFilters({ status: '', channel: '', source: '', dateFrom: '', dateTo: '' });
+    setFilters({
+      status: '',
+      channel: '',
+      keyword: '',
+      source: '',
+      dateFrom: '',
+      dateTo: ''
+    });
   }
 
   function setStatusFilter(status) {
@@ -208,9 +261,6 @@ export default function VideosPage() {
           />
           Auto-refresh
         </label>
-        <button className="btn btn-danger btn-sm" onClick={clearAllConfirm}>
-          🗑️ Clear All
-        </button>
         <button
           className="btn btn-secondary"
           onClick={() => triggerProcess.mutate({})}
@@ -224,12 +274,17 @@ export default function VideosPage() {
         >
           🔄 Refresh
         </button>
+        <button className="btn btn-danger" onClick={clearAllConfirm}>
+          🗑️ Clear All
+        </button>
       </PageHeader>
 
       <div className="yt-top-cards-row">
         <ManualSubmitCard />
         <DefaultTargetsCard />
       </div>
+
+      {isAdmin && <YtThinkingCard />}
 
       {/* Daily budget */}
       <div className="yt-daily-budget">
@@ -396,22 +451,18 @@ function StatCard({ icon, label, value, active, onClick }) {
 // ─── Filter Bar ─────────────────────────────────────────────────────────────
 
 function FilterBar({ filters, onChange, hasFilters, onClear }) {
-  // Channel field is debounced — keep its draft locally
-  const [channelDraft, setChannelDraft] = useState(filters.channel);
-
-  // Keep draft in sync when external state changes (e.g. clearFilters)
-  useEffect(() => {
-    setChannelDraft(filters.channel);
-  }, [filters.channel]);
-
-  // Debounced handler propagates to parent state
-  const debouncedChange = useMemo(
-    () =>
-      debounce((v) => {
-        onChange((f) => ({ ...f, channel: v }));
-      }, 400),
-    [onChange]
-  );
+  // Channel + tracker (keyword) dropdowns are populated from the configured
+  // YouTube sources so the user picks rather than free-types.
+  const { data: channelsRes } = useQuery({
+    queryKey: ['yt-channels'],
+    queryFn: () => api('/api/youtube/channels')
+  });
+  const { data: keywordsRes } = useQuery({
+    queryKey: ['yt-keywords'],
+    queryFn: () => api('/api/youtube/keywords')
+  });
+  const channels = channelsRes?.status === 'ok' ? channelsRes.channels || [] : [];
+  const keywords = keywordsRes?.status === 'ok' ? keywordsRes.keywords || [] : [];
 
   return (
     <div className="dash-filter-bar">
@@ -449,18 +500,33 @@ function FilterBar({ filters, onChange, hasFilters, onClear }) {
       </div>
       <div className="dash-filter-group">
         <span className="dash-filter-label">📺 Channel</span>
-        <input
-          type="text"
-          className="input dash-filter-select"
-          style={{ width: 140 }}
-          placeholder="Filter…"
-          value={channelDraft}
-          onChange={(e) => {
-            const v = e.target.value;
-            setChannelDraft(v);
-            debouncedChange(v);
-          }}
-        />
+        <select
+          className="select dash-filter-select"
+          value={filters.channel}
+          onChange={(e) => onChange((f) => ({ ...f, channel: e.target.value }))}
+        >
+          <option value="">All Channels</option>
+          {channels.map((c) => (
+            <option key={c.channel_id} value={c.channel_id}>
+              {c.channel_name || c.channel_id}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="dash-filter-group">
+        <span className="dash-filter-label">🔍 Tracker</span>
+        <select
+          className="select dash-filter-select"
+          value={filters.keyword}
+          onChange={(e) => onChange((f) => ({ ...f, keyword: e.target.value }))}
+        >
+          <option value="">All Trackers</option>
+          {keywords.map((k) => (
+            <option key={k.id} value={String(k.id)}>
+              {k.keyword}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="dash-filter-group">
         <span className="dash-filter-label">🔧 Source</span>
@@ -479,6 +545,130 @@ function FilterBar({ filters, onChange, hasFilters, onClear }) {
           ✕ Clear
         </button>
       )}
+    </div>
+  );
+}
+
+// ─── YouTube Thinking Toggle ────────────────────────────────────────────────
+//
+// Gemini 2.5 extended reasoning for YouTube summarization. Independent of the
+// summaries feature's toggle — backed by the `yt_gemini_thinking` setting.
+// When ON, the reasoning trace is captured and stored on each yt_summaries row.
+
+function YtThinkingCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['yt-gemini-thinking'],
+    queryFn: () => api('/api/youtube/gemini-thinking')
+  });
+
+  // Optimistic local state — flips immediately, synced from server data.
+  const [localEnabled, setLocalEnabled] = useState(false);
+  const [localBudget, setLocalBudget] = useState(-1);
+  useEffect(() => {
+    if (data?.status === 'ok') {
+      setLocalEnabled(!!data.enabled);
+      setLocalBudget(Number.isFinite(data.budget) ? data.budget : -1);
+    }
+  }, [data?.status, data?.enabled, data?.budget]);
+
+  const update = useApiMutation('/api/youtube/gemini-thinking', {
+    invalidate: ['yt-gemini-thinking'],
+    successMsg: 'Thinking setting updated',
+    errorMsg: 'Failed to update thinking setting',
+    onError: () => {
+      if (data?.status === 'ok') {
+        setLocalEnabled(!!data.enabled);
+        setLocalBudget(Number.isFinite(data.budget) ? data.budget : -1);
+      }
+    }
+  });
+
+  const enabled = localEnabled;
+  const budget = localBudget;
+
+  function setEnabled(next) {
+    setLocalEnabled(next);
+    update.mutate({ enabled: next, budget });
+  }
+  function setBudget(next) {
+    setLocalBudget(next);
+    update.mutate({ enabled, budget: next });
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: '1.25rem' }}>
+      <div className="card-header" style={{ gap: '.75rem' }}>
+        <span style={{ fontSize: '1.1rem' }}>🧠</span>
+        <strong>Extended Thinking</strong>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+          Gemini 2.5 reasoning mode
+        </span>
+      </div>
+      <div className="card-body" style={{ padding: '1rem 1.25rem' }}>
+        <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-muted)' }}>
+          When on, Gemini may spend extra tokens internally reasoning before producing
+          each video summary. Improves quality for complex prompts but increases token
+          usage. The reasoning trace is saved with the summary (👁️ View summary).
+        </p>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={isLoading || update.isPending}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
+            <span className="toggle-slider" />
+          </label>
+          <strong style={{ fontSize: 13 }}>
+            {enabled ? 'Thinking enabled' : 'Thinking disabled'}
+          </strong>
+        </div>
+
+        {enabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Budget:</span>
+            <select
+              className="select"
+              value={budget === -1 ? 'dynamic' : budget === 0 ? 'off' : 'custom'}
+              disabled={update.isPending}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'dynamic') setBudget(-1);
+                else if (v === 'off') setBudget(0);
+                else setBudget(Math.max(1, budget > 0 ? budget : 1024));
+              }}
+              style={{ width: 200 }}
+            >
+              <option value="dynamic">Dynamic (model decides)</option>
+              <option value="off">Off (no thinking tokens)</option>
+              <option value="custom">Custom cap</option>
+            </select>
+            {budget > 0 && (
+              <input
+                type="number"
+                className="input"
+                min="1"
+                step="128"
+                value={budget}
+                disabled={update.isPending}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n > 0) setBudget(n);
+                }}
+                style={{ width: 130 }}
+                title="Max thinking tokens per call"
+              />
+            )}
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {budget === -1 && '−1 = model self-regulates how much to think.'}
+              {budget === 0 && '0 = thinking is suppressed (same as toggle off).'}
+              {budget > 0 && 'Hard cap on thinking tokens per request.'}
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1107,6 +1297,13 @@ function VideoRow({ item, isAdmin }) {
     const res = await api(`/api/youtube/summaries/${item.summary_id}`);
     if (res?.status !== 'ok') return showNotification('Failed to load summary.', 'error');
     const s = res.summary;
+    const thoughtsBlock = s.thoughts
+      ? `
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer;font-weight:600;">🧠 Thinking trace</summary>
+        <div class="yt-summary-text" style="white-space:pre-wrap;margin-top:8px;max-height:40vh;overflow-y:auto;color:var(--text-muted);">${escapeHtml(s.thoughts)}</div>
+      </details>`
+      : '';
     const html = `
       <div class="yt-summary-meta" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <span>📺 ${escapeHtml(s.channel_name || '—')}</span>
@@ -1115,6 +1312,7 @@ function VideoRow({ item, isAdmin }) {
         <span>🔗 <a href="https://youtube.com/watch?v=${escapeHtml(s.video_id)}" target="_blank" rel="noopener">${escapeHtml(s.video_id)}</a></span>
       </div>
       <div class="yt-summary-text" style="white-space:pre-wrap;">${escapeHtml(s.summary_text || '')}</div>
+      ${thoughtsBlock}
     `;
     showAlert(html, { title: s.title || 'Summary', icon: '👁️' });
   }
@@ -1153,14 +1351,24 @@ function VideoRow({ item, isAdmin }) {
     const res = await api(`/api/youtube/queue/${item.id}`);
     if (res?.status !== 'ok') return showNotification('Failed to load details.', 'error');
     const it = res.item;
+    const friendly = friendlyYtError(it.error_log);
+    const friendlyBlock = friendly
+      ? `<div style="margin-bottom:10px;padding:8px 12px;border-left:3px solid var(--error);background:rgba(239,68,68,0.08);border-radius:4px;font-weight:600;">
+           ${friendly.icon} ${escapeHtml(friendly.label)}
+         </div>`
+      : '';
     const html = `
       <div class="yt-summary-meta" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <span>📊 ${escapeHtml(it.status)} (${it.attempts} attempts)</span>
         <span>🔗 <a href="https://youtube.com/watch?v=${escapeHtml(it.video_id)}" target="_blank" rel="noopener">${escapeHtml(it.video_id)}</a></span>
       </div>
-      <div><strong>Error:</strong>
-        <div class="yt-summary-text" style="max-height:40vh;color:var(--error);white-space:pre-wrap;">${escapeHtml(it.error_log || 'No error details')}</div>
-      </div>
+      ${friendlyBlock}
+      <details ${friendly ? '' : 'open'}>
+        <summary style="cursor:pointer;color:var(--text-muted);font-size:0.9em;">
+          ${friendly ? 'Show technical details' : 'Error details'}
+        </summary>
+        <div class="yt-summary-text" style="max-height:40vh;color:var(--error);white-space:pre-wrap;margin-top:8px;">${escapeHtml(it.error_log || 'No error details')}</div>
+      </details>
     `;
     showAlert(html, { title: it.video_title || it.video_id, icon: '⚠️' });
   }

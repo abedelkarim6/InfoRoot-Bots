@@ -17,25 +17,41 @@ import { useGlobalConfig } from '../config/ConfigProvider';
 import { useAuth } from '../auth/AuthContext';
 import { useUrlInt, useUrlSet, useUrlString } from '../lib/useUrlState';
 
-/* ── Colour palette (matches app accent colours) ─ */
+/* ── Colour palette (violet-led, matches the Figma design system) ─ */
 const PALETTE = [
-  '#3b82f6', '#8b5cf6', '#10b981', '#f59e0b',
+  '#6b3db5', '#8541f1', '#10b981', '#f59e0b',
   '#ef4444', '#06b6d4', '#f97316', '#84cc16',
   '#ec4899', '#a78bfa', '#34d399', '#fb923c'
 ];
 
-/* ── Shared dark-theme Chart.js overrides ────────── */
-const TOOLTIP = {
-  backgroundColor: '#1e2433',
-  borderColor: '#2d3748',
-  borderWidth: 1,
-  titleColor: '#f8fafc',
-  bodyColor: '#94a3b8',
-  padding: 10,
-  cornerRadius: 6
-};
-const GRID = { color: 'rgba(45,55,72,0.6)', drawBorder: false };
-const TICKS = { color: '#64748b', font: { size: 11 } };
+/* ── Theme-aware Chart.js styling ──────────────────
+   Colors are read from the CSS custom properties at chart-creation time so
+   charts follow the active light/dark theme instead of hardcoding one. */
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+function chartTheme() {
+  const accent = cssVar('--accent-primary', '#6b3db5');
+  const accentRgb = cssVar('--accent-primary-rgb', '107, 61, 181');
+  return {
+    accent,
+    accentRgb,
+    surface: cssVar('--bg-card', '#ffffff'),
+    tooltip: {
+      backgroundColor: cssVar('--bg-card', '#ffffff'),
+      borderColor: cssVar('--border-color', '#e0d5f0'),
+      borderWidth: 1,
+      titleColor: cssVar('--text-primary', '#3d1f8f'),
+      bodyColor: cssVar('--text-secondary', '#5a4080'),
+      padding: 10,
+      cornerRadius: 8
+    },
+    grid: { color: `rgba(${accentRgb}, 0.08)`, drawBorder: false },
+    ticks: { color: cssVar('--text-muted', '#9985bb'), font: { size: 11 } },
+    legend: cssVar('--text-secondary', '#5a4080')
+  };
+}
 
 const PERIOD_OPTIONS = [
   { value: 7, label: 'Last 7 days' },
@@ -331,6 +347,7 @@ function DailyChart({ perDay, days }) {
     const filled = fillDays(perDay || [], days);
     const labels = filled.map((d) => d.day.slice(5));
     const values = filled.map((d) => d.count);
+    const th = chartTheme();
     chartRef.current = new window.Chart(ref.current, {
       type: 'line',
       data: {
@@ -338,9 +355,9 @@ function DailyChart({ perDay, days }) {
         datasets: [{
           label: 'Messages',
           data: values,
-          borderColor: '#3b82f6',
-          backgroundColor: 'rgba(59,130,246,0.08)',
-          pointBackgroundColor: '#3b82f6',
+          borderColor: th.accent,
+          backgroundColor: `rgba(${th.accentRgb},0.08)`,
+          pointBackgroundColor: th.accent,
           pointRadius: 3,
           pointHoverRadius: 5,
           fill: true,
@@ -351,10 +368,10 @@ function DailyChart({ perDay, days }) {
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: TOOLTIP },
+        plugins: { legend: { display: false }, tooltip: th.tooltip },
         scales: {
-          x: { grid: GRID, ticks: TICKS },
-          y: { grid: GRID, ticks: TICKS, beginAtZero: true }
+          x: { grid: th.grid, ticks: th.ticks },
+          y: { grid: th.grid, ticks: th.ticks, beginAtZero: true }
         }
       }
     });
@@ -372,6 +389,7 @@ function TopicsDonut({ perTopic }) {
     if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
     if (!ref.current || !window.Chart || !perTopic?.length) return undefined;
     const top = perTopic.slice(0, 10);
+    const th = chartTheme();
     chartRef.current = new window.Chart(ref.current, {
       type: 'doughnut',
       data: {
@@ -379,7 +397,7 @@ function TopicsDonut({ perTopic }) {
         datasets: [{
           data: top.map((t) => t.count),
           backgroundColor: PALETTE.slice(0, top.length),
-          borderColor: '#13161f',
+          borderColor: th.surface,
           borderWidth: 2,
           hoverBorderWidth: 0
         }]
@@ -391,9 +409,9 @@ function TopicsDonut({ perTopic }) {
         plugins: {
           legend: {
             position: 'right',
-            labels: { color: '#94a3b8', font: { size: 10 }, padding: 8, boxWidth: 10 }
+            labels: { color: th.legend, font: { size: 10 }, padding: 8, boxWidth: 10 }
           },
-          tooltip: TOOLTIP
+          tooltip: th.tooltip
         }
       }
     });
@@ -411,6 +429,7 @@ function SourcesBar({ perSource }) {
     if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
     if (!ref.current || !window.Chart || !perSource?.length) return undefined;
     const top = perSource.slice(0, 15);
+    const th = chartTheme();
     chartRef.current = new window.Chart(ref.current, {
       type: 'bar',
       data: {
@@ -418,8 +437,8 @@ function SourcesBar({ perSource }) {
         datasets: [{
           label: 'Messages',
           data: top.map((s) => s.count),
-          backgroundColor: 'rgba(59,130,246,0.65)',
-          borderColor: '#3b82f6',
+          backgroundColor: `rgba(${th.accentRgb},0.65)`,
+          borderColor: th.accent,
           borderWidth: 1,
           borderRadius: 4
         }]
@@ -428,10 +447,10 @@ function SourcesBar({ perSource }) {
         indexAxis: 'y',
         responsive: true,
         maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: TOOLTIP },
+        plugins: { legend: { display: false }, tooltip: th.tooltip },
         scales: {
-          x: { grid: GRID, ticks: TICKS, beginAtZero: true },
-          y: { grid: { display: false }, ticks: { ...TICKS, font: { size: 10 } } }
+          x: { grid: th.grid, ticks: th.ticks, beginAtZero: true },
+          y: { grid: { display: false }, ticks: { ...th.ticks, font: { size: 10 } } }
         }
       }
     });
@@ -466,6 +485,7 @@ function TrendChart({ trendData, perTopic }) {
         borderWidth: 1.8
       };
     });
+    const th = chartTheme();
     chartRef.current = new window.Chart(ref.current, {
       type: 'line',
       data: { labels, datasets },
@@ -475,13 +495,13 @@ function TrendChart({ trendData, perTopic }) {
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: {
-            labels: { color: '#94a3b8', font: { size: 10 }, padding: 10, boxWidth: 10 }
+            labels: { color: th.legend, font: { size: 10 }, padding: 10, boxWidth: 10 }
           },
-          tooltip: { ...TOOLTIP, mode: 'index', intersect: false }
+          tooltip: { ...th.tooltip, mode: 'index', intersect: false }
         },
         scales: {
-          x: { grid: GRID, ticks: TICKS },
-          y: { grid: GRID, ticks: TICKS, beginAtZero: true }
+          x: { grid: th.grid, ticks: th.ticks },
+          y: { grid: th.grid, ticks: th.ticks, beginAtZero: true }
         }
       }
     });
@@ -538,7 +558,7 @@ function SourceMatrix({ breakdown, perTopic, srcFilter, isLoading }) {
               {topics.map((t) => {
                 const val = lut[`${src}|${t}`] || 0;
                 const alpha = val > 0 ? (val / maxVal * 0.55).toFixed(2) : '0';
-                const style = val > 0 ? { background: `rgba(59,130,246,${alpha})` } : undefined;
+                const style = val > 0 ? { background: `rgba(var(--accent-primary-rgb),${alpha})` } : undefined;
                 return (
                   <td className="dash-matrix-cell" style={style} key={t}>
                     {val > 0 ? val : <span style={{ opacity: 0.2 }}>—</span>}

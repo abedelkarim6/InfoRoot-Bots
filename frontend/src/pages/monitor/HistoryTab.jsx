@@ -447,9 +447,11 @@ function HistoryRow({ run, onShowComposition, onViewSummary, onViewError }) {
 // ────────────────────────────────────────────────────────────────────────────
 
 function CompositionPanel({ summaryId, onBack }) {
+  const { showAlert } = useDialogs();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showExport, setShowExport] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -472,9 +474,29 @@ function CompositionPanel({ summaryId, onBack }) {
 
   const interims = data?.interims || [];
   const remaining = data?.remaining_messages || [];
-  const finalSummary = data?.summary_text || '';
   const lastIdx = interims.length - 1;
-  const hasData = interims.length > 0 || remaining.length > 0;
+
+  // Flatten every interim (rolling output + source messages) and remaining
+  // messages for CSV export. Each interim emits one "Output" row carrying its
+  // rolling summary text, followed by its "Message" source rows.
+  const exportRows = useMemo(() => {
+    const out = [];
+    interims.forEach((interim, idx) => {
+      const num = interim.interim_number ?? idx + 1;
+      const label = `Interim #${num}`;
+      out.push({
+        interimLabel: label,
+        kind: 'Output',
+        timestamp: interim.created_at || null,
+        preview: interim.summary_text || ''
+      });
+      (interim.messages || []).forEach((m) =>
+        out.push({ ...m, interimLabel: label, kind: 'Message' })
+      );
+    });
+    remaining.forEach((m) => out.push({ ...m, interimLabel: 'Remaining', kind: 'Message' }));
+    return out;
+  }, [interims, remaining]);
 
   return (
     <div className="sum-msg-page">
@@ -483,16 +505,15 @@ function CompositionPanel({ summaryId, onBack }) {
           ‹ Back to History
         </button>
         <h3 style={{ margin: 0, fontSize: 15 }}>Summary Composition</h3>
-        {hasData && (
-          <button
-            className="btn btn-secondary btn-sm"
-            style={{ marginLeft: 'auto' }}
-            onClick={() => exportCompositionCsv(summaryId, interims, remaining, finalSummary)}
-            title="Export all messages (full text) grouped by interim, ending with the final summary"
-          >
-            ⬇ Export
-          </button>
-        )}
+        <button
+          className="btn btn-secondary btn-sm"
+          style={{ marginLeft: 'auto' }}
+          onClick={() => setShowExport(true)}
+          disabled={!exportRows.length}
+          title="Export all source messages of this summary to CSV"
+        >
+          ⬇ Export
+        </button>
       </div>
 
       {loading && <p className="mon-empty">Loading…</p>}
@@ -533,6 +554,18 @@ function CompositionPanel({ summaryId, onBack }) {
             </div>
           )}
         </>
+      )}
+
+      {showExport && (
+        <ExportColumnsModal
+          tabName="comp_messages"
+          onClose={() => setShowExport(false)}
+          onConfirm={(keys) => {
+            const res = downloadCsv('comp_messages', exportRows, keys);
+            setShowExport(false);
+            if (!res.ok) showAlert(res.reason, { title: 'Export', icon: '⚠️' });
+          }}
+        />
       )}
     </div>
   );
@@ -786,14 +819,6 @@ function downloadCsvRows(rows, filename) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-function exportCompositionCsv(summaryId, interims, remaining, finalSummary) {
-  const rows = [
-    COMP_BODY_HEADER,
-    ...compositionBodyRows(interims, remaining, finalSummary)
-  ];
-  downloadCsvRows(rows, `summary_${summaryId}_composition_${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 /**

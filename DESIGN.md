@@ -34,43 +34,43 @@ SummariesBotv2 is a Telegram userbot + web admin panel that:
 ```mermaid
 graph TD
     subgraph Browser
-        UI[Single-Page App\nstatic/index.html + modern.js]
+        UI["Single-Page App<br/>static/index.html + modern.js"]
     end
 
-    subgraph FastAPI App [app.py — FastAPI]
-        MW[TokenAuthMiddleware]
-        ROUTERS[API Routers\n/api/*]
-        STATIC[Static File Server\n/static/]
+    subgraph FastAPIApp ["app.py — FastAPI"]
+        MW["TokenAuthMiddleware"]
+        ROUTERS["API Routers<br/>/api/*"]
+        STATIC["Static File Server<br/>/static/"]
     end
 
-    subgraph Bot Task [Asyncio Task — summaries/bot.py]
-        TC[Telethon Client\nMTProto userbot]
-        SCHED[APScheduler\nper-topic jobs]
-        WATCHER[scheduler_watcher\npoll every 2s]
+    subgraph BotTask ["Asyncio Task — summaries/bot.py"]
+        TC["Telethon Client<br/>MTProto userbot"]
+        SCHED["APScheduler<br/>per-topic jobs"]
+        WATCHER["scheduler_watcher<br/>poll every 2s"]
     end
 
-    subgraph YouTube [Asyncio Scheduler — youtube_monitor/]
-        YT_WORKER[Video Queue Worker\nevery 5 min]
-        YT_KEYWORDS[Keyword Search\nevery 5 min]
-        YT_WEBSUB[WebSub Push\nPubSubHubbub]
+    subgraph YouTube ["Asyncio Scheduler — youtube_monitor/"]
+        YT_WORKER["Video Queue Worker<br/>every 5 min"]
+        YT_KEYWORDS["Keyword Search<br/>every 5 min"]
+        YT_WEBSUB["WebSub Push<br/>PubSubHubbub"]
     end
 
-    subgraph AI [LLM Clients]
-        GEMINI[GeminiClient\nVertex AI]
-        OAI[OpenAIClient]
+    subgraph AI ["LLM Clients"]
+        GEMINI["GeminiClient<br/>Vertex AI"]
+        OAI["OpenAIClient"]
     end
 
-    DB[(PostgreSQL)]
+    DB[("PostgreSQL")]
 
     UI -->|JWT Bearer| MW
     MW --> ROUTERS
     ROUTERS --> DB
-    Bot Task -->|get_db()| DB
-    YouTube -->|get_yt_db()| DB
+    BotTask -->|"get_db()"| DB
+    YouTube -->|"get_yt_db()"| DB
     SCHED -->|trigger_summary| AI
     YT_WORKER --> AI
-    TC -->|NewMessage events| Bot Task
-    WATCHER -->|get_config_version\nevery 2s| DB
+    TC -->|NewMessage events| BotTask
+    WATCHER -->|"get_config_version<br/>every 2s"| DB
     WATCHER -->|rebuild on change| SCHED
 ```
 
@@ -80,23 +80,23 @@ graph TD
 
 ```mermaid
 graph LR
-    APP[app.py] --> S_ROUTERS[summaries/routers/\n8 routers]
-    APP --> SYS_ROUTERS[routers/\nauth · accounts · system · chatbot · youtube]
-    APP --> HELPERS[utils/helpers.py\nstart/stop bot task\ncategorizer + cache]
-    APP --> DB_INST[utils/database.py\nDatabase base class]
+    APP["app.py"] --> S_ROUTERS["summaries/routers/<br/>8 routers"]
+    APP --> SYS_ROUTERS["routers/<br/>auth · accounts · system · chatbot · youtube"]
+    APP --> HELPERS["utils/helpers.py<br/>start/stop bot task<br/>categorizer + cache"]
+    APP --> DB_INST["utils/database.py<br/>Database base class"]
 
-    S_ROUTERS --> SDB[summaries/db.py\nSummariesDB]
+    S_ROUTERS --> SDB["summaries/db.py<br/>SummariesDB"]
     SYS_ROUTERS --> SDB
     SDB --> DB_INST
 
-    APP --> BOT[summaries/bot.py\nrun_bot coroutine]
-    BOT --> PROMPTS_S[summaries/prompts.py\nget_summary_prompt]
+    APP --> BOT["summaries/bot.py<br/>run_bot coroutine"]
+    BOT --> PROMPTS_S["summaries/prompts.py<br/>get_summary_prompt"]
     BOT --> HELPERS
 
-    APP --> YT[youtube_monitor/\nworker · keyword_search · websub]
-    YT --> YT_DB[youtube_monitor/db.py\nYouTubeDB]
+    APP --> YT["youtube_monitor/<br/>worker · keyword_search · websub"]
+    YT --> YT_DB["youtube_monitor/db.py<br/>YouTubeDB"]
 
-    APP --> CHATBOT[chatbot/\nservice · prompts]
+    APP --> CHATBOT["chatbot/<br/>service · prompts"]
 ```
 
 ### Key Files
@@ -184,31 +184,31 @@ def my_method(self, param):
 
 ```mermaid
 flowchart TD
-    TG[Telegram Channel\nPost] -->|MTProto push| HANDLER[read_channel_messages]
+    TG["Telegram Channel<br/>Post"] -->|MTProto push| HANDLER["read_channel_messages"]
 
-    HANDLER -->|chat_id lookup| MAP{_source_channel_map}
-    MAP -->|not found| DROP[Drop message]
-    MAP -->|found| RULES[Apply bot rules\nremove / replace]
+    HANDLER -->|chat_id lookup| MAP{"_source_channel_map"}
+    MAP -->|not found| DROP["Drop message"]
+    MAP -->|found| RULES["Apply bot rules<br/>remove / replace"]
 
-    RULES --> CATEG[categorizer\nkeyword matching]
-    CATEG -->|no topics| UNCLASSIFIED[Store unclassified]
-    CATEG -->|topics matched| SAVE[db.add_message\nwith topics + keywords]
+    RULES --> CATEG["categorizer<br/>keyword matching"]
+    CATEG -->|no topics| UNCLASSIFIED["Store unclassified"]
+    CATEG -->|topics matched| SAVE["db.add_message<br/>with topics + keywords"]
 
-    SAVE --> INTERIM{≥25 unsummarized\nfor this topic?}
-    INTERIM -->|yes| INTERIM_CALL[check_and_run_interim_summary\nasyncio task]
-    INTERIM -->|no| WAIT[Wait for next message]
+    SAVE --> INTERIM{"≥25 unsummarized<br/>for this topic?"}
+    INTERIM -->|yes| INTERIM_CALL["check_and_run_interim_summary<br/>asyncio task"]
+    INTERIM -->|no| WAIT["Wait for next message"]
 
-    INTERIM_CALL --> LLM1[LLM: summarize 25 msgs]
-    LLM1 --> SAVE_INTERIM[db.save_interim_summary]
+    INTERIM_CALL --> LLM1["LLM: summarize 25 msgs"]
+    LLM1 --> SAVE_INTERIM["db.save_interim_summary"]
 
-    SCHEDULER[APScheduler fires] --> GEN[generate_and_send_summary]
-    GEN -->|fetch window msgs| DB_MSGS[db.get_messages_for_schedule_window]
-    DB_MSGS --> BATCH{>25 messages?}
-    BATCH -->|no| SINGLE[Single LLM call]
-    BATCH -->|yes| CHUNKS[Chunk into 25s\n→ summarize each\n→ merge pass]
+    SCHEDULER["APScheduler fires"] --> GEN["generate_and_send_summary"]
+    GEN -->|fetch window msgs| DB_MSGS["db.get_messages_for_schedule_window"]
+    DB_MSGS --> BATCH{">25 messages?"}
+    BATCH -->|no| SINGLE["Single LLM call"]
+    BATCH -->|yes| CHUNKS["Chunk into 25s<br/>→ summarize each<br/>→ merge pass"]
     SINGLE --> SEND
-    CHUNKS --> SEND[client.send_message\nto target channels]
-    SEND --> LOG[db.save_summary\ndb.mark_as_summarized\ndb.log_schedule_run]
+    CHUNKS --> SEND["client.send_message<br/>to target channels"]
+    SEND --> LOG["db.save_summary<br/>db.mark_as_summarized<br/>db.log_schedule_run"]
 ```
 
 ### Categorizer
@@ -217,12 +217,12 @@ The categorizer runs on every incoming message. It uses a TTL cache (30s) and pr
 
 ```mermaid
 flowchart LR
-    MSG[Message text] --> CACHE{Cache fresh?\n<30s old}
-    CACHE -->|no| FETCH[db.get_all_bots_config\ncompile regexes]
-    CACHE -->|yes| HIT[Use cached patterns]
+    MSG["Message text"] --> CACHE{"Cache fresh?<br/>&lt;30s old"}
+    CACHE -->|no| FETCH["db.get_all_bots_config<br/>compile regexes"]
+    CACHE -->|yes| HIT["Use cached patterns"]
     FETCH --> HIT
-    HIT --> LOOP[For each topic:\npattern.findall text]
-    LOOP -->|match| FOUND[topics + keywords list]
+    HIT --> LOOP["For each topic:<br/>pattern.findall text"]
+    LOOP -->|match| FOUND["topics + keywords list"]
     LOOP -->|catch_all flag| FOUND
     LOOP -->|no match| SKIP
 ```
@@ -244,21 +244,21 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    DB_CFG[DB: bots config] -->|scheduler_watcher\ndetects version change| REBUILD[schedule_summaries]
-    REBUILD -->|for each enabled\nbot→category→topic→schedule| JOBS[APScheduler jobs]
+    DB_CFG["DB: bots config"] -->|"scheduler_watcher<br/>detects version change"| REBUILD["schedule_summaries"]
+    REBUILD -->|"for each enabled<br/>bot→category→topic→schedule"| JOBS["APScheduler jobs"]
 
-    JOBS --> T1[CronTrigger\nminute: every N min]
-    JOBS --> T2[CronTrigger\nhourly: each hour at :MM]
-    JOBS --> T3[IntervalTrigger\ninterval_hourly: every N hours]
-    JOBS --> T4[IntervalTrigger\ninterval_minutes: every N minutes]
-    JOBS --> T5[CronTrigger\ndaily: at HH:MM]
-    JOBS --> T6[IntervalTrigger 1min\nspeeches_interval]
+    JOBS --> T1["CronTrigger<br/>minute: every N min"]
+    JOBS --> T2["CronTrigger<br/>hourly: each hour at :MM"]
+    JOBS --> T3["IntervalTrigger<br/>interval_hourly: every N hours"]
+    JOBS --> T4["IntervalTrigger<br/>interval_minutes: every N minutes"]
+    JOBS --> T5["CronTrigger<br/>daily: at HH:MM"]
+    JOBS --> T6["IntervalTrigger 1min<br/>speeches_interval"]
 
-    T1 & T2 & T3 & T4 & T5 --> TRIGGER_SUMMARY[trigger_summary\njob_data dict]
-    T6 --> SPEECH[generate_speech_buckets\nwait_time countdown]
+    T1 & T2 & T3 & T4 & T5 --> TRIGGER_SUMMARY["trigger_summary<br/>job_data dict"]
+    T6 --> SPEECH["generate_speech_buckets<br/>wait_time countdown"]
 
-    TRIGGER_SUMMARY --> WINDOW[compute_window_start\nlook back to previous fire]
-    WINDOW --> FETCH_MSGS[fetch messages in window]
+    TRIGGER_SUMMARY --> WINDOW["compute_window_start<br/>look back to previous fire"]
+    WINDOW --> FETCH_MSGS["fetch messages in window"]
 ```
 
 ### Schedule Types
@@ -281,24 +281,24 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph Sources
-        WEBSUB[YouTube WebSub\nPubSubHubbub push\n/youtube/websub/callback]
-        KW_POLL[Keyword Poller\nevery 5 min via YouTube Data API]
+        WEBSUB["YouTube WebSub<br/>PubSubHubbub push<br/>/youtube/websub/callback"]
+        KW_POLL["Keyword Poller<br/>every 5 min via YouTube Data API"]
     end
 
-    WEBSUB -->|new video notification| QUEUE[yt_video_queue table\nstatus=pending]
+    WEBSUB -->|new video notification| QUEUE["yt_video_queue table<br/>status=pending"]
     KW_POLL -->|matching videos| QUEUE
 
-    QUEUE -->|process_pending_queue\nevery 5 min| WORKER[Video Worker]
+    QUEUE -->|"process_pending_queue<br/>every 5 min"| WORKER["Video Worker"]
 
-    WORKER -->|fetch transcript| TRANSCRIPT{Transcript\navailable?}
-    TRANSCRIPT -->|yes| GEMINI_T[Gemini: summarize transcript]
-    TRANSCRIPT -->|no| GEMINI_V[Gemini: summarize video URL\ntiered fallback]
+    WORKER -->|fetch transcript| TRANSCRIPT{"Transcript<br/>available?"}
+    TRANSCRIPT -->|yes| GEMINI_T["Gemini: summarize transcript"]
+    TRANSCRIPT -->|no| GEMINI_V["Gemini: summarize video URL<br/>tiered fallback"]
 
-    GEMINI_T & GEMINI_V --> FORMAT[Format summary\nwith video metadata]
-    FORMAT --> TG_SEND[_yt_telegram_send\nTelethon temp client]
-    TG_SEND --> TARGET[Configured target\nTelegram channels]
+    GEMINI_T & GEMINI_V --> FORMAT["Format summary<br/>with video metadata"]
+    FORMAT --> TG_SEND["_yt_telegram_send<br/>Telethon temp client"]
+    TG_SEND --> TARGET["Configured target<br/>Telegram channels"]
 
-    WORKER -->|done/failed| STATUS[Update queue status]
+    WORKER -->|done/failed| STATUS["Update queue status"]
 ```
 
 ### WebSub Flow
@@ -311,11 +311,11 @@ YouTube's hub pushes a POST to `/youtube/websub/callback` when a subscribed chan
 
 ```mermaid
 flowchart LR
-    BOT[bot.py] -->|generate_summary prompt| LLM{LLM client\nconfig.yaml}
-    LLM -->|gemini key present| GEM[GeminiClient\nVertex AI]
-    LLM -->|openai key| OAI[OpenAIClient]
+    BOT["bot.py"] -->|generate_summary prompt| LLM{"LLM client<br/>config.yaml"}
+    LLM -->|gemini key present| GEM["GeminiClient<br/>Vertex AI"]
+    LLM -->|openai key| OAI["OpenAIClient"]
     GEM & OAI --> RESULT["(summary_text, tokens_used)"]
-    RESULT --> TOKENS[db.save_summary\ntokens_used column]
+    RESULT --> TOKENS["db.save_summary<br/>tokens_used column"]
 ```
 
 ### Prompt Construction
@@ -336,11 +336,11 @@ The system prompt is stored in `config.yaml` under `system_prompts.summaries_sys
 
 ```mermaid
 flowchart LR
-    MSGS[N messages] -->|N ≤ 25| SINGLE[Single LLM call]
-    MSGS -->|N > 25| SPLIT[Split into 25-msg chunks]
-    SPLIT --> CHUNK_CALLS[LLM call per chunk\n3s delay between calls]
-    CHUNK_CALLS --> MERGE[Merge pass:\nArabic merge prompt]
-    MERGE --> FINAL[Final summary]
+    MSGS["N messages"] -->|"N ≤ 25"| SINGLE["Single LLM call"]
+    MSGS -->|"N &gt; 25"| SPLIT["Split into 25-msg chunks"]
+    SPLIT --> CHUNK_CALLS["LLM call per chunk<br/>3s delay between calls"]
+    CHUNK_CALLS --> MERGE["Merge pass:<br/>Arabic merge prompt"]
+    MERGE --> FINAL["Final summary"]
 ```
 
 ### Retry Logic
@@ -353,13 +353,13 @@ Network errors (`OSError`, `ConnectionError`, `TimeoutError`) are retried up to 
 
 ```mermaid
 flowchart TD
-    LOGIN[POST /api/auth/login] -->|username + password| HASH[bcrypt verify]
-    HASH -->|ok| JWT[JWT token\n24h expiry]
-    JWT --> CLIENT[Browser stores\nin localStorage]
+    LOGIN["POST /api/auth/login"] -->|username + password| HASH["bcrypt verify"]
+    HASH -->|ok| JWT["JWT token<br/>24h expiry"]
+    JWT --> CLIENT["Browser stores<br/>in localStorage"]
 
-    CLIENT -->|Authorization: Bearer token| MW[TokenAuthMiddleware]
-    MW -->|validate_token| ALLOW[Proceed to router]
-    MW -->|invalid| 401[401 Unauthorized]
+    CLIENT -->|"Authorization: Bearer token"| MW["TokenAuthMiddleware"]
+    MW -->|validate_token| ALLOW["Proceed to router"]
+    MW -->|invalid| UNAUTH["401 Unauthorized"]
 ```
 
 ### Data Isolation
@@ -387,21 +387,21 @@ else:
 
 ```mermaid
 flowchart TD
-    LOAD[Page load\nindex.html] --> AUTH_CHECK[auth.js\ncheck JWT]
-    AUTH_CHECK -->|no token| LOGIN[/login redirect]
-    AUTH_CHECK -->|valid| INIT[modern.js\nloadAllData]
+    LOAD["Page load<br/>index.html"] --> AUTH_CHECK["auth.js<br/>check JWT"]
+    AUTH_CHECK -->|no token| LOGIN["/login redirect"]
+    AUTH_CHECK -->|valid| INIT["modern.js<br/>loadAllData"]
 
-    INIT --> CFG[GET /api/config\nglobal bots + collections]
-    INIT --> PRPTS[GET /api/prompts\nper-bot prompts]
+    INIT --> CFG["GET /api/config<br/>global bots + collections"]
+    INIT --> PRPTS["GET /api/prompts<br/>per-bot prompts"]
 
-    CFG & PRPTS --> NAV[Render nav\nSystem · Collections · Bots\nMonitor · Dashboard · etc.]
+    CFG & PRPTS --> NAV["Render nav<br/>System · Collections · Bots<br/>Monitor · Dashboard · etc."]
 
-    NAV --> PAGE{Active page}
-    PAGE --> BOTS[Bots page\nlazy-rendered categories + topics]
-    PAGE --> MONITOR[Monitor page\nSchedules · Summaries · Messages\nUnclassified · Missed · History]
-    PAGE --> DASH[Dashboard\ncharts + filters]
-    PAGE --> YT_PAGE[YouTube page]
-    PAGE --> CHATBOT_PAGE[Chatbot page]
+    NAV --> PAGE{"Active page"}
+    PAGE --> BOTS["Bots page<br/>lazy-rendered categories + topics"]
+    PAGE --> MONITOR["Monitor page<br/>Schedules · Summaries · Messages<br/>Unclassified · Missed · History"]
+    PAGE --> DASH["Dashboard<br/>charts + filters"]
+    PAGE --> YT_PAGE["YouTube page"]
+    PAGE --> CHATBOT_PAGE["Chatbot page"]
 ```
 
 ### Key JS Patterns

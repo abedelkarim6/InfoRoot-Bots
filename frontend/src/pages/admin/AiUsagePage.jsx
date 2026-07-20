@@ -10,7 +10,7 @@
  * _stopAiUsagePoller pattern).
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { useApiMutation } from '../../lib/useApiMutation';
@@ -142,6 +142,9 @@ export default function AiUsagePage() {
               <div className="dash-stat-label">Avg tokens / summary</div>
             </div>
           </div>
+
+          {/* Section 2.5: Usage history (filters + graphs) */}
+          <UsageHistoryCard />
 
           {/* Section 3: Hourly activity */}
           <div className="card" style={{ marginBottom: '1.25rem' }}>
@@ -417,6 +420,884 @@ function ThoughtsModal({ id, onClose }) {
           <button className="btn btn-secondary" onClick={onClose}>Close</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Usage History — date/feature/user filters + Chart.js graphs
+//
+// Data comes from GET /api/system/ai-usage-history. Summaries usage is
+// attributed to users via the owning bot's owner_id; YouTube usage has no
+// per-user ownership, so it always counts under Admin (and is excluded when
+// a specific non-admin user is selected).
+// ────────────────────────────────────────────────────────────────────────────
+
+const HIST_PERIODS = [
+  { value: 'this_month', label: 'This month' },
+  { value: 'last_month', label: 'Last month' },
+  { value: 'this_year', label: 'This year' },
+  { value: 'custom', label: 'Custom range' }
+];
+
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Resolve a period preset into {from, to, gran}. Custom ranges longer than
+ *  ~3 months bucket by month so the chart stays readable. */
+function histRange(period, customFrom, customTo) {
+  const today = new Date();
+  if (period === 'this_month') {
+    return { from: isoDate(new Date(today.getFullYear(), today.getMonth(), 1)), to: isoDate(today), gran: 'day' };
+  }
+  if (period === 'last_month') {
+    const first = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const last = new Date(today.getFullYear(), today.getMonth(), 0);
+    return { from: isoDate(first), to: isoDate(last), gran: 'day' };
+  }
+  if (period === 'this_year') {
+    return { from: `${today.getFullYear()}-01-01`, to: isoDate(today), gran: 'month' };
+  }
+  const from = customFrom || isoDate(new Date(today.getFullYear(), today.getMonth(), 1));
+  const to = customTo || isoDate(today);
+  const spanDays = (new Date(to) - new Date(from)) / 86400000;
+  return { from, to, gran: spanDays > 92 ? 'month' : 'day' };
+}
+
+/** Contiguous list of day/month bucket keys between two dates (inclusive) so
+ *  the time chart has no gaps on days with zero usage. */
+function buildBuckets(from, to, gran) {
+  const out = [];
+  const d = new Date(from + 'T00:00:00');
+  const end = new Date(to + 'T00:00:00');
+  if (isNaN(d.getTime()) || isNaN(end.getTime())) return out;
+  if (gran === 'month') d.setDate(1);
+  let guard = 0;
+  while (d <= end && guard++ < 500) {
+    out.push(isoDate(d));
+    if (gran === 'month') d.setMonth(d.getMonth() + 1);
+    else d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function fmtBucket(bucket, gran) {
+  if (!bucket) return '';
+  const [y, m, d] = bucket.split('-');
+  if (gran === 'month') return `${MONTH_NAMES[+m - 1]} ${y.slice(2)}`;
+  return `${d}/${m}`;
+}
+
+/* Theme-aware Chart.js styling — same pattern as DashboardPage: colors are
+   read from the CSS custom properties at chart-creation time. */
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+function chartTheme() {
+  const accentRgb = cssVar('--accent-primary-rgb', '107, 61, 181');
+  return {
+    accent: cssVar('--accent-primary', '#6b3db5'),
+    accentRgb,
+    surface: cssVar('--bg-card', '#ffffff'),
+    tooltip: {
+      backgroundColor: cssVar('--bg-card', '#ffffff'),
+      borderColor: cssVar('--border-color', '#e0d5f0'),
+      borderWidth: 1,
+      titleColor: cssVar('--text-primary', '#3d1f8f'),
+      bodyColor: cssVar('--text-secondary', '#5a4080'),
+      padding: 10,
+      cornerRadius: 8
+    },
+    grid: { color: `rgba(${accentRgb}, 0.08)`, drawBorder: false },
+    ticks: { color: cssVar('--text-muted', '#9985bb'), font: { size: 11 } },
+    legend: cssVar('--text-secondary', '#5a4080')
+  };
+}
+
+/** Feature registry for the usage history — key order = chart stack order. */
+const HIST_FEATURES = [
+  { key: 'summaries', label: 'Summaries' },
+  { key: 'youtube', label: 'YouTube' },
+  { key: 'chatbot', label: 'Chatbot' },
+  { key: 'seo', label: 'SEO AI' }
+];
+
+/** Per-feature series colors — CVD-validated sets per theme. */
+function histPalette() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  return dark
+    ? { summaries: '#8b5cf6', youtube: '#0891b2', chatbot: '#059669', seo: '#d97706' }
+    : { summaries: '#6b3db5', youtube: '#06b6d4', chatbot: '#10b981', seo: '#f59e0b' };
+}
+
+function fmtUsd(x) {
+  const n = Number(x) || 0;
+  if (n === 0) return '$0';
+  if (n < 0.01) return '$' + n.toFixed(4);
+  if (n < 1) return '$' + n.toFixed(3);
+  return '$' + n.toFixed(2);
+}
+
+const HIST_METRICS = [
+  { key: 'tokens', label: 'Tokens' },
+  { key: 'runs', label: 'Runs' },
+  { key: 'cost', label: 'Cost' }
+];
+
+function UsageHistoryCard() {
+  const [period, setPeriod] = useState('this_month');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [feature, setFeature] = useState('all');
+  const [user, setUser] = useState('all');
+  const [metric, setMetric] = useState('cost'); // 'tokens' | 'runs' | 'cost'
+
+  const { from, to, gran } = histRange(period, customFrom, customTo);
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['ai-usage-history', from, to, gran, feature, user],
+    queryFn: () =>
+      api(
+        `/api/system/ai-usage-history?date_from=${from}&date_to=${to}` +
+          `&granularity=${gran}&feature=${feature}&user=${encodeURIComponent(user)}`
+      ),
+    placeholderData: (prev) => prev
+  });
+
+  const ok = data?.status === 'ok';
+  const features = ok ? data.features || {} : {};
+  const byUser = ok ? data.by_user || [] : [];
+  const byBot = ok ? data.by_bot || [] : [];
+  const byModel = ok ? data.by_model || [] : [];
+  const grandTotals = ok ? data.totals || {} : {};
+  const users = ok ? data.users || [] : [];
+
+  const includedFeatures = HIST_FEATURES.filter((f) => features[f.key]);
+
+  const buckets = useMemo(() => buildBuckets(from, to, gran), [from, to, gran]);
+  // Per-feature bucket→{runs,tokens,cost} lookup for the time chart.
+  const featMaps = useMemo(() => {
+    const out = {};
+    for (const f of Object.keys(features)) {
+      out[f] = Object.fromEntries((features[f].series || []).map((r) => [r.bucket, r]));
+    }
+    return out;
+  }, [features]);
+
+  const totals = useMemo(() => {
+    const t = { runs: 0, tokens: 0, cost: 0 };
+    for (const f of Object.keys(features)) {
+      const ft = features[f].total || {};
+      t.runs += ft.runs || 0;
+      t.tokens += ft.tokens || 0;
+      t.cost += ft.cost || 0;
+    }
+    return t;
+  }, [features]);
+
+  const userIsSpecific = user !== 'all' && user !== 'admin';
+  const noData = totals.runs === 0;
+
+  const selStyle = { width: 'auto', minWidth: 130 };
+  const lblStyle = { fontSize: 12, color: 'var(--text-muted)' };
+
+  return (
+    <>
+      {/* Filter bar */}
+      <div className="card" style={{ marginBottom: '1.25rem' }}>
+        <div className="card-header" style={{ gap: '.75rem' }}>
+          <span style={{ fontSize: '1.1rem' }}>📜</span>
+          <strong>Usage History</strong>
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+            {from} → {to} · by {gran}
+            {isFetching ? ' · updating…' : ''}
+          </span>
+        </div>
+        <div
+          className="card-body"
+          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, padding: '.9rem 1.25rem' }}
+        >
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={lblStyle}>📅 Period</span>
+            <select className="select" style={selStyle} value={period} onChange={(e) => setPeriod(e.target.value)}>
+              {HIST_PERIODS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+          </label>
+
+          {period === 'custom' && (
+            <>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={lblStyle}>From</span>
+                <input type="date" className="input" style={{ width: 'auto' }} value={customFrom} max={customTo || undefined}
+                  onChange={(e) => setCustomFrom(e.target.value)} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={lblStyle}>To</span>
+                <input type="date" className="input" style={{ width: 'auto' }} value={customTo} min={customFrom || undefined}
+                  onChange={(e) => setCustomTo(e.target.value)} />
+              </label>
+            </>
+          )}
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={lblStyle}>🧩 Feature</span>
+            <select className="select" style={selStyle} value={feature} onChange={(e) => setFeature(e.target.value)}>
+              <option value="all">All features</option>
+              {HIST_FEATURES.map((f) => (
+                <option key={f.key} value={f.key}>{f.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={lblStyle}>👤 User</span>
+            <select className="select" style={selStyle} value={user} onChange={(e) => setUser(e.target.value)}>
+              <option value="all">All users</option>
+              <option value="admin">Admin</option>
+              {users.map((u) => (
+                <option key={u.id} value={String(u.id)}>{u.username}</option>
+              ))}
+            </select>
+          </label>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginLeft: 'auto' }}>
+            {HIST_METRICS.map((m, i) => (
+              <button
+                key={m.key}
+                className={`btn btn-sm ${metric === m.key ? 'btn-primary' : 'btn-secondary'}`}
+                style={{
+                  borderRadius:
+                    i === 0 ? '8px 0 0 8px' : i === HIST_METRICS.length - 1 ? '0 8px 8px 0' : 0
+                }}
+                onClick={() => setMetric(m.key)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {(feature === 'all' || feature === 'youtube') && userIsSpecific && (
+          <div style={{ padding: '0 1.25rem .75rem', fontSize: 12, color: 'var(--text-muted)' }}>
+            ℹ YouTube usage is not owned by individual users — it is excluded while a specific user is selected.
+          </div>
+        )}
+      </div>
+
+      {/* Period totals */}
+      <div className="dash-stat-grid" style={{ marginBottom: '1.25rem' }}>
+        <div className="dash-stat-card">
+          <div className="dash-stat-icon">🤖</div>
+          <div className="dash-stat-value">{fmtNum(totals.runs)}</div>
+          <div className="dash-stat-label">AI runs in period</div>
+        </div>
+        <div className="dash-stat-card">
+          <div className="dash-stat-icon">🔢</div>
+          <div className="dash-stat-value">{fmtNum(totals.tokens)}</div>
+          <div className="dash-stat-label">Tokens in period</div>
+        </div>
+        <div className="dash-stat-card">
+          <div className="dash-stat-icon">💲</div>
+          <div className="dash-stat-value">{fmtUsd(totals.cost)}</div>
+          <div className="dash-stat-label">Est. cost in period</div>
+        </div>
+        <div className="dash-stat-card" title="Cost of Gemini reasoning (thinking) tokens — billed at the output rate. Google lists this as the 'Thinking Text Output' SKU.">
+          <div className="dash-stat-icon">🧠</div>
+          <div className="dash-stat-value">{fmtUsd(grandTotals.thinking_cost || 0)}</div>
+          <div className="dash-stat-label">
+            Thinking cost
+            {totals.cost > 0 && (grandTotals.thinking_cost || 0) > 0
+              ? ` (${Math.round((grandTotals.thinking_cost / totals.cost) * 100)}%)`
+              : ''}
+          </div>
+        </div>
+        <div className="dash-stat-card" title="Audio-input tokens from video soundtracks, and the extra cost of billing them at the audio rate instead of the text-input rate.">
+          <div className="dash-stat-icon">🔊</div>
+          <div className="dash-stat-value">{fmtNum(grandTotals.audio_tokens || 0)}</div>
+          <div className="dash-stat-label">
+            Audio tokens
+            {(grandTotals.audio_premium || 0) > 0
+              ? ` (+${fmtUsd(grandTotals.audio_premium)})`
+              : ''}
+          </div>
+        </div>
+      </div>
+
+      {isLoading && (
+        <p className="mon-empty" style={{ padding: 24 }}>Loading history…</p>
+      )}
+      {!isLoading && !ok && (
+        <p className="mon-empty" style={{ padding: 24 }}>Failed to load usage history.</p>
+      )}
+      {!isLoading && ok && noData && (
+        <p className="mon-empty" style={{ padding: 24 }}>No AI usage in this period.</p>
+      )}
+
+      {!isLoading && ok && !noData && (
+        <>
+          {/* Row 1: time series + by-feature donut */}
+          <div className="dash-chart-row" style={{ gridTemplateColumns: includedFeatures.length > 1 ? '2fr 1fr' : '1fr' }}>
+            <div className="dash-chart-card">
+              <div className="dash-chart-header">
+                <span className="dash-chart-title">
+                  {metric === 'cost' ? 'Cost' : metric === 'tokens' ? 'Tokens' : 'AI runs'} over time
+                </span>
+                <span className="dash-chart-sub">
+                  per {gran}
+                </span>
+              </div>
+              <div className="dash-canvas-wrap">
+                <HistTimeChart
+                  buckets={buckets}
+                  gran={gran}
+                  featMaps={featMaps}
+                  includedFeatures={includedFeatures}
+                  metric={metric}
+                />
+              </div>
+            </div>
+            {includedFeatures.length > 1 && (
+              <div className="dash-chart-card">
+                <div className="dash-chart-header">
+                  <span className="dash-chart-title">
+                    {metric === 'cost' ? 'Cost' : metric === 'tokens' ? 'Tokens' : 'Runs'} by feature
+                  </span>
+                </div>
+                <div className="dash-canvas-wrap">
+                  <HistFeatureDonut features={features} includedFeatures={includedFeatures} metric={metric} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Row 2: by-user chart + user × feature cost matrix */}
+          <div className="dash-chart-row" style={{ gridTemplateColumns: '1fr 2fr' }}>
+            <div className="dash-chart-card">
+              <div className="dash-chart-header">
+                <span className="dash-chart-title">
+                  {metric === 'cost' ? 'Cost' : metric === 'tokens' ? 'Tokens' : 'Runs'} by user
+                </span>
+              </div>
+              <div className="dash-canvas-wrap">
+                <HistUsersBar rows={byUser} metric={metric} />
+              </div>
+            </div>
+            <div className="dash-chart-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="dash-chart-header" style={{ padding: '16px 20px 8px' }}>
+                <span className="dash-chart-title">Cost by user × feature</span>
+                <span className="dash-chart-sub">caps are monthly ($)</span>
+              </div>
+              <HistUserMatrix rows={byUser} includedFeatures={includedFeatures} />
+            </div>
+          </div>
+
+          {/* Row 3: by-model cost breakdown + breakdown tables */}
+          <div className="dash-chart-row" style={{ gridTemplateColumns: '1fr' }}>
+            <div className="dash-chart-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="dash-chart-header" style={{ padding: '16px 20px 8px' }}>
+                <span className="dash-chart-title">Cost by model</span>
+                <span className="dash-chart-sub">current $/1M rates · edit in Model Pricing below</span>
+              </div>
+              <HistModelTable rows={byModel} />
+            </div>
+          </div>
+          <div className="dash-chart-row" style={{ gridTemplateColumns: '1fr 1fr' }}>
+            <div className="dash-chart-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="dash-chart-header" style={{ padding: '16px 20px 8px' }}>
+                <span className="dash-chart-title">By user</span>
+              </div>
+              <HistBreakdownTable
+                rows={byUser.map((r) => ({
+                  label: r.username,
+                  runs: r.total.runs,
+                  tokens: r.total.tokens,
+                  cost: r.total.cost
+                }))}
+              />
+            </div>
+            <div className="dash-chart-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="dash-chart-header" style={{ padding: '16px 20px 8px' }}>
+                <span className="dash-chart-title">Top bots (summaries)</span>
+              </div>
+              <HistBreakdownTable
+                rows={byBot.map((r) => ({
+                  label: r.bot_name,
+                  runs: +r.runs || 0,
+                  tokens: +r.tokens || 0,
+                  cost: +r.cost || 0
+                }))}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Model pricing editor */}
+      <PricingCard />
+    </>
+  );
+}
+
+function HistBreakdownTable({ rows }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="yt-table" style={{ fontSize: 12 }}>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th style={{ textAlign: 'center' }}>Runs</th>
+            <th style={{ textAlign: 'right' }}>Tokens</th>
+            <th style={{ textAlign: 'right', paddingRight: 20 }}>Est. cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
+            </tr>
+          ) : (
+            rows.slice(0, 10).map((r, i) => (
+              <tr key={i}>
+                <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.label}
+                </td>
+                <td style={{ textAlign: 'center' }}>{fmtNum(r.runs)}</td>
+                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                  {r.tokens > 0 ? r.tokens.toLocaleString() : '—'}
+                </td>
+                <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                  {fmtUsd(r.cost)}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function HistModelTable({ rows }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="yt-table" style={{ fontSize: 12, minWidth: 720 }}>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th style={{ textAlign: 'center' }}>Runs</th>
+            <th style={{ textAlign: 'right' }}>Tokens</th>
+            <th style={{ textAlign: 'right' }} title="Reasoning (thinking) tokens — Google's 'Thinking Text Output' SKU">🧠 Thinking tok</th>
+            <th style={{ textAlign: 'right' }} title="Audio-modality tokens (subset of input) — from video soundtracks">🔊 Audio tok</th>
+            <th style={{ textAlign: 'right' }}>In $/1M</th>
+            <th style={{ textAlign: 'right' }}>Out $/1M</th>
+            <th style={{ textAlign: 'right' }} title="Cost of thinking tokens alone (billed at the output rate)">🧠 Thinking $</th>
+            <th style={{ textAlign: 'right' }} title="Extra cost of audio tokens vs pricing them as plain text input — what a flat-input model misses">🔊 Audio premium</th>
+            <th style={{ textAlign: 'right', paddingRight: 20 }}>Est. cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
+            </tr>
+          ) : (
+            rows.map((r) => {
+              const thinkPct = r.cost > 0 && r.thinking_cost > 0
+                ? Math.round((r.thinking_cost / r.cost) * 100) : 0;
+              return (
+                <tr key={r.model}>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.model}</td>
+                  <td style={{ textAlign: 'center' }}>{fmtNum(r.runs)}</td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {(r.tokens || 0).toLocaleString()}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                    {r.thinking_tokens > 0 ? (r.thinking_tokens).toLocaleString() : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                    {r.audio_tokens > 0 ? (r.audio_tokens).toLocaleString() : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_input}</td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>
+                    ${r.rate_output}
+                    {r.rate_audio != null && r.rate_audio !== r.rate_input && (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> · 🔊${r.rate_audio}</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                      title={thinkPct ? `${thinkPct}% of this model's cost` : ''}>
+                    {r.thinking_cost > 0 ? fmtUsd(r.thinking_cost) : '—'}
+                    {thinkPct >= 10 && (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> ({thinkPct}%)</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                      title="Extra vs pricing audio as text input">
+                    {r.audio_premium > 0 ? `+${fmtUsd(r.audio_premium)}` : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>
+                    {fmtUsd(r.cost)}
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function HistUserMatrix({ rows, includedFeatures }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="yt-table" style={{ fontSize: 12 }}>
+        <thead>
+          <tr>
+            <th>User</th>
+            {includedFeatures.map((f) => (
+              <th key={f.key} style={{ textAlign: 'right' }}>{f.label}</th>
+            ))}
+            <th style={{ textAlign: 'right' }}>Total</th>
+            <th style={{ textAlign: 'right', paddingRight: 20 }}>Monthly cap</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={includedFeatures.length + 3}
+                  style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
+            </tr>
+          ) : (
+            rows.map((r, i) => {
+              const caps = r.cost_caps || {};
+              const totalCap = caps.total;
+              const capPct = totalCap > 0 ? (r.total.cost / totalCap) * 100 : null;
+              return (
+                <tr key={r.user_id ?? `u${i}`}>
+                  <td style={{ fontWeight: 600 }}>{r.username}</td>
+                  {includedFeatures.map((f) => {
+                    const cell = r.features?.[f.key] || {};
+                    const cap = caps[f.key];
+                    return (
+                      <td key={f.key} style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                          title={`${fmtNum(cell.runs || 0)} runs · ${fmtNum(cell.tokens || 0)} tokens`}>
+                        {cell.cost > 0 ? fmtUsd(cell.cost) : '—'}
+                        {cap != null && (
+                          <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> / {fmtUsd(cap)}</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td style={{ textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtUsd(r.total.cost)}
+                  </td>
+                  <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums' }}>
+                    {totalCap != null ? (
+                      <span style={capPct >= 100 ? { color: '#ef4444', fontWeight: 700 }
+                        : capPct >= 80 ? { color: '#f59e0b', fontWeight: 700 } : undefined}>
+                        {fmtUsd(totalCap)}{capPct != null ? ` (${Math.min(999, Math.round(capPct))}%)` : ''}
+                      </span>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)' }}>no cap</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function HistTimeChart({ buckets, gran, featMaps, includedFeatures, metric }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    if (!ref.current || !window.Chart) return undefined;
+    const th = chartTheme();
+    const pal = histPalette();
+    const labels = buckets.map((b) => fmtBucket(b, gran));
+    const datasets = includedFeatures.map((f) => ({
+      label: f.label,
+      data: buckets.map((b) => +(featMaps[f.key]?.[b]?.[metric]) || 0),
+      backgroundColor: pal[f.key],
+      borderColor: th.surface,
+      borderWidth: 1,
+      borderRadius: 4
+    }));
+    const isCost = metric === 'cost';
+    chartRef.current = new window.Chart(ref.current, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: datasets.length > 1
+            ? { position: 'top', labels: { color: th.legend, boxWidth: 10, font: { size: 11 } } }
+            : { display: false },
+          tooltip: {
+            ...th.tooltip,
+            callbacks: isCost
+              ? { label: (ctx) => `${ctx.dataset.label}: ${fmtUsd(ctx.parsed.y)}` }
+              : undefined
+          }
+        },
+        scales: {
+          x: { stacked: true, grid: { display: false }, ticks: { ...th.ticks, maxTicksLimit: 16 } },
+          y: {
+            stacked: true, grid: th.grid, beginAtZero: true,
+            ticks: isCost ? { ...th.ticks, callback: (v) => fmtUsd(v) } : th.ticks
+          }
+        }
+      }
+    });
+    return () => {
+      if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    };
+  }, [buckets, gran, featMaps, includedFeatures, metric]);
+  return <canvas ref={ref} />;
+}
+
+function HistFeatureDonut({ features, includedFeatures, metric }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    if (!ref.current || !window.Chart) return undefined;
+    const th = chartTheme();
+    const pal = histPalette();
+    const isCost = metric === 'cost';
+    chartRef.current = new window.Chart(ref.current, {
+      type: 'doughnut',
+      data: {
+        labels: includedFeatures.map((f) => f.label),
+        datasets: [{
+          data: includedFeatures.map((f) => +(features[f.key]?.total?.[metric]) || 0),
+          backgroundColor: includedFeatures.map((f) => pal[f.key]),
+          borderColor: th.surface,
+          borderWidth: 2,
+          hoverBorderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { color: th.legend, font: { size: 11 }, padding: 10, boxWidth: 10 }
+          },
+          tooltip: {
+            ...th.tooltip,
+            callbacks: isCost
+              ? { label: (ctx) => `${ctx.label}: ${fmtUsd(ctx.parsed)}` }
+              : undefined
+          }
+        }
+      }
+    });
+    return () => {
+      if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    };
+  }, [features, includedFeatures, metric]);
+  return <canvas ref={ref} />;
+}
+
+function HistUsersBar({ rows, metric }) {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    if (!ref.current || !window.Chart || !rows?.length) return undefined;
+    const th = chartTheme();
+    const top = rows.slice(0, 10);
+    const isCost = metric === 'cost';
+    chartRef.current = new window.Chart(ref.current, {
+      type: 'bar',
+      data: {
+        labels: top.map((r) => r.username),
+        datasets: [{
+          label: metric,
+          data: top.map((r) => +(r.total?.[metric]) || 0),
+          backgroundColor: `rgba(${th.accentRgb},0.65)`,
+          borderColor: th.accent,
+          borderWidth: 1,
+          borderRadius: 4
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            ...th.tooltip,
+            callbacks: isCost
+              ? { label: (ctx) => fmtUsd(ctx.parsed.x) }
+              : undefined
+          }
+        },
+        scales: {
+          x: {
+            grid: th.grid, beginAtZero: true,
+            ticks: isCost ? { ...th.ticks, callback: (v) => fmtUsd(v) } : th.ticks
+          },
+          y: { grid: { display: false }, ticks: { ...th.ticks, font: { size: 10 } } }
+        }
+      }
+    });
+    return () => {
+      if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+    };
+  }, [rows, metric]);
+  return <canvas ref={ref} />;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Model pricing editor — $/1M input & output token rates per model. Rates feed
+// every cost figure on this page and the monthly $ caps. (The legacy blended
+// input_ratio is preserved server-side for pre-tracking rows but no longer
+// editable here — all new usage is priced from exact input/output/thinking.)
+// ────────────────────────────────────────────────────────────────────────────
+
+function PricingCard() {
+  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useQuery({
+    queryKey: ['ai-pricing'],
+    queryFn: () => api('/api/system/ai-pricing')
+  });
+
+  const [models, setModels] = useState({});
+  const [ratio, setRatio] = useState('0.85');
+  useEffect(() => {
+    if (data?.status === 'ok') {
+      setModels(data.models || {});
+      setRatio(String(data.input_ratio ?? 0.85));
+    }
+  }, [data]);
+
+  const save = useApiMutation('/api/system/ai-pricing', {
+    invalidate: ['ai-pricing', 'ai-usage-history'],
+    successMsg: 'Pricing saved',
+    errorMsg: 'Failed to save pricing'
+  });
+
+  function setRate(model, field, value) {
+    setModels((cur) => ({
+      ...cur,
+      [model]: { ...cur[model], [field]: value }
+    }));
+  }
+
+  function onSave() {
+    const cleaned = {};
+    for (const [m, r] of Object.entries(models)) {
+      const inp = parseFloat(r.input);
+      const out = parseFloat(r.output);
+      if (Number.isFinite(inp) && Number.isFinite(out) && inp >= 0 && out >= 0) {
+        cleaned[m] = { input: inp, output: out };
+        // Blank audio = "bill audio at the input rate"; only send a real value
+        // (and never drop an existing one on an unrelated edit).
+        const aud = parseFloat(r.audio);
+        if (Number.isFinite(aud) && aud >= 0) cleaned[m].audio = aud;
+      }
+    }
+    const num = parseFloat(ratio);
+    save.mutate({
+      models: cleaned,
+      input_ratio: Number.isFinite(num) && num >= 0 && num <= 1 ? num : undefined
+    });
+  }
+
+  return (
+    <div className="card" style={{ marginTop: '1.25rem' }}>
+      <div
+        className="card-header"
+        style={{ gap: '.75rem', cursor: 'pointer' }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span style={{ fontSize: '1.1rem' }}>💲</span>
+        <strong>Model Pricing</strong>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+          $ per 1M tokens · drives all cost figures {open ? '▲' : '▼'}
+        </span>
+      </div>
+      {open && (
+        <div className="card-body" style={{ padding: '1rem 1.25rem' }}>
+          {isLoading ? (
+            <p className="text-muted">Loading…</p>
+          ) : (
+            <>
+              <div style={{ overflowX: 'auto' }}>
+                <table className="yt-table" style={{ fontSize: 12, maxWidth: 660 }}>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th style={{ textAlign: 'right' }}>Input $/1M</th>
+                      <th style={{ textAlign: 'right' }}>Output $/1M</th>
+                      <th style={{ textAlign: 'right' }}
+                          title="Audio-input rate. Vertex bills a video's soundtrack higher than text/video input. Blank = use the input rate.">
+                        🔊 Audio $/1M
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.keys(models).sort().map((m) => (
+                      <tr key={m}>
+                        <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{m}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          <input type="number" className="input" min="0" step="0.01"
+                            style={{ width: 90, textAlign: 'right' }}
+                            value={models[m]?.input ?? ''}
+                            onChange={(e) => setRate(m, 'input', e.target.value)} />
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <input type="number" className="input" min="0" step="0.01"
+                            style={{ width: 90, textAlign: 'right' }}
+                            value={models[m]?.output ?? ''}
+                            onChange={(e) => setRate(m, 'output', e.target.value)} />
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <input type="number" className="input" min="0" step="0.01"
+                            placeholder="= input"
+                            style={{ width: 90, textAlign: 'right' }}
+                            value={models[m]?.audio ?? ''}
+                            onChange={(e) => setRate(m, 'audio', e.target.value)} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Thinking tokens are priced at the output rate.
+                </span>
+                <button
+                  className="btn btn-primary btn-sm"
+                  style={{ marginLeft: 'auto' }}
+                  onClick={onSave}
+                  disabled={save.isPending}
+                >
+                  {save.isPending ? 'Saving…' : 'Save pricing'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

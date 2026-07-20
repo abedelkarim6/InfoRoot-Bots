@@ -42,6 +42,11 @@ def _check_limit(request: Request):
             used  = result["used"]
             limit = result["limit"]
             return False, f"Monthly AI request limit reached ({used}/{limit}). Your plan allows {limit} requests per month."
+        # Monthly $ cost cap (chatbot + overall)
+        from utils.ai_pricing import check_user_cost_cap
+        cap_ok, cap_msg = check_user_cost_cap(db, user_id, 'chatbot')
+        if not cap_ok:
+            return False, cap_msg
         return True, None
     except Exception as e:
         logger.warning(f"[CHATBOT] Limit check failed: {e}")

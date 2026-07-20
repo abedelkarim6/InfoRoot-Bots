@@ -108,6 +108,44 @@ init_keyword_search(youtube_data_api_key=_yt_cfg.get("data_api_key", ""))
 # (Google default is 10,000 units/day).
 from youtube_monitor.db import set_quota_limit as _set_yt_quota_limit
 _set_yt_quota_limit(_yt_cfg.get("daily_quota_limit", 10000))
+
+
+async def _yt_resolve_send_target(client, target):
+    """Resolve a stored Telegram target into an entity Telethon can send to.
+
+    The manual-video picker and channel config store `entity.id` — a bare
+    numeric channel id. A freshly-connected client's entity cache is empty, so
+    a numeric id raises "Cannot find any entity corresponding to ...". We warm
+    the cache from the userbot's dialog list and fall back to an explicit
+    PeerChannel for bare positive ids.
+    """
+    raw = str(target).strip()
+    if not raw:
+        raise RuntimeError("[YT-TG] Empty Telegram target")
+
+    # @username / t.me link — Telethon resolves these directly, no cache needed.
+    if not raw.lstrip('-').isdigit():
+        return raw
+
+    n = int(raw)
+    # Try direct resolution; if the cache is cold, warm it from dialogs and retry.
+    for attempt in range(2):
+        try:
+            return await client.get_entity(n)
+        except (ValueError, TypeError):
+            if attempt == 0:
+                try:
+                    await client.get_dialogs()
+                except Exception as e:
+                    logger.warning(f"[YT-TG] get_dialogs failed while resolving {raw}: {e}")
+
+    # A bare positive id is an unmarked channel id from the dialogs picker.
+    if n > 0:
+        from telethon.tl.types import PeerChannel
+        return await client.get_entity(PeerChannel(n))
+    raise RuntimeError(f"[YT-TG] Could not resolve Telegram target '{raw}'")
+
+
 async def _yt_send_chunks(client, target: str, text: str):
     """Send `text` to `target` over an already-connected Telethon client, split
     into ≤4096-char chunks so long summaries aren't silently dropped."""
@@ -119,11 +157,15 @@ async def _yt_send_chunks(client, target: str, text: str):
     _MD_ENTITY_ERRORS = (
         EntitiesTooLongError, EntityBoundsInvalidError, EntityMentionUserInvalidError,
     )
+    # Resolve the target to a concrete entity first. A bare numeric channel id
+    # (what the dialogs picker stores) cannot be resolved by a cold client, so
+    # this warms the entity cache before sending.
+    entity = await _yt_resolve_send_target(client, target)
     chunk_size = 4096
     chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
     for i, chunk in enumerate(chunks):
         try:
-            msg = await client.send_message(target, chunk, parse_mode='md')
+            msg = await client.send_message(entity, chunk, parse_mode='md')
         except (_MD_ENTITY_ERRORS + (ValueError, TypeError)) as md_err:
             # The markdown was rejected (bad entities) or failed to parse — in all
             # these cases Telegram did NOT create the message, so it is safe to
@@ -136,7 +178,7 @@ async def _yt_send_chunks(client, target: str, text: str):
             # those errors propagate so the caller treats the send as failed
             # (telegram_sent stays false) instead of duplicating.
             logger.warning(f"[YT-TG] Markdown rejected ({md_err}), resending chunk as plain text")
-            msg = await client.send_message(target, chunk, parse_mode=None)
+            msg = await client.send_message(entity, chunk, parse_mode=None)
         if msg is None or not getattr(msg, 'id', None):
             raise RuntimeError(f"[YT-TG] send_message returned no message object for chunk {i+1}/{len(chunks)}")
     logger.info(f"[YT-TG] Sent {len(chunks)} chunk(s) to {target}")
@@ -293,6 +335,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 async def lifespan(app):
     """Auto-start the bot on server startup, start YouTube scheduler, stop on shutdown."""
     import asyncio
+    from datetime import datetime, timedelta
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
     from youtube_monitor.worker import process_pending_queue
@@ -313,12 +356,23 @@ async def lifespan(app):
     yt_scheduler.add_job(run_due_keyword_words, IntervalTrigger(minutes=1),
                          id='yt_keyword_search', replace_existing=True)
 
-    # Renew WebSub subscriptions every 9 days
+    # Renew WebSub subscriptions every 4 days. YouTube's hub grants ~5-day
+    # leases, so renewal must run well inside that window. Scheduled
+    # unconditionally — each channel re-subscribes to the callback URL it was
+    # subscribed with (persisted in yt_channels.websub_callback_url); the
+    # config callback_url is only a fallback for channels with none stored.
     cb_url = _yt_cfg.get("callback_url", "").rstrip("/")
-    if cb_url:
-        full_cb = f"{cb_url}/youtube/websub/callback"
-        yt_scheduler.add_job(renew_all_subscriptions, IntervalTrigger(days=9),
-                             args=[full_cb], id='yt_websub_renew', replace_existing=True)
+    fallback_cb = f"{cb_url}/youtube/websub/callback" if cb_url else ""
+    if not fallback_cb:
+        logger.warning("[WEBSUB] youtube.callback_url is not set in config.yaml "
+                        "— renewal relies on per-channel stored callback URLs; "
+                        "channels subscribed before this feature won't renew.")
+    # First run ~3 min after startup so already-expired subscriptions recover
+    # without waiting a full 4-day cycle, then every 4 days thereafter.
+    yt_scheduler.add_job(renew_all_subscriptions, IntervalTrigger(days=4),
+                         args=[fallback_cb], id='yt_websub_renew',
+                         replace_existing=True,
+                         next_run_time=datetime.now() + timedelta(minutes=3))
 
     # Weekly queue cleanup
     yt_scheduler.add_job(run_cleanup, IntervalTrigger(weeks=1),

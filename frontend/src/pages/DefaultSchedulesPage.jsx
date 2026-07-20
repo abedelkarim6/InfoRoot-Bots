@@ -140,7 +140,7 @@ function DefaultScheduleRow({ ds, onEdit, onRemove }) {
               fontSize: 10,
               padding: '1px 7px',
               borderRadius: 20,
-              background: 'rgba(59,130,246,0.12)',
+              background: 'rgba(var(--accent-primary-rgb),0.12)',
               color: '#93c5fd',
               fontWeight: 600
             }}

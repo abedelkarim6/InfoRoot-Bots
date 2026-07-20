@@ -437,7 +437,16 @@ async def _send_with_split(client, target_chat, message_text):
             "لا تضف أي نص أو شرح آخر.\n\n"
             + message_text
         )
-        split_text, _ = await _run_with_retry(llm_client.generate_summary, split_prompt)
+        split_text, sptk = await _run_with_retry(llm_client.generate_summary, split_prompt)
+        try:
+            from utils.ai_pricing import client_model as _client_model
+            db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                            getattr(sptk, 'input', 0), getattr(sptk, 'output', 0),
+                            context="telegram-split",
+                            thinking_tokens=getattr(sptk, 'thinking', 0),
+                            audio_tokens=getattr(sptk, 'audio', 0))
+        except Exception:
+            pass
         candidates = [p.strip() for p in split_text.split('SPLIT', 1) if p.strip()]
         if len(candidates) == 2 and all(len(p) <= _TELEGRAM_MAX for p in candidates):
             parts = candidates
@@ -467,6 +476,7 @@ async def generate_and_send_summary(job_data):
       (< 10, not yet interim-summarized), summarize them directly as well.
     """
     schedule_type = job_data.get('schedule_type')
+    schedule_id = job_data.get('schedule_id')
     bot_name = job_data.get('bot_name')
     topic_name = job_data.get('topic_name')
     prompt_key = job_data.get('prompt_key')
@@ -556,7 +566,8 @@ async def generate_and_send_summary(job_data):
 
         # ── Split messages: interim-covered vs. remaining raw ───────────────
         all_ids = [m['id'] for m in all_msgs]
-        interim_id_map = db.get_interim_ids_for_messages(all_ids, bot_name=bot_name, topic_name=topic_name)
+        interim_id_map = db.get_interim_ids_for_messages(
+            all_ids, bot_name=bot_name, topic_name=topic_name, schedule_id=schedule_id)
 
         # Collect interim IDs in the order their first message appears
         seen_interim_ids: set = set()
@@ -587,6 +598,7 @@ async def generate_and_send_summary(job_data):
 
         BATCH = 25
         total_tokens = 0
+        primary_usage = None   # TokenUsage of the primary model's calls (exact in/out)
         summary_text = ''
         empty_retry_attempts = 0
         MAX_EMPTY_RETRIES = 2
@@ -625,7 +637,9 @@ async def generate_and_send_summary(job_data):
 
                 Mirrors the single-batch vs chunked logic and the empty-retry loop
                 so every compared model sees identical inputs — a fair A/B."""
+                from utils.ai_pricing import TokenUsage
                 _tokens = 0
+                _inp = _outp = _think = _audio = 0
                 _text = ''
                 _retries = 0
                 for attempt in range(MAX_EMPTY_RETRIES + 1):
@@ -638,6 +652,10 @@ async def generate_and_send_summary(job_data):
                             prompt += '\n\n' + get_bullet_points_suffix(b)
                         s, tk = await _run_with_retry(gen_fn, prompt)
                         _tokens += tk
+                        _inp += getattr(tk, 'input', 0)
+                        _outp += getattr(tk, 'output', 0)
+                        _think += getattr(tk, 'thinking', 0)
+                        _audio += getattr(tk, 'audio', 0)
                         _text = (s or '').strip()
                     else:
                         # Rare: > BATCH remaining messages. Roll the {final_interim}
@@ -655,6 +673,10 @@ async def generate_and_send_summary(job_data):
                                 p += '\n\n' + get_bullet_points_suffix(b)
                             s, tk = await _run_with_retry(gen_fn, p)
                             _tokens += tk
+                            _inp += getattr(tk, 'input', 0)
+                            _outp += getattr(tk, 'output', 0)
+                            _think += getattr(tk, 'thinking', 0)
+                            _audio += getattr(tk, 'audio', 0)
                             if (s or '').strip():
                                 rolling_text = s.strip()
                         _text = (rolling_text or '').strip()
@@ -666,11 +688,16 @@ async def generate_and_send_summary(job_data):
                         break
                     if attempt < MAX_EMPTY_RETRIES:
                         _retries = attempt + 1
-                return _text, _tokens, _retries
+                return _text, TokenUsage(_tokens, _inp, _outp, _think, _audio), _retries
 
             # ── Primary model: this is what gets sent to Telegram ────────────
             summary_text, ptk, empty_retry_attempts = await _gen_one(llm_client.generate_summary)
             total_tokens += ptk
+            primary_usage = ptk
+            # Always record which model produced the summary — per-model cost
+            # accounting needs it even in single-model mode.
+            from utils.ai_pricing import client_model as _client_model
+            primary_model_used = _client_model(llm_client)
             if not summary_text and empty_retry_attempts:
                 logger.warning(
                     f"[RETRY] AI returned empty summary after {empty_retry_attempts} "
@@ -695,7 +722,19 @@ async def generate_and_send_summary(job_data):
                                     user_id=getattr(llm_client, 'user_id', None),
                                 )
                                 alt_text, atk, _ = await _gen_one(alt_client.generate_summary)
-                                total_tokens += atk
+                                # Compare-model tokens are logged as their own
+                                # ai_usage_log rows (exact per-model cost) and
+                                # kept OUT of the summary row, whose
+                                # tokens/input/output describe the primary only.
+                                try:
+                                    db.log_ai_usage(
+                                        None, 'summaries', cm,
+                                        getattr(atk, 'input', 0), getattr(atk, 'output', 0),
+                                        context=f"compare {bot_name}/{topic_name}",
+                                        thinking_tokens=getattr(atk, 'thinking', 0),
+                                        audio_tokens=getattr(atk, 'audio', 0))
+                                except Exception:
+                                    pass
                                 if alt_text:
                                     model_outputs[cm] = alt_text
                                 logger.info(
@@ -784,8 +823,13 @@ async def generate_and_send_summary(job_data):
                 message_ids=all_ids,
                 tokens_used=total_tokens,
                 thoughts=getattr(llm_client, 'last_thoughts', '') or None,
+                schedule_id=schedule_id,
                 model_outputs=model_outputs or None,
                 primary_model=primary_model_used,
+                input_tokens=getattr(primary_usage, 'input', None) if primary_usage is not None else None,
+                output_tokens=getattr(primary_usage, 'output', None) if primary_usage is not None else None,
+                thinking_tokens=getattr(primary_usage, 'thinking', None) if primary_usage is not None else None,
+                audio_tokens=getattr(primary_usage, 'audio', None) if primary_usage is not None else None,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -932,7 +976,16 @@ async def generate_speech_buckets(job_data: dict):
         msg_ids = [m['id']   for m in in_window]
 
         prompt       = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-        llm_response, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+        llm_response, stk = await _run_with_retry(llm_client.generate_summary, prompt)
+        try:
+            from utils.ai_pricing import client_model as _client_model
+            db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                            getattr(stk, 'input', 0), getattr(stk, 'output', 0),
+                            context=f"speech {bot_name}/{topic_name}",
+                            thinking_tokens=getattr(stk, 'thinking', 0),
+                            audio_tokens=getattr(stk, 'audio', 0))
+        except Exception:
+            pass
         buckets      = _parse_speech_buckets(llm_response)
 
         # Cancel any existing pending send task and restart the countdown
@@ -997,7 +1050,8 @@ async def cleanup_message_backlog():
         # Build per-(bot_name, topic_name) cutoff.
         # Use the earliest window_start (furthest back in time) across all schedules
         # for that topic — a message is stale only if it's outside every window.
-        topic_cutoffs: dict = {}  # (bot_name, topic_name) -> datetime
+        topic_cutoffs: dict = {}       # (bot_name, topic_name) -> datetime
+        topic_schedule_ids: dict = {}  # (bot_name, topic_name) -> set of schedule ids
         for bot_name, bot_data in bots_cfg.items():
             for cat_data in bot_data.get('categories', {}).values():
                 for topic_name, topic_data in cat_data.get('topics', {}).items():
@@ -1009,6 +1063,9 @@ async def cleanup_message_backlog():
                         stype = schedule.get('type')
                         if not stype:
                             continue
+                        sid = schedule.get('id')
+                        if sid:
+                            topic_schedule_ids.setdefault((bot_name, topic_name), set()).add(sid)
                         job_data = {
                             'schedule_type':    stype,
                             'sch_minute':       schedule.get('minute'),
@@ -1056,7 +1113,12 @@ async def cleanup_message_backlog():
                 if cutoff is None:
                     continue  # no schedule configured for this pair — leave untouched
                 if msg_ts < cutoff:
-                    db.mark_as_summarized([msg['id']], 'interim', bot_name, topic_name, status='missed')
+                    # Mark the message missed in every schedule's own interim chain so
+                    # the per-schedule interim builders skip it (interims are no longer
+                    # a shared 'interim' chain — see check_and_run_interim_summary).
+                    for sid in topic_schedule_ids.get((bot_name, topic_name), ()):
+                        db.mark_as_summarized([msg['id']], f'interim:{sid}',
+                                              bot_name, topic_name, status='missed')
                     missed += 1
 
         if missed:
@@ -1136,9 +1198,13 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
             schedule_type = sched.get('type')
             if schedule_id is None or not schedule_type:
                 continue  # malformed schedule row — skip rather than crash
+            # speeches_interval doesn't use interims (generate_speech_buckets
+            # summarizes raw messages directly) — building them would be wasted work.
+            if schedule_type == 'speeches_interval':
+                continue
             try:
                 schedule_name = sched.get('name')
-                prompt_key    = sched.get('prompt_key') or 'default'
+                prompt_key    = sched.get('prompt_key') or _get_prompt_key_for_topic(bot_name, topic_name)
                 b_count = int(sched.get('bullet_points_count') or 0) if sched.get('bullet_points') else 0
                 batch_limit = max(1, 26 - b_count) if b_count else 20
                 logger.info(
@@ -1193,7 +1259,19 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                     if b_count:
                         prompt += '\n\n' + get_bullet_points_suffix(b_count)
 
-                    summary_text, _ = await _run_with_retry(llm_client.generate_summary, prompt)
+                    summary_text, itk = await _run_with_retry(llm_client.generate_summary, prompt)
+
+                    # Interim calls are separate from the final summary row —
+                    # log them so their (exact) cost shows up in AI usage.
+                    try:
+                        from utils.ai_pricing import client_model as _client_model
+                        db.log_ai_usage(None, 'summaries', _client_model(llm_client),
+                                        getattr(itk, 'input', 0), getattr(itk, 'output', 0),
+                                        context=f"interim {bot_name}/{topic_name}",
+                                        thinking_tokens=getattr(itk, 'thinking', 0),
+                                        audio_tokens=getattr(itk, 'audio', 0))
+                    except Exception:
+                        pass
 
                     interim_id = db.save_interim_summary(
                         bot_name, topic_name, summary_text, len(messages),
@@ -1270,6 +1348,7 @@ async def schedule_summaries():
                     job_id = f"sch:{schedule_id}" if schedule_id else f"{bot_name}:{category_name}:{topic_name}:{schedule_name}"
                     job_data = {
                         'schedule_type': schedule_type,
+                        'schedule_id': schedule_id,
                         'bot_name': bot_name,
                         'topic_name': topic_name,
                         'category_name': category_name,
@@ -1468,21 +1547,35 @@ async def run_bot():
                 await client.run_until_disconnected()
                 logger.warning("[RECONNECT] Disconnected from Telegram. Reconnecting in 15s...")
 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
+                # NOTE: asyncio.CancelledError is a BaseException (not Exception)
+                # in Python 3.8+, so it is NOT caught here — it propagates out of
+                # the loop, runs the `finally` cleanup, and bubbles up to the
+                # supervisor so `stop_bot_task()` can actually stop the task.
                 logger.error(f"[RECONNECT] Connection error: {e}. Retrying in 30s...")
 
             await asyncio.sleep(15)
 
+    except asyncio.CancelledError:
+        logger.info("[MAIN] Bot run cancelled — shutting down cleanly.")
+        raise  # propagate so the supervisor task truly stops
     except KeyboardInterrupt:
         pass
     finally:
-        # app.py owns the db lifecycle — do NOT call db.close() here
+        # app.py owns the db lifecycle — do NOT call db.close() here.
+        # Each step is guarded so one failure can't block the others — a
+        # leftover non-daemon thread or hung await here is what orphans the
+        # process and keeps port 8000 held after Ctrl+C.
+        if watcher_task is not None and not watcher_task.done():
+            watcher_task.cancel()
         if client:
             try:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=10)
             except Exception:
                 pass
         if SCHEDULER and SCHEDULER.running:
-            SCHEDULER.shutdown()
+            try:
+                # wait=False — never block shutdown on an in-flight job.
+                SCHEDULER.shutdown(wait=False)
+            except Exception:
+                pass

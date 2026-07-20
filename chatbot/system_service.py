@@ -122,11 +122,15 @@ def create_system_session() -> str:
     session_id = "sys-" + str(uuid.uuid4())[:8]
     action_log = []
     team = _build_system_team(action_log)
+    from utils.gemini_models import get_gemini_model
     _sessions[session_id] = {
         "team": team,
         "action_log": action_log,
         "messages": [],
         "created_at": datetime.utcnow(),
+        # System agent is admin-only — usage logged without a user_id
+        "user_id": None,
+        "model_id": get_gemini_model(),
     }
     logger.info(f"[SYS-CHAT] Session {session_id} created")
     return session_id
@@ -148,6 +152,9 @@ async def send_system_message(session_id: str, message: str) -> dict:
     response = await loop.run_in_executor(None, lambda: team.run(message))
 
     reply = response.content if response else "No response from the team."
+
+    from chatbot.service import _log_chat_usage
+    _log_chat_usage(session, getattr(response, "metrics", None), message, reply)
 
     # Collect actions performed during this message
     actions = list(action_log)
@@ -190,6 +197,7 @@ async def stream_system_message(session_id: str, message: str):
     loop.run_in_executor(None, _run)
 
     content_parts = []
+    run_metrics = None
 
     while True:
         item = await queue.get()
@@ -200,6 +208,11 @@ async def stream_system_message(session_id: str, message: str):
             return
 
         evt_str = str(getattr(item, 'event', ''))
+
+        if 'RunCompleted' in evt_str:
+            m = getattr(item, 'metrics', None)
+            if m is not None:
+                run_metrics = m
 
         if 'ToolCallStarted' in evt_str:
             tool = getattr(item, 'tool', None)
@@ -228,6 +241,9 @@ async def stream_system_message(session_id: str, message: str):
 
     final_text = ''.join(content_parts)
     yield _sse('done', {'content': final_text, 'actions': list(action_log)})
+
+    from chatbot.service import _log_chat_usage
+    _log_chat_usage(session, run_metrics, message, final_text)
 
     session['messages'].append({'role': 'user', 'text': message})
     session['messages'].append({'role': 'assistant', 'text': final_text, 'actions': list(action_log)})

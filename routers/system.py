@@ -237,6 +237,307 @@ def get_ai_usage_details(request: Request):
         return {"status": "error", "message": str(e)}
 
 
+@router.get("/system/ai-usage-history")
+def get_ai_usage_history(request: Request, date_from: str = None, date_to: str = None,
+                         granularity: str = "day", feature: str = "all", user: str = "all"):
+    """Historical AI usage + estimated $ cost between two dates with feature
+    and user filters. Admin only.
+
+    - date_from/date_to: YYYY-MM-DD (inclusive); defaults to the current month.
+    - granularity: day | month (bucket size of the time series).
+    - feature: all | summaries | youtube | chatbot | seo.
+    - user: all | admin | <user id>. YouTube usage has no per-user ownership,
+      so it is attributed to admin (excluded when a specific user is selected).
+
+    Cost precision: youtube/chatbot/seo price exact input/output token splits;
+    summaries rows store one combined total, priced with the blended
+    input_ratio from the pricing settings (estimate).
+    """
+    try:
+        if not is_admin_request(request):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+        from datetime import date, datetime
+        from utils.ai_pricing import (get_pricing, cost_usd, blended_cost_usd,
+                                      thinking_cost_usd, resolve_rates)
+
+        def _parse(d, fallback):
+            try:
+                return datetime.strptime((d or '').strip(), '%Y-%m-%d').date().isoformat()
+            except ValueError:
+                return fallback
+
+        today = date.today()
+        date_from = _parse(date_from, today.replace(day=1).isoformat())
+        date_to = _parse(date_to, today.isoformat())
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        gran = granularity if granularity in ("day", "month") else "day"
+        all_features = ("summaries", "youtube", "chatbot", "seo")
+        feature = feature if feature in ("all",) + all_features else "all"
+        wanted = all_features if feature == "all" else (feature,)
+
+        owner_filter = 'all'
+        if user == 'admin':
+            owner_filter = 'admin'
+        elif user not in (None, '', 'all'):
+            try:
+                owner_filter = int(user)
+            except ValueError:
+                pass
+
+        db = get_db()
+        pricing = get_pricing(db)
+
+        def _row_cost(feat, r):
+            """Exact cost of a row's recorded input/output/thinking/audio split,
+            plus a blended estimate for any legacy combined-only tokens."""
+            c = cost_usd(r.get('model'), int(r.get('input_tokens') or 0),
+                         int(r.get('output_tokens') or 0), int(r.get('thinking_tokens') or 0),
+                         int(r.get('audio_tokens') or 0), pricing)
+            legacy = int(r.get('legacy_tokens') or 0)
+            if legacy:
+                c += blended_cost_usd(r.get('model'), legacy, pricing)
+            return c
+
+        def _audio_premium_usd(r):
+            """The EXTRA cost of a row's audio tokens vs pricing them as text
+            input — i.e. what the flat-input model used to miss."""
+            audio = min(int(r.get('audio_tokens') or 0), int(r.get('input_tokens') or 0))
+            if not audio:
+                return 0.0
+            rates = resolve_rates(r.get('model'), pricing)
+            return audio * (rates.get('audio', rates['input']) - rates['input']) / 1_000_000
+
+        def _row_tokens(r):
+            t = r.get('tokens')
+            if t is not None:
+                return int(t)
+            return (r.get('input_tokens') or 0) + (r.get('output_tokens') or 0) + (r.get('thinking_tokens') or 0)
+
+        def _fold_series(feat, rows):
+            by_bucket = {}
+            for r in rows:
+                b = by_bucket.setdefault(r['bucket'], {'bucket': r['bucket'], 'runs': 0, 'tokens': 0, 'cost': 0.0})
+                b['runs'] += int(r.get('runs') or 0)
+                b['tokens'] += _row_tokens(r)
+                b['cost'] += _row_cost(feat, r)
+            out = sorted(by_bucket.values(), key=lambda x: x['bucket'] or '')
+            for b in out:
+                b['cost'] = round(b['cost'], 4)
+            return out
+
+        # ── collect model-grained rows per feature ──────────────────────────
+        # ai_usage_log also carries 'summaries' rows for calls outside the
+        # summary row itself (interims, compare models, speech, splits).
+        agent_rows = []
+        if set(wanted) & {'summaries', 'chatbot', 'seo'}:
+            agent_rows = db.get_agent_usage_history(date_from, date_to, gran, owner_filter)
+
+        features = {}
+        summaries_by_user, summaries_by_bot = [], []
+        if 'summaries' in wanted:
+            hist = db.get_ai_usage_history(date_from, date_to, gran, owner_filter)
+            sum_rows = hist['series'] + [r for r in agent_rows if r['feature'] == 'summaries']
+            features['summaries'] = {'series': _fold_series('summaries', sum_rows)}
+            summaries_by_user, summaries_by_bot = hist['by_user'], hist['by_bot']
+
+        yt_rows = []
+        if 'youtube' in wanted:
+            if owner_filter in ('all', 'admin'):
+                from youtube_monitor.db import get_yt_db
+                ydb = get_yt_db()
+                if ydb is not None:
+                    yt_rows = ydb.get_ai_usage_history(date_from, date_to, gran)
+            features['youtube'] = {'series': _fold_series('youtube', yt_rows)}
+
+        for feat in ('chatbot', 'seo'):
+            if feat in wanted:
+                features[feat] = {'series': _fold_series(feat, [r for r in agent_rows if r['feature'] == feat])}
+
+        for feat, blk in features.items():
+            blk['total'] = {
+                'runs': sum(b['runs'] for b in blk['series']),
+                'tokens': sum(b['tokens'] for b in blk['series']),
+                'cost': round(sum(b['cost'] for b in blk['series']), 4),
+            }
+        features.get('summaries', {})['estimate'] = True  # blended pricing
+
+        # ── per-user × per-feature matrix ────────────────────────────────────
+        matrix = {}
+
+        def _user_cell(user_id, username, feat):
+            row = matrix.setdefault(user_id, {
+                'user_id': user_id, 'username': username,
+                'features': {f: {'runs': 0, 'tokens': 0, 'cost': 0.0} for f in all_features},
+            })
+            return row['features'][feat]
+
+        for r in summaries_by_user:
+            cell = _user_cell(r['user_id'], r['username'], 'summaries')
+            cell['runs'] += int(r.get('runs') or 0)
+            cell['tokens'] += int(r.get('tokens') or 0)
+            cell['cost'] += _row_cost('summaries', r)
+        for r in agent_rows:
+            if r['feature'] not in all_features or r['feature'] not in wanted:
+                continue
+            cell = _user_cell(r['user_id'], r['username'], r['feature'])
+            cell['runs'] += int(r.get('runs') or 0)
+            cell['tokens'] += _row_tokens(r)
+            cell['cost'] += _row_cost(r['feature'], r)
+        if 'youtube' in features:
+            for b in features['youtube']['series']:
+                cell = _user_cell(None, 'Admin', 'youtube')
+                cell['runs'] += b['runs']
+                cell['tokens'] += b['tokens']
+                cell['cost'] += b['cost']
+
+        all_users = db.get_all_users()
+        caps_by_id = {u['id']: (u.get('cost_caps') or {}) for u in all_users}
+        by_user = []
+        for row in matrix.values():
+            for f, cell in row['features'].items():
+                cell['cost'] = round(cell['cost'], 4)
+            row['total'] = {
+                'runs': sum(c['runs'] for c in row['features'].values()),
+                'tokens': sum(c['tokens'] for c in row['features'].values()),
+                'cost': round(sum(c['cost'] for c in row['features'].values()), 4),
+            }
+            row['cost_caps'] = caps_by_id.get(row['user_id'], {}) if row['user_id'] is not None else {}
+            by_user.append(row)
+        by_user.sort(key=lambda r: r['total']['cost'], reverse=True)
+
+        # ── top bots (summaries) with cost ───────────────────────────────────
+        bots_fold = {}
+        for r in summaries_by_bot:
+            b = bots_fold.setdefault(r['bot_name'], {'bot_name': r['bot_name'], 'runs': 0, 'tokens': 0, 'cost': 0.0})
+            b['runs'] += int(r.get('runs') or 0)
+            b['tokens'] += int(r.get('tokens') or 0)
+            b['cost'] += _row_cost('summaries', r)
+        by_bot = sorted(bots_fold.values(), key=lambda b: b['tokens'], reverse=True)[:15]
+        for b in by_bot:
+            b['cost'] = round(b['cost'], 4)
+
+        # ── per-model breakdown (usage + current rates + cost, incl. thinking/audio) ─
+        model_fold = {}
+
+        def _add_model_rows(feat, rows):
+            for r in rows:
+                m = r.get('model') or '(unknown)'
+                e = model_fold.setdefault(m, {'model': m, 'runs': 0, 'tokens': 0, 'cost': 0.0,
+                                              'thinking_tokens': 0, 'thinking_cost': 0.0,
+                                              'audio_tokens': 0, 'audio_premium': 0.0})
+                e['runs'] += int(r.get('runs') or 0)
+                e['tokens'] += _row_tokens(r)
+                e['cost'] += _row_cost(feat, r)
+                th = int(r.get('thinking_tokens') or 0)
+                e['thinking_tokens'] += th
+                e['thinking_cost'] += thinking_cost_usd(r.get('model'), th, pricing)
+                e['audio_tokens'] += int(r.get('audio_tokens') or 0)
+                e['audio_premium'] += _audio_premium_usd(r)
+
+        if 'summaries' in wanted:
+            _add_model_rows('summaries', hist['series'])
+        _add_model_rows('youtube', yt_rows)
+        for feat in ('summaries', 'chatbot', 'seo'):
+            if feat in wanted:
+                _add_model_rows(feat, [r for r in agent_rows if r['feature'] == feat])
+        by_model = sorted(model_fold.values(), key=lambda m: m['cost'], reverse=True)
+        for m in by_model:
+            m['cost'] = round(m['cost'], 4)
+            m['thinking_cost'] = round(m['thinking_cost'], 4)
+            m['audio_premium'] = round(m['audio_premium'], 4)
+            rates = resolve_rates(None if m['model'] == '(unknown)' else m['model'], pricing)
+            m['rate_input'] = rates['input']
+            m['rate_output'] = rates['output']
+            m['rate_audio'] = rates.get('audio', rates['input'])
+
+        totals = {
+            'thinking_tokens': sum(m['thinking_tokens'] for m in by_model),
+            'thinking_cost': round(sum(m['thinking_cost'] for m in by_model), 4),
+            'audio_tokens': sum(m['audio_tokens'] for m in by_model),
+            'audio_premium': round(sum(m['audio_premium'] for m in by_model), 4),
+            'cost': round(sum(m['cost'] for m in by_model), 4),
+        }
+
+        users = [{"id": u["id"], "username": u["username"]} for u in all_users]
+        return {
+            "status": "ok",
+            "date_from": date_from,
+            "date_to": date_to,
+            "granularity": gran,
+            "features": features,
+            "by_user": by_user,
+            "by_bot": by_bot,
+            "by_model": by_model,
+            "totals": totals,
+            "users": users,
+            "pricing": pricing,
+        }
+    except Exception as e:
+        logger.exception("[SYSTEM] get_ai_usage_history failed")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/system/ai-pricing")
+def get_ai_pricing(request: Request):
+    """Current per-model $/1M pricing (defaults merged with admin overrides)."""
+    try:
+        if not is_admin_request(request):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+        from utils.ai_pricing import get_pricing, DEFAULT_MODEL_PRICING, DEFAULT_INPUT_RATIO
+        p = get_pricing(get_db())
+        return {"status": "ok", "models": p["models"], "input_ratio": p["input_ratio"],
+                "defaults": DEFAULT_MODEL_PRICING, "default_input_ratio": DEFAULT_INPUT_RATIO}
+    except Exception as e:
+        logger.exception("[SYSTEM] get_ai_pricing failed")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/system/ai-pricing")
+def set_ai_pricing(request: Request, data: dict = Body(...)):
+    """Save per-model pricing overrides + blended input_ratio. Admin only."""
+    try:
+        if not is_admin_request(request):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
+        from utils.ai_pricing import PRICING_SETTING_KEY
+        models = {}
+        for m, rates in (data.get("models") or {}).items():
+            if not isinstance(rates, dict):
+                continue
+            try:
+                inp, out = float(rates.get("input", 0)), float(rates.get("output", 0))
+            except (TypeError, ValueError):
+                continue
+            if inp < 0 or out < 0:
+                continue
+            entry = {"input": inp, "output": out}
+            # Optional audio rate — blank/absent means "bill audio at the input
+            # rate". Must be persisted or an edit would silently drop it.
+            if rates.get("audio") not in (None, ""):
+                try:
+                    aud = float(rates.get("audio"))
+                    if aud >= 0:
+                        entry["audio"] = aud
+                except (TypeError, ValueError):
+                    pass
+            models[str(m).strip()] = entry
+        payload = {"models": models}
+        try:
+            ratio = float(data.get("input_ratio"))
+            if 0 <= ratio <= 1:
+                payload["input_ratio"] = ratio
+        except (TypeError, ValueError):
+            pass
+        get_db().set_setting(PRICING_SETTING_KEY, payload)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("[SYSTEM] set_ai_pricing failed")
+        return {"status": "error", "message": str(e)}
+
+
 @router.get("/system/fixed-prefix")
 def get_summaries_fixed_prefix(request: Request):
     """Return the active summaries system prompt and fixed prefix (admin only)."""

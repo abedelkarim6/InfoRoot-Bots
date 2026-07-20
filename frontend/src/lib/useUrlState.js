@@ -7,17 +7,28 @@
  *   - the browser back button moves between views inside a page
  *   - URLs are shareable / bookmarkable
  *
- * Updates default to `{ replace: true }` so typing in a filter doesn't spam
+ * Setters default to `{ replace: true }` so typing in a filter doesn't spam
  * history entries — only the *current* state lives in the URL. Genuine view
  * transitions (switching tabs, drilling into a detail panel) should instead
- * pass `{ push: true }` to the setter so the browser Back button returns to
- * the previous view:
- *   setTab('history', { push: true });
- *   setSummaryId(id, { push: true });
+ * push a new history entry so the browser Back button returns to the previous
+ * view. Both `{ push: true }` and `{ history: 'push' }` are accepted:
+ *
+ *   setTab('history', { push: true });        // back returns to previous tab
+ *   setSummaryId(2161, { history: 'push' });  // back closes the drill-down
+ *   setSearch(value);                         // filter typing — silent replace
  */
 
 import { useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+
+// Resolve the {replace} flag passed to react-router's setSearchParams from
+// the optional second arg on every hook setter. Default is replace so
+// filter/search inputs don't pollute history.
+function _shouldReplace(opts) {
+  if (!opts) return true;
+  // Accept both conventions: { push: true } and { history: 'push' }.
+  return (opts.push === true || opts.history === 'push') ? false : true;
+}
 
 /**
  * String-valued URL param.
@@ -41,7 +52,7 @@ export function useUrlString(key, defaultValue = '') {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: !opts?.push });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -66,7 +77,7 @@ export function useUrlBool(key) {
       } else {
         params.delete(key);
       }
-      setSearchParams(params, { replace: !opts?.push });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );
@@ -104,7 +115,7 @@ export function useUrlSet(key) {
       } else {
         params.set(key, arr.join(','));
       }
-      setSearchParams(params, { replace: !opts?.push });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );
@@ -133,7 +144,7 @@ export function useUrlInt(key, defaultValue = 0) {
       } else {
         params.set(key, String(v));
       }
-      setSearchParams(params, { replace: !opts?.push });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, defaultValue, setSearchParams]
   );
@@ -167,7 +178,7 @@ export function useUrlJson(key) {
       } else {
         params.set(key, encodeURIComponent(JSON.stringify(next)));
       }
-      setSearchParams(params, { replace: !opts?.push });
+      setSearchParams(params, { replace: _shouldReplace(opts) });
     },
     [key, setSearchParams]
   );

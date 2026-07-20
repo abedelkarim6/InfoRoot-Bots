@@ -14,8 +14,10 @@ import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { formatScheduleLong } from './shared';
 import AddScheduleModal from './AddScheduleModal';
 import EditScheduleModal from './EditScheduleModal';
+import Icon from '../../components/icons';
+import KebabMenu from '../../components/KebabMenu';
 
-export default function SchedulesSection({ botName, catName, topicName, topic }) {
+export default function SchedulesSection({ botName, catName, topicName, topic, inherited = false }) {
   const schedules = topic.schedules || [];
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -47,9 +49,20 @@ export default function SchedulesSection({ botName, catName, topicName, topic })
   }
 
   return (
-    <div className="topic-schedules-section">
-      <div className="form-group">
-        <label className="form-label">Schedules</label>
+    <div className="topic-schedules-section tsec open">
+      <div className="tsec-head" style={{ cursor: 'default' }}>
+        <span className="tsec-icon"><Icon name="calendarClock" size={16} /></span>
+        <span className="tsec-title">Schedules</span>
+        <div className="tsec-actions">
+          {!inherited && (
+            <button className="btn btn-secondary btn-sm" onClick={() => setAddOpen(true)}>
+              <Icon name="plus" size={13} style={{ marginRight: 5 }} />
+              Schedule
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="tsec-body">
         {schedules.map((sch) => (
           <ScheduleRow
             key={sch.id}
@@ -65,14 +78,12 @@ export default function SchedulesSection({ botName, catName, topicName, topic })
               })
             }
             disabled={toggleSch.isPending || removeSch.isPending}
+            readOnly={inherited}
           />
         ))}
-        <button
-          className="btn btn-secondary btn-sm mt-2"
-          onClick={() => setAddOpen(true)}
-        >
-          + Add Schedule
-        </button>
+        {schedules.length === 0 && (
+          <span className="tsec-empty">No schedules yet{!inherited ? ' — click "+ Schedule" to add one' : ''}</span>
+        )}
       </div>
 
       {addOpen && (
@@ -96,11 +107,33 @@ export default function SchedulesSection({ botName, catName, topicName, topic })
   );
 }
 
-function ScheduleRow({ sch, onToggle, onEdit, onDelete, disabled }) {
+function ScheduleRow({ sch, onToggle, onEdit, onDelete, disabled, readOnly = false }) {
   return (
-    <div className="summary-block">
-      <div className="summary-header">
-        <div className="summary-title">
+    <div className="sched-row">
+      <span className="sched-icon-tile"><Icon name="calendarClock" size={17} /></span>
+      <div className="sched-main">
+        <strong className="sched-name">{sch.name}</strong>
+        <div className="sched-chips">
+          <span className="count-pill">{formatScheduleLong(sch)}</span>
+          <span className="count-pill">{sch.prompt_key}</span>
+          {sch.bullet_points && (
+            <span className="count-pill">{sch.bullet_points_count} bullet points</span>
+          )}
+          {sch.header_datetime && (
+            <span className="count-pill">
+              🕐 header time
+              {sch.header_datetime_offset
+                ? ` (${sch.header_datetime_offset > 0 ? '+' : ''}${sch.header_datetime_offset}min)`
+                : ''}
+            </span>
+          )}
+          {sch.telegram_targets?.length > 0 && (
+            <span className="count-pill">{sch.telegram_targets.length} target{sch.telegram_targets.length !== 1 ? 's' : ''}</span>
+          )}
+        </div>
+      </div>
+      {!readOnly && (
+        <div className="sched-controls" onClick={(e) => e.stopPropagation()}>
           <label className="toggle-switch">
             <input
               type="checkbox"
@@ -110,57 +143,14 @@ function ScheduleRow({ sch, onToggle, onEdit, onDelete, disabled }) {
             />
             <span className="toggle-slider"></span>
           </label>
-          <strong>{sch.name}</strong>
+          <KebabMenu
+            items={[
+              { label: 'Edit', icon: 'pencil', onClick: onEdit },
+              { label: 'Delete', icon: 'trash', danger: true, disabled, onClick: onDelete }
+            ]}
+          />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <button className="btn-icon" title="Edit schedule" onClick={onEdit}>
-            ✏️
-          </button>
-          <button
-            className="btn-icon btn-danger"
-            title="Delete schedule"
-            onClick={onDelete}
-            disabled={disabled}
-          >
-            🗑️
-          </button>
-        </div>
-      </div>
-      <div className="summary-details">
-        <span>📅 {formatScheduleLong(sch)}</span>
-        <span>
-          📝 {sch.prompt_key}
-          {sch.bullet_points && (
-            <span
-              style={{
-                background: 'var(--accent-primary,#6366f1)',
-                color: '#fff',
-                fontSize: 10,
-                padding: '1px 6px',
-                borderRadius: 10,
-                fontWeight: 500,
-                marginLeft: 4
-              }}
-            >
-              🔹 {sch.bullet_points_count}pt
-            </span>
-          )}
-        </span>
-        <span>
-          📨 {sch.header || `*${sch.name}*`}
-          {sch.header_datetime ? ' 🕐' : ''}
-          {sch.header_datetime && sch.header_datetime_offset ? (
-            <span
-              className="text-muted"
-              style={{ fontSize: 11, marginLeft: 4 }}
-            >
-              ({sch.header_datetime_offset > 0 ? '+' : ''}
-              {sch.header_datetime_offset}min)
-            </span>
-          ) : null}
-          {sch.telegram_targets?.length ? ` 📡 ${sch.telegram_targets.length}` : ''}
-        </span>
-      </div>
+      )}
     </div>
   );
 }

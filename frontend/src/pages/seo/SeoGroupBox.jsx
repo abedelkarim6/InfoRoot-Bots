@@ -153,7 +153,7 @@ export default function SeoGroupBox({ group, isAdmin }) {
             <span
               key={`${u.bot_name}-${u.category_name}-${u.topic_name}-${i}`}
               className="tag"
-              style={{ background: 'rgba(99,102,241,.12)', cursor: 'default' }}
+              style={{ cursor: 'default' }}
               title={`${u.bot_name} › ${u.category_name} › ${u.topic_name}`}
             >
               {u.topic_name}

@@ -33,18 +33,7 @@ export default function CatchAllToggle({
   }
 
   return (
-    <div
-      className="form-group"
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '8px 10px',
-        background: 'var(--bg-secondary,#1e1e2e)',
-        borderRadius: 6,
-        marginBottom: 8
-      }}
-    >
+    <div className="catchall-inline">
       <label className="toggle-switch">
         <input
           type="checkbox"
@@ -54,15 +43,10 @@ export default function CatchAllToggle({
         />
         <span className="toggle-slider"></span>
       </label>
-      <div>
-        <span style={{ fontSize: 13, fontWeight: 500 }}>
-          🌐 Catch All Messages
-        </span>
-        <small
-          className="text-muted d-block"
-          style={{ fontSize: 11 }}
-        >
-          Matches every incoming message — no keywords required
+      <div className="catchall-text">
+        <span className="catchall-title">Catch All Messages</span>
+        <small className="catchall-sub">
+          Matches every incoming message no keywords required
         </small>
       </div>
     </div>

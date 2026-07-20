@@ -61,21 +61,82 @@ def _is_rate_limited(exc: Exception) -> float | None:
     return float(m.group(1)) if m else 40.0
 
 
-def _extract_tokens(response) -> tuple[int, int]:
-    """Return (input_tokens, output_tokens) from a Gemini response."""
-    um = getattr(response, 'usage_metadata', None)
-    if um:
-        return (getattr(um, 'prompt_token_count', 0) or 0,
-                getattr(um, 'candidates_token_count', 0) or 0)
-    return 0, 0
+def _extract_tokens(response) -> tuple[int, int, int, int]:
+    """Return (input_tokens, output_tokens, thinking_tokens, audio_tokens) from
+    a Gemini response. `output` is the visible answer; `thinking` is the
+    reasoning trace (Gemini's "Thinking Text Output" SKU — billed at the output
+    rate); `audio` is the audio-modality share OF input (a subset, billed at a
+    higher rate than text/video — native video ingestion tokenizes the
+    soundtrack). See extract_gemini_tokens."""
+    from utils.ai_pricing import extract_gemini_tokens
+    return extract_gemini_tokens(getattr(response, 'usage_metadata', None))
 
 
-_YT_LABELS = types.GenerateContentConfig(labels={"service": "youtube"})
+def _resolve_yt_thinking_config():
+    """Read the admin's `yt_gemini_thinking` setting and translate it into a
+    `types.ThinkingConfig` — or `None` when thinking is disabled.
+
+    Separate from the summaries feature's `gemini_thinking` so YouTube can be
+    toggled independently. When enabled we set `include_thoughts=True` so the
+    response carries the reasoning trace, which is stored on the summary row.
+    """
+    try:
+        from utils.database import get_db
+        cfg = get_db().get_setting("yt_gemini_thinking") or {}
+        if not cfg.get("enabled"):
+            return None
+        budget = cfg.get("budget", -1)
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            budget = -1
+        return types.ThinkingConfig(thinking_budget=budget, include_thoughts=True)
+    except Exception as e:
+        logger.warning(f"[YT-WORKER] thinking config lookup failed: {e}")
+        return None
 
 
-def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int]:
+def _split_response_parts(response) -> tuple[str, str]:
+    """Split a generate_content response into (answer_text, thoughts_text).
+
+    With `include_thoughts=True`, Vertex returns multiple parts and marks
+    reasoning parts with `part.thought == True`. Models/SDKs that don't
+    surface thoughts return a single part — `thoughts_text` is then empty.
+    """
+    answer_chunks, thought_chunks = [], []
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            parts = getattr(getattr(candidates[0], "content", None), "parts", None) or []
+            for p in parts:
+                txt = getattr(p, "text", None)
+                if not txt:
+                    continue
+                (thought_chunks if getattr(p, "thought", False) else answer_chunks).append(txt)
+    except Exception:
+        pass
+    answer = "".join(answer_chunks).strip()
+    thoughts = "\n\n".join(thought_chunks).strip()
+    if not answer:
+        answer = (getattr(response, "text", "") or "").strip()
+    return answer, thoughts
+
+
+def _yt_gen_config() -> types.GenerateContentConfig:
+    """Build the Gemini config for a YouTube summarization call — service
+    labels plus the thinking config when the YouTube thinking toggle is on."""
+    kwargs = {"labels": {"service": "youtube"}}
+    thinking_cfg = _resolve_yt_thinking_config()
+    if thinking_cfg is not None:
+        kwargs["thinking_config"] = thinking_cfg
+    return types.GenerateContentConfig(**kwargs)
+
+
+def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int, int, int, str]:
     """Strategy 1: Send YouTube URL directly to Vertex AI Gemini for native video understanding.
-    Returns (summary_text, input_tokens, output_tokens)."""
+    Returns (summary_text, input_tokens, output_tokens, thinking_tokens, audio_tokens, thoughts).
+    This is the path that incurs audio-input billing (Gemini tokenizes the
+    video's soundtrack alongside the frames)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
         model=get_gemini_model(),
@@ -86,10 +147,11 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
                 types.Part(text=prompt),
             ]
         ),
-        config=_YT_LABELS,
+        config=_yt_gen_config(),
     )
-    inp, out = _extract_tokens(response)
-    return response.text.strip(), inp, out
+    inp, out, think, audio = _extract_tokens(response)
+    answer, thoughts = _split_response_parts(response)
+    return answer, inp, out, think, audio, thoughts
 
 
 def _fetch_transcript_text(video_id: str) -> str:
@@ -158,12 +220,15 @@ async def _fetch_external_video(video_id: str) -> dict | None:
 
 
 def _summarize_via_transcript(video_id: str, prompt: str,
-                              transcript_text: str = None) -> tuple[str, str, int, int]:
+                              transcript_text: str = None) -> tuple[str, str, int, int, int, int, str]:
     """Strategy 2: send transcript text to Gemini.
-    Returns (summary_text, transcript_text, input_tokens, output_tokens).
+    Returns (summary_text, transcript_text, input_tokens, output_tokens, thinking_tokens, audio_tokens, thoughts).
+    Text-only input, so audio_tokens is normally 0 — wired for correctness.
     The returned transcript_text is the full (untruncated) raw text so it can
     be cached for later export — the prompt itself still gets truncated.
-    A pre-fetched transcript can be passed to avoid a second YouTube round-trip."""
+    A pre-fetched transcript can be passed to avoid a second YouTube round-trip.
+    `thoughts` is the Gemini reasoning trace (empty unless the YouTube thinking
+    toggle is on)."""
     full_text = transcript_text if transcript_text is not None else _fetch_transcript_text(video_id)
 
     prompt_text = full_text
@@ -180,32 +245,35 @@ def _summarize_via_transcript(video_id: str, prompt: str,
     response = _gemini_client.models.generate_content(
         model=get_gemini_model(),
         contents={'text': final_prompt},
-        config=_YT_LABELS,
+        config=_yt_gen_config(),
     )
-    inp, out = _extract_tokens(response)
-    return response.text.strip(), full_text, inp, out
+    inp, out, think, audio = _extract_tokens(response)
+    answer, thoughts = _split_response_parts(response)
+    return answer, full_text, inp, out, think, audio, thoughts
 
 
-# Per-item processing timeout (seconds), applied to each strategy.
-# Gemini native video can be slow on long videos, so allow up to 5 min.
-_ITEM_TIMEOUT_SECS = 300
+# Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
+_ITEM_TIMEOUT_SECS = 180
 
 
 
 def _fetch_video_metadata(video_id: str) -> dict:
-    """Fetch video snippet from YouTube Data API for metadata fallback."""
+    """Fetch video snippet from YouTube Data API for metadata fallback.
+
+    Returns {} on quota exhaustion or any other API error — metadata is
+    optional, both summarization strategies (Gemini video URL and transcript
+    fetch) can run without it. Without this guard, a `quotaExceeded` 403
+    aborts the whole queue item and is reported as a generic failure even
+    though the actual summarization paths don't use the Data API quota."""
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
     from youtube_monitor import yt_memory_cache
     api_key = _youtube_data_api_key
     if not api_key:
         logger.warning("[YT-WORKER] youtube.data_api_key not set — cannot fetch metadata")
         return {}
     youtube = build('youtube', 'v3', developerKey=api_key, cache=yt_memory_cache)
-    resp = youtube.videos().list(
-        part='snippet,contentDetails,statistics,liveStreamingDetails',
-        id=video_id,
-    ).execute()
-    record_api_usage('videos.list', context=video_id, source='worker', video_count=1)
+    resp = youtube.videos().list(part='snippet,contentDetails,statistics', id=video_id).execute()
     items = resp.get('items', [])
     if items:
         item = items[0]
@@ -284,6 +352,14 @@ async def process_queue_item(queue_item: dict) -> bool:
     force_method = queue_item.get('force_method')
     t_start = time.monotonic()
 
+    # Atomically claim the item (pending → processing). If another run — e.g.
+    # the scheduler and a manual /queue/process trigger picking overlapping
+    # batches — already claimed it, bail out. Without this the same video gets
+    # summarized and sent to Telegram twice.
+    if not db.claim_queue_item(queue_id):
+        logger.info(f"[YT-WORKER] Skipping {video_id} — queue item {queue_id} already claimed by another run")
+        return False
+
     # Check if the source channel/keyword is still active before spending API credits
     source_channel_id = queue_item.get('source_channel_id')
     source_keyword_id = queue_item.get('source_keyword_id')
@@ -302,9 +378,6 @@ async def process_queue_item(queue_item: dict) -> bool:
 
     # Per-item prompt from the queue row, fall back to global config prompt
     user_prompt = queue_item.get('prompt') or _get_global_prompt()
-
-    # Mark as processing
-    db.update_queue_status(queue_id, 'processing')
 
     # Fetch transcript + metadata up front — even when Strategy 1 (native Gemini
     # video) will produce the summary — so the transcript char count can serve as
@@ -413,6 +486,11 @@ async def process_queue_item(queue_item: dict) -> bool:
     transcript_text = transcript_full
     inp_tokens = 0
     out_tokens = 0
+    think_tokens = 0  # thinking (reasoning) token count — its own billing SKU
+    audio_tokens = 0  # audio share OF inp_tokens (subset) — higher-rate SKU
+    thoughts = ''  # Gemini reasoning trace — populated when thinking is enabled
+    strat1_err = None  # Gemini native-video reason-for-failure
+    strat2_err = None  # Transcript reason-for-failure
 
     # Strategy 1: Gemini native video (URL) — best quality, sees/hears actual content
     # Guard: skip if daily 8-hour video quota is exhausted, or if the user forced
@@ -431,10 +509,8 @@ async def process_queue_item(queue_item: dict) -> bool:
     t_s1 = time.monotonic()
     try:
         if not _video_allowed:
-            raise RuntimeError("native video strategy skipped"
-                               if force_method == 'transcript_api'
-                               else "Daily video-hour quota reached")
-        summary_text, inp_tokens, out_tokens = await asyncio.wait_for(
+            raise RuntimeError("Daily video-hour quota reached")
+        summary_text, inp_tokens, out_tokens, think_tokens, audio_tokens, thoughts = await asyncio.wait_for(
             loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
         )
@@ -444,12 +520,14 @@ async def process_queue_item(queue_item: dict) -> bool:
         try:
             from utils.gemini_usage import record_gemini_request, record_gemini_video_seconds
             record_gemini_video_seconds(duration_secs)
-            record_gemini_request(total_tokens=inp_tokens + out_tokens)
+            record_gemini_request(total_tokens=inp_tokens + out_tokens + think_tokens)
         except Exception:
             pass
     except asyncio.TimeoutError:
+        strat1_err = f"timed out after {_ITEM_TIMEOUT_SECS}s"
         logger.warning(f"[YT-WORKER] Strategy 1 (gemini video) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
     except Exception as e:
+        strat1_err = str(e) or e.__class__.__name__
         delay = _is_rate_limited(e)
         if delay:
             logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
@@ -463,7 +541,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     if not summary_text and force_method != 'gemini_video':
         t_s2 = time.monotonic()
         try:
-            summary_text, transcript_text, inp_tokens, out_tokens = await asyncio.wait_for(
+            summary_text, transcript_text, inp_tokens, out_tokens, think_tokens, audio_tokens, thoughts = await asyncio.wait_for(
                 loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript, transcript_full),
                 timeout=_ITEM_TIMEOUT_SECS,
             )
@@ -472,12 +550,14 @@ async def process_queue_item(queue_item: dict) -> bool:
                         f"in {time.monotonic() - t_s2:.1f}s")
             try:
                 from utils.gemini_usage import record_gemini_request
-                record_gemini_request(total_tokens=inp_tokens + out_tokens)
+                record_gemini_request(total_tokens=inp_tokens + out_tokens + think_tokens)
             except Exception:
                 pass
         except asyncio.TimeoutError:
+            strat2_err = f"timed out after {_ITEM_TIMEOUT_SECS}s"
             logger.warning(f"[YT-WORKER] Strategy 2 (transcript) timed out after {_ITEM_TIMEOUT_SECS}s for {video_id}")
         except Exception as e:
+            strat2_err = str(e) or e.__class__.__name__
             delay = _is_rate_limited(e)
             if delay:
                 logger.info(f"[YT-WORKER] Rate limited, waiting {delay}s before next strategy…")
@@ -485,16 +565,15 @@ async def process_queue_item(queue_item: dict) -> bool:
             logger.warning(f"[YT-WORKER] Strategy 2 (transcript) failed for {video_id} "
                            f"after {time.monotonic() - t_s2:.1f}s: {e}")
 
-    # All strategies exhausted — mark as failed so user can retry
+    # All strategies exhausted — mark as failed so user can retry. Keep both
+    # per-strategy reasons in the error_log so the UI can show what actually
+    # broke instead of the generic "both failed" string.
     if not summary_text:
-        if force_method == 'gemini_video':
-            reason = 'Forced video strategy failed (transcript fallback disabled)'
-        elif force_method == 'transcript_api':
-            reason = 'Forced transcript strategy failed (no transcript available)'
-        else:
-            reason = 'No transcript available (gemini video and transcript API both failed)'
-        logger.warning(f"[YT-WORKER] All strategies failed for {video_id} "
-                       f"after {time.monotonic() - t_start:.1f}s: {reason}")
+        reason = 'No transcript available (gemini video and transcript API both failed)'
+        if strat1_err or strat2_err:
+            reason += f"\n\nStrategy 1 (gemini video): {strat1_err or 'not attempted'}" \
+                      f"\nStrategy 2 (transcript): {strat2_err or 'not attempted'}"
+        logger.warning(f"[YT-WORKER] All strategies failed for {video_id}: {reason}")
         db.update_queue_status(queue_id, 'failed', error_log=reason,
                                processing_secs=round(time.monotonic() - t_start))
         return False
@@ -511,19 +590,22 @@ async def process_queue_item(queue_item: dict) -> bool:
         duration_secs=int(duration_secs) if duration_secs else None,
         input_tokens=inp_tokens or None,
         output_tokens=out_tokens or None,
+        thinking_tokens=think_tokens or None,
+        audio_tokens=audio_tokens or None,
         prompt=user_prompt,
+        thoughts=thoughts or None,
         transcript_text=transcript_text,
         output_length_percent=output_length_percent,
+        model=get_gemini_model(),
     )
 
     # Mark done the moment the summary is persisted, BEFORE the best-effort
     # Telegram send. This guarantees a generated summary can never be flipped
-    # back to 'failed' by a slow/failing send or by a cancellation landing on
-    # the send's await point.
+    # back to 'failed' by a slow/failing send, and (together with
+    # claim_queue_item) that an overlapping run can't re-process and re-send it.
     elapsed = time.monotonic() - t_start
     db.update_queue_status(queue_id, 'done', processing_secs=round(elapsed))
-    logger.info(f"[YT-WORKER] Done {video_id} via {transcript_source} "
-                f"in {elapsed:.1f}s total")
+    logger.info(f"[YT-WORKER] Done {video_id} via {transcript_source} in {elapsed:.1f}s total")
 
     # Send via Telegram if target is set and sender is available (best-effort —
     # a send failure must NOT change the item status; the summary is already saved)
@@ -568,15 +650,12 @@ async def process_pending_queue():
             db.update_queue_status(item['id'], 'failed', error_log='Max attempts reached')
             continue
         try:
-            # No outer timeout here: each summarization strategy is already
-            # capped at _ITEM_TIMEOUT_SECS inside process_queue_item, the item
-            # is marked 'done' the instant its summary is saved, and
-            # reset_stuck_processing_items (above) recovers any genuinely
-            # wedged item. An outer wait_for would cancel the post-summary
-            # bookkeeping and wrongly mark an already-saved summary as 'failed'.
-            success = await process_queue_item(item)
+            success = await asyncio.wait_for(process_queue_item(item), timeout=_ITEM_TIMEOUT_SECS + 30)
             if success:
                 processed += 1
+        except asyncio.TimeoutError:
+            logger.error(f"[YT-WORKER] Item {item['video_id']} timed out in scheduler")
+            db.update_queue_status(item['id'], 'failed', error_log=f'Scheduler timeout after {_ITEM_TIMEOUT_SECS + 30}s')
         except Exception as e:
             logger.error(f"[YT-WORKER] Unhandled error processing {item['video_id']}: {e}")
             db.update_queue_status(item['id'], 'failed', error_log=str(e))

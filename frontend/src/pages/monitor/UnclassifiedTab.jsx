@@ -328,8 +328,8 @@ function UnclFlat({ messages }) {
                   <td>
                     {m.bot_name ? <span className="mon-tag cat">{m.bot_name}</span> : '—'}
                   </td>
-                  <td className="mon-ellipsis" title={m.preview || ''}>
-                    {m.preview || ''}
+                  <td title={m.preview || ''}>
+                    <div className="mon-ellipsis">{m.preview || ''}</div>
                   </td>
                 </tr>
               );
@@ -386,8 +386,8 @@ function UnclByChannel({ messages }) {
                             '—'
                           )}
                         </td>
-                        <td className="mon-ellipsis" title={m.preview || ''}>
-                          {m.preview || ''}
+                        <td title={m.preview || ''}>
+                          <div className="mon-ellipsis">{m.preview || ''}</div>
                         </td>
                       </tr>
                     ))}
@@ -474,8 +474,10 @@ function WordGroup({ word, messages, highlightWord }) {
                   <td style={{ whiteSpace: 'nowrap', fontSize: 11 }}>
                     {m.channel_username ? `@${m.channel_username}` : ''}
                   </td>
-                  <td className="mon-ellipsis" title={m.preview || ''}>
-                    {re ? <Highlighted text={m.preview || ''} re={re} /> : m.preview || ''}
+                  <td title={m.preview || ''}>
+                    <div className="mon-ellipsis">
+                      {re ? <Highlighted text={m.preview || ''} re={re} /> : m.preview || ''}
+                    </div>
                   </td>
                 </tr>
               ))}

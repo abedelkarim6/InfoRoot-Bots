@@ -74,6 +74,15 @@ export const EXPORT_COLS = {
     { key: 'topic', label: 'Topic' },
     { key: 'schedule', label: 'Schedule' },
     { key: 'preview', label: 'Preview' }
+  ],
+  comp_messages: [
+    { key: 'interim', label: 'Interim' },
+    { key: 'kind', label: 'Row Type' },
+    { key: 'time', label: 'Time' },
+    { key: 'channel', label: 'Channel' },
+    { key: 'topics', label: 'Topics' },
+    { key: 'keywords', label: 'Keywords' },
+    { key: 'preview', label: 'Message / Interim Output' }
   ]
 };
 
@@ -83,13 +92,15 @@ export const TAB_LABELS = {
   history: 'Schedule History',
   messages: 'Messages',
   unclassified: 'Unclassified',
-  missed: 'Missed'
+  missed: 'Missed',
+  comp_messages: 'Summary Source Messages'
 };
 
 const FILE_LABELS = {
   schedules_24h: 'schedules_24h',
   mon_summaries: 'monitor_summaries',
-  history: 'schedule_history'
+  history: 'schedule_history',
+  comp_messages: 'summary_source_messages'
 };
 
 function csvCell(v) {
@@ -235,6 +246,26 @@ export function buildRowValues(tabName, row, colDefs) {
           return row.channel_username ? `@${row.channel_username}` : '';
         case 'bot':
           return row.bot_name || '';
+        case 'preview':
+          return row.preview || '';
+        default:
+          return '';
+      }
+    }
+    if (tabName === 'comp_messages') {
+      switch (c.key) {
+        case 'interim':
+          return row.interimLabel || '';
+        case 'kind':
+          return row.kind || 'Message';
+        case 'time':
+          return row.timestamp ? fmtLBN(row.timestamp) : '';
+        case 'channel':
+          return row.channel_username ? `@${row.channel_username}` : '';
+        case 'topics':
+          return row.topics || '';
+        case 'keywords':
+          return row.keywords_found || '';
         case 'preview':
           return row.preview || '';
         default:

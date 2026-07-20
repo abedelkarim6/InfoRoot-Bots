@@ -8,15 +8,23 @@
  *   POST /api/topic/add  (used by the inline new-topic input at the bottom)
  */
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApiMutation, useConfirmedMutation } from '../../lib/useApiMutation';
 import { useDialogs } from '../../dialogs/DialogsProvider';
 import TopicBox from './TopicBox';
+import Icon from '../../components/icons';
+import KebabMenu from '../../components/KebabMenu';
 
-export default function CategoryBox({ botName, catName, cat }) {
-  const [open, setOpen] = useState(true);
+export default function CategoryBox({ botName, catName, cat, idx, forceOpen, inherited = false }) {
+  const [open, setOpen] = useState(false);
   const topics = Object.entries(cat.topics || {});
   const newTopicInputRef = useRef(null);
+
+  // Toolbar "Expand All / Collapse All" — seq bumps on every click so this
+  // fires even when the target state matches a previous forceOpen.
+  useEffect(() => {
+    if (forceOpen) setOpen(forceOpen.value);
+  }, [forceOpen]);
 
   const toggle = useApiMutation('/api/category/toggle', {
     invalidate: ['config'],
@@ -40,14 +48,6 @@ export default function CategoryBox({ botName, catName, cat }) {
     confirmClass: 'btn-danger'
   });
 
-  function onToggleEnabled(e) {
-    toggle.mutate({
-      bot_name: botName,
-      category_name: catName,
-      enabled: e.target.checked
-    });
-  }
-
   function onDelete() {
     confirmDelete({ bot_name: botName, category_name: catName });
   }
@@ -68,42 +68,58 @@ export default function CategoryBox({ botName, catName, cat }) {
     >
       <div className="category-header-row" onClick={() => setOpen((v) => !v)}>
         <div className="category-title-group">
-          <h4>🗂️ {catName}</h4>
-          <span className="text-muted" style={{ marginLeft: 8 }}>
-            ({topics.length} topic{topics.length !== 1 ? 's' : ''})
-          </span>
+          <span className="collapsible-toggle cat-chevron">▼</span>
+          {idx != null && <span className="cat-idx">{idx}</span>}
+          <span className="cat-grip"><Icon name="gripVertical" size={15} /></span>
+          <span
+            className={`cat-dot ${cat.enabled !== false ? 'on' : 'off'}`}
+            title={cat.enabled !== false ? 'Enabled' : 'Disabled'}
+          />
+          <div className="cat-name-wrap">
+            <h4>{catName}</h4>
+            <span className="cat-sub">
+              {topics.length} topic{topics.length !== 1 ? 's' : ''}
+            </span>
+          </div>
         </div>
         <div className="category-controls" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={onClickAddTopic}
-          >
-            + Add Topic
-          </button>
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={!!cat.enabled}
-              onChange={onToggleEnabled}
-              disabled={toggle.isPending}
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <button
-            className="btn-icon btn-danger"
-            onClick={onDelete}
-            disabled={remove.isPending}
-          >
-            🗑️
-          </button>
-          <span className="collapsible-toggle">▼</span>
+          {!inherited && (
+            <>
+              <button className="btn btn-primary btn-sm" onClick={onClickAddTopic}>
+                <Icon name="plus" size={13} style={{ marginRight: 5 }} />
+                Summaries Topic
+              </button>
+              <KebabMenu
+                items={[
+                  {
+                    label: cat.enabled !== false ? 'Disable' : 'Enable',
+                    icon: 'ban',
+                    disabled: toggle.isPending,
+                    onClick: () =>
+                      toggle.mutate({
+                        bot_name: botName,
+                        category_name: catName,
+                        enabled: cat.enabled === false
+                      })
+                  },
+                  {
+                    label: 'Delete',
+                    icon: 'trash',
+                    danger: true,
+                    disabled: remove.isPending,
+                    onClick: onDelete
+                  }
+                ]}
+              />
+            </>
+          )}
         </div>
       </div>
 
       {open && (
         <div className="collapsible-content">
           <div className="topics-container">
-            {topics.map(([topicName, topic]) => (
+            {topics.map(([topicName, topic], i) => (
               <TopicBox
                 key={topicName}
                 botName={botName}
@@ -111,13 +127,17 @@ export default function CategoryBox({ botName, catName, cat }) {
                 topicName={topicName}
                 topic={topic}
                 categoryEnabled={cat.enabled !== false}
+                idx={i + 1}
+                inherited={inherited}
               />
             ))}
-            <AddTopicInline
-              botName={botName}
-              catName={catName}
-              inputRef={newTopicInputRef}
-            />
+            {!inherited && (
+              <AddTopicInline
+                botName={botName}
+                catName={catName}
+                inputRef={newTopicInputRef}
+              />
+            )}
           </div>
         </div>
       )}

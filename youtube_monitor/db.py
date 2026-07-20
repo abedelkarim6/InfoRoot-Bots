@@ -309,6 +309,11 @@ class YouTubeDB:
         _ensure_col('yt_summaries', 'duration_secs',  'INTEGER')
         _ensure_col('yt_summaries', 'input_tokens',   'INTEGER')
         _ensure_col('yt_summaries', 'output_tokens',  'INTEGER')
+        _ensure_col('yt_summaries', 'thinking_tokens', 'INTEGER')
+        # audio share of input_tokens (subset) — video ingestion bills the
+        # soundtrack at a higher rate than text/video input.
+        _ensure_col('yt_summaries', 'audio_tokens', 'INTEGER')
+        _ensure_col('yt_summaries', 'model',          'TEXT')
         _ensure_col('yt_video_queue', 'source_channel_id', 'TEXT')
         _ensure_col('yt_video_queue', 'source_keyword_id', 'INTEGER')
         _ensure_col('yt_video_queue', 'updated_at', 'TIMESTAMP', 'NOW()')
@@ -322,7 +327,13 @@ class YouTubeDB:
         _ensure_col('yt_channels', 'min_view_count', 'INTEGER', '0')
         _ensure_col('yt_channels', 'language', 'TEXT')
         _ensure_col('yt_channels', 'upload_type', 'TEXT')
+        # WebSub callback URL used at subscribe time — lets the background
+        # renewal job re-subscribe without depending on config.yaml.
+        _ensure_col('yt_channels', 'websub_callback_url', 'TEXT')
         _ensure_col('yt_summaries', 'prompt_hash', 'TEXT')
+        # Gemini 2.5 extended-thinking reasoning trace, captured when the
+        # YouTube thinking toggle is on (yt_gemini_thinking setting).
+        _ensure_col('yt_summaries', 'thoughts', 'TEXT')
         # Cache the raw transcript text when Strategy 2 (transcript_api) is
         # used, so the export endpoint can serve it without re-hitting YouTube.
         _ensure_col('yt_summaries', 'transcript_text', 'TEXT')
@@ -463,7 +474,29 @@ class YouTubeDB:
         cursor.execute("DELETE FROM yt_channels WHERE channel_id = %s", (channel_id,))
         self.connection.commit()
 
-    def update_websub_status(self, channel_id: str, subscribed_at, expires_at):
+    def update_websub_status(self, channel_id: str, subscribed_at, expires_at,
+                             callback_url=None):
+        """Persist WebSub subscription state. When `callback_url` is given it is
+        also stored so the renewal job can re-subscribe without config.yaml."""
+        cursor = self._get_cursor()
+        if callback_url:
+            cursor.execute("""
+                UPDATE yt_channels
+                SET websub_subscribed_at = %s, websub_expires_at = %s,
+                    websub_callback_url = %s
+                WHERE channel_id = %s
+            """, (subscribed_at, expires_at, callback_url, channel_id))
+        else:
+            cursor.execute("""
+                UPDATE yt_channels
+                SET websub_subscribed_at = %s, websub_expires_at = %s
+                WHERE channel_id = %s
+            """, (subscribed_at, expires_at, channel_id))
+        self.connection.commit()
+
+    def update_websub_expiry(self, channel_id: str, subscribed_at, expires_at):
+        """Update only the subscription timestamps — used by the hub
+        verification callback once the REAL granted lease is known."""
         cursor = self._get_cursor()
         cursor.execute("""
             UPDATE yt_channels
@@ -831,6 +864,34 @@ class YouTubeDB:
         """, (str(hours),))
         return [dict(r) for r in cursor.fetchall()]
 
+    def get_ai_usage_history(self, date_from: str, date_to: str, granularity: str = 'day') -> list:
+        """Per-(bucket, model) YouTube summarization runs + token sums between
+        two dates (inclusive), with exact input/output splits for pricing.
+        YouTube has no per-user ownership — all usage counts as admin-owned."""
+        gran = granularity if granularity in ('day', 'month') else 'day'
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT DATE_TRUNC(%s, created_at)::date AS bucket,
+                   model                             AS model,
+                   COUNT(*)                          AS runs,
+                   SUM(COALESCE(input_tokens, 0))    AS input_tokens,
+                   SUM(COALESCE(output_tokens, 0))   AS output_tokens,
+                   SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens,
+                   -- audio is a SUBSET of input_tokens — reported for re-pricing,
+                   -- deliberately NOT added into the combined `tokens` total.
+                   SUM(COALESCE(audio_tokens, 0))    AS audio_tokens,
+                   SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(thinking_tokens, 0)) AS tokens
+            FROM yt_summaries
+            WHERE created_at::date BETWEEN %s AND %s
+            GROUP BY 1, 2 ORDER BY 1
+        """, (gran, date_from, date_to))
+        out = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            d['bucket'] = d['bucket'].isoformat() if d['bucket'] else None
+            out.append(d)
+        return out
+
     def get_recent_api_calls(self, limit: int = 100) -> list:
         cursor = self._get_cursor()
         cursor.execute("""
@@ -997,6 +1058,24 @@ class YouTubeDB:
                 if r.get(k):
                     r[k] = r[k].isoformat()
         return rows
+
+    def claim_queue_item(self, queue_id: int) -> bool:
+        """Atomically transition a queue item pending → processing.
+
+        Returns True only if this caller won the claim; False if another run
+        already claimed it (or it is no longer 'pending'). Prevents the same
+        video being summarized — and sent to Telegram — twice when the
+        scheduler and a manual trigger process overlapping batches.
+        """
+        cursor = self._get_cursor()
+        cursor.execute("""
+            UPDATE yt_video_queue
+            SET status = 'processing', updated_at = NOW()
+            WHERE id = %s AND status = 'pending'
+        """, (queue_id,))
+        won = cursor.rowcount == 1
+        self.connection.commit()
+        return won
 
     def update_queue_status(self, queue_id: int, status: str, error_log: str = None,
                             processing_secs: int = None):
@@ -1335,8 +1414,14 @@ class YouTubeDB:
             clauses.append("q.status = %s")
             params.append(status_filter)
         if channel_filter:
-            clauses.append("COALESCE(ch.channel_name, s.channel_name, sv.channel_id) ILIKE %s")
-            params.append(f"%{channel_filter}%")
+            clauses.append("q.source_channel_id = %s")
+            params.append(channel_filter)
+        if keyword_filter:
+            try:
+                clauses.append("q.source_keyword_id = %s")
+                params.append(int(keyword_filter))
+            except (TypeError, ValueError):
+                clauses.pop()
         if source_filter:
             clauses.append("s.transcript_source = %s")
             params.append(source_filter)
@@ -1408,20 +1493,25 @@ class YouTubeDB:
                      published_at, transcript_source: str, summary_text: str,
                      telegram_target: str = None,
                      duration_secs: int = None, input_tokens: int = None, output_tokens: int = None,
-                     prompt: str = None, transcript_text: str = None,
-                     output_length_percent: int = None):
+                     prompt: str = None, thoughts: str = None,
+                     transcript_text: str = None,
+                     output_length_percent: int = None,
+                     model: str = None, thinking_tokens: int = None,
+                     audio_tokens: int = None):
         prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest() if prompt else None
         cursor = self._get_cursor()
         cursor.execute("""
             INSERT INTO yt_summaries
                 (video_id, title, channel_name, published_at, transcript_source, summary_text,
                  telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-                 transcript_text, output_length_percent)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 thoughts, transcript_text, output_length_percent, model, thinking_tokens,
+                 audio_tokens)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (video_id, title, channel_name, published_at, transcript_source, summary_text,
               telegram_target, duration_secs, input_tokens, output_tokens, prompt_hash,
-              transcript_text, output_length_percent))
+              thoughts or None, transcript_text, output_length_percent, model, thinking_tokens,
+              audio_tokens))
         row = cursor.fetchone()
         self.connection.commit()
         return row['id']
@@ -1461,6 +1551,20 @@ class YouTubeDB:
         cursor = self._get_cursor()
         cursor.execute("UPDATE yt_summaries SET telegram_sent = TRUE WHERE id = %s", (summary_id,))
         self.connection.commit()
+
+    def was_telegram_sent(self, video_id: str, telegram_target: str) -> bool:
+        """Idempotency check — has this (video, target) pair already been
+        Telegram-delivered? Used by the worker to avoid re-sending when a
+        previously-stuck queue row gets reprocessed."""
+        if not video_id or not telegram_target:
+            return False
+        cursor = self._get_cursor()
+        cursor.execute("""
+            SELECT 1 FROM yt_summaries
+            WHERE video_id = %s AND telegram_target = %s AND telegram_sent = TRUE
+            LIMIT 1
+        """, (video_id, str(telegram_target)))
+        return cursor.fetchone() is not None
 
     def get_summaries(self, limit: int = 100, channel_name: str = None,
                       transcript_source: str = None, telegram_sent: str = None,

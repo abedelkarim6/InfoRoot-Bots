@@ -58,6 +58,25 @@ def _fetch_video_info(video_id: str) -> dict:
     return {"video_id": video_id, "title": video_id, "channel_name": "", "thumbnail": ""}
 
 
+def _log_video_chat_usage(response, context: str):
+    """Record a video-chat Gemini call for cost tracking (feature 'youtube').
+
+    Non-obvious: a Gemini chat resends its whole history each turn, and this
+    session's history holds the VIDEO part — so every message re-bills video
+    (and audio) input. Left untracked this was a silent, recurring cost.
+    Best-effort — never breaks the chat."""
+    try:
+        from utils.database import get_db
+        from utils.ai_pricing import extract_gemini_tokens
+        inp, out, think, audio = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+        db = get_db()
+        if db is not None:
+            db.log_ai_usage(None, "youtube", get_gemini_model(), inp, out,
+                            context=context, thinking_tokens=think, audio_tokens=audio)
+    except Exception as e:
+        logger.warning(f"[YT-CHAT] usage logging failed: {e}")
+
+
 async def create_chat_session(video_id: str) -> dict:
     """Create a new chat session with a YouTube video loaded as context."""
     client = _get_gemini_client()
@@ -121,6 +140,7 @@ async def send_chat_message(session_id: str, message: str) -> str:
     # Send message (sync API, run in executor)
     def _send():
         response = chat.send_message(message)
+        _log_video_chat_usage(response, "video-chat")
         return response.text.strip()
 
     reply = await asyncio.get_event_loop().run_in_executor(None, _send)
@@ -165,6 +185,7 @@ async def refine_text(text: str, instruction: str = "") -> str:
             model=get_gemini_model(),
             contents=f"{prompt}\n\n---\n\n{text}",
         )
+        _log_video_chat_usage(response, "refine-text")
         return response.text.strip()
 
     return await asyncio.get_event_loop().run_in_executor(None, _refine)

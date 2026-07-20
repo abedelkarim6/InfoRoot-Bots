@@ -94,6 +94,7 @@ class UpdateUserRequest(BaseModel):
     seo_visible:  Optional[bool] = None   # whether user can see full SEO keyword details
     agents_limit: Optional[dict] = None   # {"type": "money"|"calls", "value": 10.0}
     ai_plan_id:   Optional[int]  = None
+    cost_caps:    Optional[dict] = None   # monthly USD caps: {"total": 10, "summaries": ..., "youtube": ..., "chatbot": ..., "seo": ...}
 
 
 @router.post("/admin/accounts/{user_id}/update")
