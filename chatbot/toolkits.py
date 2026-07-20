@@ -54,11 +54,12 @@ def _expand_search_terms(question: str) -> list[str]:
         try:
             from utils.database import get_db
             from utils.ai_pricing import extract_gemini_tokens
-            _i, _o, _t = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+            _i, _o, _t, _a = extract_gemini_tokens(getattr(response, "usage_metadata", None))
             _db = get_db()
             if _db is not None:
                 _db.log_ai_usage(None, "chatbot", "gemini-2.5-flash-lite", _i, _o,
-                                 context="search-expansion", thinking_tokens=_t)
+                                 context="search-expansion", thinking_tokens=_t,
+                                 audio_tokens=_a)
         except Exception:
             pass
 

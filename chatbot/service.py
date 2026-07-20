@@ -434,9 +434,9 @@ Lines 4-6: Analytical questions (trends, comparisons, patterns, why)"""
         # attributed to admin. Small but real chatbot-feature usage.
         try:
             from utils.ai_pricing import extract_gemini_tokens
-            _i, _o, _t = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+            _i, _o, _t, _a = extract_gemini_tokens(getattr(response, "usage_metadata", None))
             db.log_ai_usage(None, "chatbot", "gemini-2.5-flash-lite", _i, _o,
-                            context="suggestions", thinking_tokens=_t)
+                            context="suggestions", thinking_tokens=_t, audio_tokens=_a)
         except Exception:
             pass
 

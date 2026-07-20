@@ -536,6 +536,25 @@ async def test_receive(request: Request, data: dict = Body(...)):
 
 # ── Summary generator tester ──────────────────────────────────────────────────
 
+def _log_tester_usage(llm, tokens, context: str):
+    """Record a manual tester generation for cost tracking (feature 'summaries',
+    admin-attributed). These are real Gemini calls that were previously invisible
+    in AI usage. Best-effort — never breaks the tester."""
+    try:
+        from utils.database import get_db
+        from utils.ai_pricing import client_model
+        db = get_db()
+        if db is not None:
+            db.log_ai_usage(None, 'summaries', client_model(llm),
+                            getattr(tokens, 'input', 0) or int(tokens or 0),
+                            getattr(tokens, 'output', 0),
+                            context=context,
+                            thinking_tokens=getattr(tokens, 'thinking', 0),
+                            audio_tokens=getattr(tokens, 'audio', 0))
+    except Exception as e:
+        logger.warning(f"[TESTER] usage logging failed: {e}")
+
+
 @router.post("/telegram/tester/summary/generate")
 async def tester_generate_summary(request: Request, data: dict = Body(...)):
     """Test summary generation for a bot/topic/schedule without sending to Telegram."""
@@ -615,7 +634,8 @@ async def tester_generate_summary(request: Request, data: dict = Body(...)):
             from summaries.prompts import get_summary_prompt
             texts  = [m["text"] for m in topic_messages]
             prompt = get_summary_prompt(texts, bot_name, prompt_key, topic_name=topic_name)
-            summary, _ = llm.generate_summary(prompt)
+            summary, _tk = llm.generate_summary(prompt)
+            _log_tester_usage(llm, _tk, f"tester {bot_name}/{topic_name}")
             return {
                 "status": "ok",
                 "summary": summary,
@@ -694,7 +714,8 @@ async def tester_manual_summary(request: Request, data: dict = Body(...)):
         try:
             from summaries.prompts import get_summary_prompt
             prompt  = get_summary_prompt(texts, bot_name or "manual", prompt_key, topic_name=topic_name or None)
-            summary, _ = llm.generate_summary(prompt)
+            summary, _tk = llm.generate_summary(prompt)
+            _log_tester_usage(llm, _tk, f"manual-tester {bot_name or 'manual'}")
             return {
                 "status": "ok",
                 "summary": summary,

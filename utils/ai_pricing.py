@@ -25,14 +25,22 @@ logger = logging.getLogger(__name__)
 
 # $ per 1M tokens. Keep keys aligned with utils/gemini_models.py options plus
 # the pinned helper models. "default" prices unknown/NULL models.
+# `audio` = $ per 1M AUDIO input tokens. Vertex bills a video's audio track as
+# its own, pricier SKU (2.5-flash: $1.00/M audio vs $0.30/M text+video input).
+# Audio tokens are a SUBSET of prompt_token_count, never an addition. A model
+# with no `audio` key bills audio at its plain `input` rate (back-compatible).
 DEFAULT_MODEL_PRICING = {
-    "gemini-2.5-pro":         {"input": 1.25, "output": 10.00},
-    "gemini-2.5-flash":       {"input": 0.30, "output": 2.50},
-    "gemini-2.5-flash-lite":  {"input": 0.10, "output": 0.40},
-    "gemini-2.0-flash-001":   {"input": 0.10, "output": 0.40},
-    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    "gemini-2.5-pro":         {"input": 1.25, "output": 10.00},                 # no separate audio SKU
+    "gemini-2.5-flash":       {"input": 0.30, "output": 2.50, "audio": 1.00},
+    "gemini-2.5-flash-lite":  {"input": 0.10, "output": 0.40, "audio": 0.30},
+    "gemini-2.0-flash-001":   {"input": 0.10, "output": 0.40, "audio": 0.70},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},                  # TODO: confirm audio rate
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
-    "default":                {"input": 0.30, "output": 2.50},
+    # `default` prices unknown/NULL models. It mirrors gemini-2.5-flash (the
+    # workhorse), so it carries flash's audio rate too — otherwise pre-`model`
+    # rows would price text like flash but audio unlike it, silently hiding the
+    # audio premium on exactly the historical rows the backfill targets.
+    "default":                {"input": 0.30, "output": 2.50, "audio": 1.00},
 }
 
 # Share of a combined token total assumed to be input when only the total is
@@ -48,18 +56,22 @@ class TokenUsage(int):
     """A total token count that also carries the input/output/thinking split.
 
     Subclasses int so every existing `total += tokens` call site keeps working
-    unchanged; cost-aware callers read `.input` / `.output` / `.thinking`.
-    `.output` is the ANSWER (visible) output only; `.thinking` is the reasoning
-    trace, which Gemini bills at the output rate but reports as a distinct SKU
-    ("Thinking Text Output"). The int value is input+output+thinking.
+    unchanged; cost-aware callers read `.input` / `.output` / `.thinking` /
+    `.audio`. `.output` is the ANSWER (visible) output only; `.thinking` is the
+    reasoning trace, which Gemini bills at the output rate but reports as a
+    distinct SKU ("Thinking Text Output"). `.audio` is the audio-modality
+    portion of the input — a SUBSET of `.input`, priced at its own rate, so it
+    is NOT added to the total. The int value is input+output+thinking.
     Note: arithmetic results (e.g. `a + b`) degrade to plain int — accumulate
     the splits explicitly where they matter.
     """
-    def __new__(cls, total, input_tokens=0, output_tokens=0, thinking_tokens=0):
+    def __new__(cls, total, input_tokens=0, output_tokens=0, thinking_tokens=0,
+                audio_tokens=0):
         obj = super().__new__(cls, int(total or 0))
         obj.input = int(input_tokens or 0)
         obj.output = int(output_tokens or 0)
         obj.thinking = int(thinking_tokens or 0)
+        obj.audio = int(audio_tokens or 0)   # subset of .input, not added to total
         return obj
 
 
@@ -69,22 +81,27 @@ def client_model(llm) -> str:
 
 
 def extract_gemini_tokens(usage_metadata) -> tuple:
-    """Return (input_tokens, output_tokens, thinking_tokens) from a Gemini
-    `usage_metadata`.
+    """Return (input_tokens, output_tokens, thinking_tokens, audio_tokens) from
+    a Gemini `usage_metadata`.
 
     - `output` = the ANSWER (visible) tokens (`candidates_token_count`).
     - `thinking` = the reasoning trace (`thoughts_token_count`), which Gemini
       bills at the output rate but reports as a distinct SKU ("Thinking Text
       Output"). Broken out so cost can be attributed to thinking specifically.
+    - `audio` = the AUDIO-modality share of the input, read from
+      `prompt_tokens_details`. Vertex bills audio input at a higher rate than
+      text/video (2.5-flash: $1.00/M vs $0.30/M). It is a SUBSET of `input`
+      (already inside `prompt_token_count`), never an addition — so it is
+      clamped to `input` and must not be summed into any token total.
 
-    Both are derived defensively: total billed output = `total_token_count -
+    Output is derived defensively: total billed output = `total_token_count -
     prompt_token_count` (robust — includes thinking even when `include_thoughts`
     is off and the trace isn't returned). Thinking = `thoughts_token_count` if
     reported, else whatever of that total isn't the visible answer. Falls back to
     the raw fields when the total is missing, then to 0.
     """
     if not usage_metadata:
-        return 0, 0, 0
+        return 0, 0, 0, 0
     um = usage_metadata
     prompt = getattr(um, "prompt_token_count", 0) or 0
     candidates = getattr(um, "candidates_token_count", 0) or 0
@@ -93,7 +110,16 @@ def extract_gemini_tokens(usage_metadata) -> tuple:
     out_total = (total - prompt) if (total and total >= prompt) else (candidates + thoughts)
     thinking = thoughts if thoughts else max(0, out_total - candidates)
     answer = max(0, out_total - thinking)
-    return prompt, answer, thinking
+
+    # Audio share of the input. The SDK enum str()s as "MediaModality.AUDIO".
+    audio = 0
+    for d in (getattr(um, "prompt_tokens_details", None) or []):
+        modality = str(getattr(d, "modality", "") or "").upper()
+        if modality.endswith("AUDIO"):
+            audio += int(getattr(d, "token_count", 0) or 0)
+    audio = min(audio, prompt)
+
+    return prompt, answer, thinking, audio
 
 
 def get_pricing(db=None) -> dict:
@@ -113,6 +139,10 @@ def get_pricing(db=None) -> dict:
                 try:
                     models[m] = {"input": float(rates.get("input", 0) or 0),
                                  "output": float(rates.get("output", 0) or 0)}
+                    # Carry the audio rate through — rebuilding only input/output
+                    # would silently drop it whenever an admin edits pricing.
+                    if rates.get("audio") is not None:
+                        models[m]["audio"] = float(rates.get("audio") or 0)
                 except (TypeError, ValueError):
                     continue
             try:
@@ -140,12 +170,29 @@ def resolve_rates(model: str, pricing: dict = None) -> dict:
 
 
 def cost_usd(model: str, input_tokens: int, output_tokens: int,
-             thinking_tokens: int = 0, pricing: dict = None) -> float:
-    """Exact cost for a run with a known token split. Thinking tokens bill at
-    the output rate (Gemini's "Thinking Text Output" SKU == output rate)."""
+             thinking_tokens: int = 0, audio_tokens: int = 0,
+             pricing: dict = None) -> float:
+    """Exact cost for a run with a known token split.
+
+    - Thinking bills at the output rate (Gemini's "Thinking Text Output" SKU).
+    - Audio input bills at its own, higher rate; audio is a SUBSET of input, so
+      it is carved OUT of the text-input portion rather than added on top.
+    """
     rates = resolve_rates(model, pricing)
-    return ((input_tokens or 0) * rates["input"]
+    audio = min(audio_tokens or 0, input_tokens or 0)      # audio ⊆ input
+    text_input = (input_tokens or 0) - audio
+    audio_rate = rates.get("audio", rates["input"])
+    cost = (text_input * rates["input"] + audio * audio_rate
             + ((output_tokens or 0) + (thinking_tokens or 0)) * rates["output"]) / 1_000_000
+
+    # Pro-class models double their rates above a 200k prompt. We don't model
+    # tiers yet, so make the day it starts mattering visible in the logs
+    # instead of silently undercounting ~40% on long video runs.
+    if (input_tokens or 0) > 200_000 and "pro" in (model or ""):
+        logger.warning(f"[AI-PRICING] {model} call with {input_tokens} input tokens "
+                       "exceeds the 200k tier — cost is UNDERESTIMATED (see "
+                       "AUDIO_TOKEN_PRICING_PLAN.md §8 for tiered pricing).")
+    return cost
 
 
 def thinking_cost_usd(model: str, thinking_tokens: int, pricing: dict = None) -> float:
@@ -182,7 +229,8 @@ def get_user_month_costs(db, user_id: int, pricing: dict = None) -> dict:
             if row.get("input_tokens") is not None or row.get("output_tokens") is not None:
                 out[feature] += cost_usd(row.get("model"), row.get("input_tokens") or 0,
                                          row.get("output_tokens") or 0,
-                                         row.get("thinking_tokens") or 0, p)
+                                         row.get("thinking_tokens") or 0,
+                                         row.get("audio_tokens") or 0, p)
             else:
                 out[feature] += blended_cost_usd(row.get("model"), row.get("tokens") or 0, p)
     except Exception as e:

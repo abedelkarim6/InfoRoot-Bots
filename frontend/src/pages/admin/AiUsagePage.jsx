@@ -716,6 +716,16 @@ function UsageHistoryCard() {
               : ''}
           </div>
         </div>
+        <div className="dash-stat-card" title="Audio-input tokens from video soundtracks, and the extra cost of billing them at the audio rate instead of the text-input rate.">
+          <div className="dash-stat-icon">🔊</div>
+          <div className="dash-stat-value">{fmtNum(grandTotals.audio_tokens || 0)}</div>
+          <div className="dash-stat-label">
+            Audio tokens
+            {(grandTotals.audio_premium || 0) > 0
+              ? ` (+${fmtUsd(grandTotals.audio_premium)})`
+              : ''}
+          </div>
+        </div>
       </div>
 
       {isLoading && (
@@ -882,16 +892,18 @@ function HistModelTable({ rows }) {
             <th style={{ textAlign: 'center' }}>Runs</th>
             <th style={{ textAlign: 'right' }}>Tokens</th>
             <th style={{ textAlign: 'right' }} title="Reasoning (thinking) tokens — Google's 'Thinking Text Output' SKU">🧠 Thinking tok</th>
+            <th style={{ textAlign: 'right' }} title="Audio-modality tokens (subset of input) — from video soundtracks">🔊 Audio tok</th>
             <th style={{ textAlign: 'right' }}>In $/1M</th>
             <th style={{ textAlign: 'right' }}>Out $/1M</th>
             <th style={{ textAlign: 'right' }} title="Cost of thinking tokens alone (billed at the output rate)">🧠 Thinking $</th>
+            <th style={{ textAlign: 'right' }} title="Extra cost of audio tokens vs pricing them as plain text input — what a flat-input model misses">🔊 Audio premium</th>
             <th style={{ textAlign: 'right', paddingRight: 20 }}>Est. cost</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
+              <td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 16 }}>—</td>
             </tr>
           ) : (
             rows.map((r) => {
@@ -907,14 +919,26 @@ function HistModelTable({ rows }) {
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
                     {r.thinking_tokens > 0 ? (r.thinking_tokens).toLocaleString() : '—'}
                   </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                    {r.audio_tokens > 0 ? (r.audio_tokens).toLocaleString() : '—'}
+                  </td>
                   <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_input}</td>
-                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>${r.rate_output}</td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>
+                    ${r.rate_output}
+                    {r.rate_audio != null && r.rate_audio !== r.rate_input && (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> · 🔊${r.rate_audio}</span>
+                    )}
+                  </td>
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
                       title={thinkPct ? `${thinkPct}% of this model's cost` : ''}>
                     {r.thinking_cost > 0 ? fmtUsd(r.thinking_cost) : '—'}
                     {thinkPct >= 10 && (
                       <span style={{ color: 'var(--text-muted)', fontSize: 10 }}> ({thinkPct}%)</span>
                     )}
+                  </td>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+                      title="Extra vs pricing audio as text input">
+                    {r.audio_premium > 0 ? `+${fmtUsd(r.audio_premium)}` : '—'}
                   </td>
                   <td style={{ textAlign: 'right', paddingRight: 20, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>
                     {fmtUsd(r.cost)}
@@ -1184,6 +1208,10 @@ function PricingCard() {
       const out = parseFloat(r.output);
       if (Number.isFinite(inp) && Number.isFinite(out) && inp >= 0 && out >= 0) {
         cleaned[m] = { input: inp, output: out };
+        // Blank audio = "bill audio at the input rate"; only send a real value
+        // (and never drop an existing one on an unrelated edit).
+        const aud = parseFloat(r.audio);
+        if (Number.isFinite(aud) && aud >= 0) cleaned[m].audio = aud;
       }
     }
     const num = parseFloat(ratio);
@@ -1213,12 +1241,16 @@ function PricingCard() {
           ) : (
             <>
               <div style={{ overflowX: 'auto' }}>
-                <table className="yt-table" style={{ fontSize: 12, maxWidth: 560 }}>
+                <table className="yt-table" style={{ fontSize: 12, maxWidth: 660 }}>
                   <thead>
                     <tr>
                       <th>Model</th>
                       <th style={{ textAlign: 'right' }}>Input $/1M</th>
                       <th style={{ textAlign: 'right' }}>Output $/1M</th>
+                      <th style={{ textAlign: 'right' }}
+                          title="Audio-input rate. Vertex bills a video's soundtrack higher than text/video input. Blank = use the input rate.">
+                        🔊 Audio $/1M
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1236,6 +1268,13 @@ function PricingCard() {
                             style={{ width: 90, textAlign: 'right' }}
                             value={models[m]?.output ?? ''}
                             onChange={(e) => setRate(m, 'output', e.target.value)} />
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <input type="number" className="input" min="0" step="0.01"
+                            placeholder="= input"
+                            style={{ width: 90, textAlign: 'right' }}
+                            value={models[m]?.audio ?? ''}
+                            onChange={(e) => setRate(m, 'audio', e.target.value)} />
                         </td>
                       </tr>
                     ))}

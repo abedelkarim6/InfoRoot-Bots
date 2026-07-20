@@ -592,7 +592,8 @@ Example: ["keyword1", "keyword2", ...]"""
                                 input_tokens=getattr(sug_tokens, 'input', 0) or int(sug_tokens or 0),
                                 output_tokens=getattr(sug_tokens, 'output', 0),
                                 context=f"suggest-seos {bot_name}/{topic_name}",
-                                thinking_tokens=getattr(sug_tokens, 'thinking', 0))
+                                thinking_tokens=getattr(sug_tokens, 'thinking', 0),
+                                audio_tokens=getattr(sug_tokens, 'audio', 0))
             except Exception:
                 pass
 

@@ -61,11 +61,13 @@ def _is_rate_limited(exc: Exception) -> float | None:
     return float(m.group(1)) if m else 40.0
 
 
-def _extract_tokens(response) -> tuple[int, int, int]:
-    """Return (input_tokens, output_tokens, thinking_tokens) from a Gemini
-    response. `output` is the visible answer; `thinking` is the reasoning trace
-    (Gemini's "Thinking Text Output" SKU — billed at the output rate but tracked
-    separately so its cost is visible). See extract_gemini_tokens."""
+def _extract_tokens(response) -> tuple[int, int, int, int]:
+    """Return (input_tokens, output_tokens, thinking_tokens, audio_tokens) from
+    a Gemini response. `output` is the visible answer; `thinking` is the
+    reasoning trace (Gemini's "Thinking Text Output" SKU — billed at the output
+    rate); `audio` is the audio-modality share OF input (a subset, billed at a
+    higher rate than text/video — native video ingestion tokenizes the
+    soundtrack). See extract_gemini_tokens."""
     from utils.ai_pricing import extract_gemini_tokens
     return extract_gemini_tokens(getattr(response, 'usage_metadata', None))
 
@@ -130,9 +132,11 @@ def _yt_gen_config() -> types.GenerateContentConfig:
     return types.GenerateContentConfig(**kwargs)
 
 
-def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int, int, str]:
+def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, int, int, int, str]:
     """Strategy 1: Send YouTube URL directly to Vertex AI Gemini for native video understanding.
-    Returns (summary_text, input_tokens, output_tokens, thinking_tokens, thoughts)."""
+    Returns (summary_text, input_tokens, output_tokens, thinking_tokens, audio_tokens, thoughts).
+    This is the path that incurs audio-input billing (Gemini tokenizes the
+    video's soundtrack alongside the frames)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     response = _gemini_client.models.generate_content(
         model=get_gemini_model(),
@@ -145,9 +149,9 @@ def _summarize_via_gemini_video(video_id: str, prompt: str) -> tuple[str, int, i
         ),
         config=_yt_gen_config(),
     )
-    inp, out, think = _extract_tokens(response)
+    inp, out, think, audio = _extract_tokens(response)
     answer, thoughts = _split_response_parts(response)
-    return answer, inp, out, think, thoughts
+    return answer, inp, out, think, audio, thoughts
 
 
 def _fetch_transcript_text(video_id: str) -> str:
@@ -216,9 +220,10 @@ async def _fetch_external_video(video_id: str) -> dict | None:
 
 
 def _summarize_via_transcript(video_id: str, prompt: str,
-                              transcript_text: str = None) -> tuple[str, str, int, int, int, str]:
+                              transcript_text: str = None) -> tuple[str, str, int, int, int, int, str]:
     """Strategy 2: send transcript text to Gemini.
-    Returns (summary_text, transcript_text, input_tokens, output_tokens, thinking_tokens, thoughts).
+    Returns (summary_text, transcript_text, input_tokens, output_tokens, thinking_tokens, audio_tokens, thoughts).
+    Text-only input, so audio_tokens is normally 0 — wired for correctness.
     The returned transcript_text is the full (untruncated) raw text so it can
     be cached for later export — the prompt itself still gets truncated.
     A pre-fetched transcript can be passed to avoid a second YouTube round-trip.
@@ -242,9 +247,9 @@ def _summarize_via_transcript(video_id: str, prompt: str,
         contents={'text': final_prompt},
         config=_yt_gen_config(),
     )
-    inp, out, think = _extract_tokens(response)
+    inp, out, think, audio = _extract_tokens(response)
     answer, thoughts = _split_response_parts(response)
-    return answer, full_text, inp, out, think, thoughts
+    return answer, full_text, inp, out, think, audio, thoughts
 
 
 # Per-item processing timeout (seconds). Gemini video can be slow but rarely > 3 min.
@@ -482,6 +487,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     inp_tokens = 0
     out_tokens = 0
     think_tokens = 0  # thinking (reasoning) token count — its own billing SKU
+    audio_tokens = 0  # audio share OF inp_tokens (subset) — higher-rate SKU
     thoughts = ''  # Gemini reasoning trace — populated when thinking is enabled
     strat1_err = None  # Gemini native-video reason-for-failure
     strat2_err = None  # Transcript reason-for-failure
@@ -504,7 +510,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     try:
         if not _video_allowed:
             raise RuntimeError("Daily video-hour quota reached")
-        summary_text, inp_tokens, out_tokens, think_tokens, thoughts = await asyncio.wait_for(
+        summary_text, inp_tokens, out_tokens, think_tokens, audio_tokens, thoughts = await asyncio.wait_for(
             loop.run_in_executor(None, _summarize_via_gemini_video, video_id, prompt_video),
             timeout=_ITEM_TIMEOUT_SECS,
         )
@@ -535,7 +541,7 @@ async def process_queue_item(queue_item: dict) -> bool:
     if not summary_text and force_method != 'gemini_video':
         t_s2 = time.monotonic()
         try:
-            summary_text, transcript_text, inp_tokens, out_tokens, think_tokens, thoughts = await asyncio.wait_for(
+            summary_text, transcript_text, inp_tokens, out_tokens, think_tokens, audio_tokens, thoughts = await asyncio.wait_for(
                 loop.run_in_executor(None, _summarize_via_transcript, video_id, prompt_transcript, transcript_full),
                 timeout=_ITEM_TIMEOUT_SECS,
             )
@@ -585,6 +591,7 @@ async def process_queue_item(queue_item: dict) -> bool:
         input_tokens=inp_tokens or None,
         output_tokens=out_tokens or None,
         thinking_tokens=think_tokens or None,
+        audio_tokens=audio_tokens or None,
         prompt=user_prompt,
         thoughts=thoughts or None,
         transcript_text=transcript_text,

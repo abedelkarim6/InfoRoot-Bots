@@ -443,7 +443,8 @@ async def _send_with_split(client, target_chat, message_text):
             db.log_ai_usage(None, 'summaries', _client_model(llm_client),
                             getattr(sptk, 'input', 0), getattr(sptk, 'output', 0),
                             context="telegram-split",
-                            thinking_tokens=getattr(sptk, 'thinking', 0))
+                            thinking_tokens=getattr(sptk, 'thinking', 0),
+                            audio_tokens=getattr(sptk, 'audio', 0))
         except Exception:
             pass
         candidates = [p.strip() for p in split_text.split('SPLIT', 1) if p.strip()]
@@ -638,7 +639,7 @@ async def generate_and_send_summary(job_data):
                 so every compared model sees identical inputs — a fair A/B."""
                 from utils.ai_pricing import TokenUsage
                 _tokens = 0
-                _inp = _outp = _think = 0
+                _inp = _outp = _think = _audio = 0
                 _text = ''
                 _retries = 0
                 for attempt in range(MAX_EMPTY_RETRIES + 1):
@@ -654,6 +655,7 @@ async def generate_and_send_summary(job_data):
                         _inp += getattr(tk, 'input', 0)
                         _outp += getattr(tk, 'output', 0)
                         _think += getattr(tk, 'thinking', 0)
+                        _audio += getattr(tk, 'audio', 0)
                         _text = (s or '').strip()
                     else:
                         # Rare: > BATCH remaining messages. Roll the {final_interim}
@@ -674,6 +676,7 @@ async def generate_and_send_summary(job_data):
                             _inp += getattr(tk, 'input', 0)
                             _outp += getattr(tk, 'output', 0)
                             _think += getattr(tk, 'thinking', 0)
+                            _audio += getattr(tk, 'audio', 0)
                             if (s or '').strip():
                                 rolling_text = s.strip()
                         _text = (rolling_text or '').strip()
@@ -685,7 +688,7 @@ async def generate_and_send_summary(job_data):
                         break
                     if attempt < MAX_EMPTY_RETRIES:
                         _retries = attempt + 1
-                return _text, TokenUsage(_tokens, _inp, _outp, _think), _retries
+                return _text, TokenUsage(_tokens, _inp, _outp, _think, _audio), _retries
 
             # ── Primary model: this is what gets sent to Telegram ────────────
             summary_text, ptk, empty_retry_attempts = await _gen_one(llm_client.generate_summary)
@@ -728,7 +731,8 @@ async def generate_and_send_summary(job_data):
                                         None, 'summaries', cm,
                                         getattr(atk, 'input', 0), getattr(atk, 'output', 0),
                                         context=f"compare {bot_name}/{topic_name}",
-                                        thinking_tokens=getattr(atk, 'thinking', 0))
+                                        thinking_tokens=getattr(atk, 'thinking', 0),
+                                        audio_tokens=getattr(atk, 'audio', 0))
                                 except Exception:
                                     pass
                                 if alt_text:
@@ -825,6 +829,7 @@ async def generate_and_send_summary(job_data):
                 input_tokens=getattr(primary_usage, 'input', None) if primary_usage is not None else None,
                 output_tokens=getattr(primary_usage, 'output', None) if primary_usage is not None else None,
                 thinking_tokens=getattr(primary_usage, 'thinking', None) if primary_usage is not None else None,
+                audio_tokens=getattr(primary_usage, 'audio', None) if primary_usage is not None else None,
             )
 
         # ── Mark all messages as consumed for this schedule type ─────────────
@@ -977,7 +982,8 @@ async def generate_speech_buckets(job_data: dict):
             db.log_ai_usage(None, 'summaries', _client_model(llm_client),
                             getattr(stk, 'input', 0), getattr(stk, 'output', 0),
                             context=f"speech {bot_name}/{topic_name}",
-                            thinking_tokens=getattr(stk, 'thinking', 0))
+                            thinking_tokens=getattr(stk, 'thinking', 0),
+                            audio_tokens=getattr(stk, 'audio', 0))
         except Exception:
             pass
         buckets      = _parse_speech_buckets(llm_response)
@@ -1262,7 +1268,8 @@ async def check_and_run_interim_summary(bot_name: str, topic_name: str):
                         db.log_ai_usage(None, 'summaries', _client_model(llm_client),
                                         getattr(itk, 'input', 0), getattr(itk, 'output', 0),
                                         context=f"interim {bot_name}/{topic_name}",
-                                        thinking_tokens=getattr(itk, 'thinking', 0))
+                                        thinking_tokens=getattr(itk, 'thinking', 0),
+                                        audio_tokens=getattr(itk, 'audio', 0))
                     except Exception:
                         pass
 

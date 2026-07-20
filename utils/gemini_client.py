@@ -140,9 +140,10 @@ class GeminiClient:
                 # input / answer-output / thinking split for per-model,
                 # per-SKU cost accounting (thinking is its own billing line).
                 from utils.ai_pricing import TokenUsage, extract_gemini_tokens
-                inp = out = think = 0
+                inp = out = think = audio = 0
                 try:
-                    inp, out, think = extract_gemini_tokens(getattr(response, "usage_metadata", None))
+                    inp, out, think, audio = extract_gemini_tokens(
+                        getattr(response, "usage_metadata", None))
                     if not (inp or out or think):
                         inp = len(full_prompt) // 4
                         out = len(summary) // 4
@@ -151,7 +152,8 @@ class GeminiClient:
                 except Exception:
                     pass
 
-                return summary, TokenUsage(inp + out + think, inp, out, think)
+                # audio is inside inp — not added to the total
+                return summary, TokenUsage(inp + out + think, inp, out, think, audio)
 
             except Exception as e:
                 last_exc = e

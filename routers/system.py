@@ -258,7 +258,8 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
             from fastapi.responses import JSONResponse
             return JSONResponse({"status": "error", "message": "Admin only"}, status_code=403)
         from datetime import date, datetime
-        from utils.ai_pricing import get_pricing, cost_usd, blended_cost_usd, thinking_cost_usd
+        from utils.ai_pricing import (get_pricing, cost_usd, blended_cost_usd,
+                                      thinking_cost_usd, resolve_rates)
 
         def _parse(d, fallback):
             try:
@@ -289,14 +290,24 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         pricing = get_pricing(db)
 
         def _row_cost(feat, r):
-            """Exact cost of a row's recorded input/output/thinking split, plus a
-            blended estimate for any legacy combined-only tokens."""
+            """Exact cost of a row's recorded input/output/thinking/audio split,
+            plus a blended estimate for any legacy combined-only tokens."""
             c = cost_usd(r.get('model'), int(r.get('input_tokens') or 0),
-                         int(r.get('output_tokens') or 0), int(r.get('thinking_tokens') or 0), pricing)
+                         int(r.get('output_tokens') or 0), int(r.get('thinking_tokens') or 0),
+                         int(r.get('audio_tokens') or 0), pricing)
             legacy = int(r.get('legacy_tokens') or 0)
             if legacy:
                 c += blended_cost_usd(r.get('model'), legacy, pricing)
             return c
+
+        def _audio_premium_usd(r):
+            """The EXTRA cost of a row's audio tokens vs pricing them as text
+            input — i.e. what the flat-input model used to miss."""
+            audio = min(int(r.get('audio_tokens') or 0), int(r.get('input_tokens') or 0))
+            if not audio:
+                return 0.0
+            rates = resolve_rates(r.get('model'), pricing)
+            return audio * (rates.get('audio', rates['input']) - rates['input']) / 1_000_000
 
         def _row_tokens(r):
             t = r.get('tokens')
@@ -407,21 +418,23 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         for b in by_bot:
             b['cost'] = round(b['cost'], 4)
 
-        # ── per-model breakdown (usage + current rates + cost, incl. thinking) ─
-        from utils.ai_pricing import resolve_rates
+        # ── per-model breakdown (usage + current rates + cost, incl. thinking/audio) ─
         model_fold = {}
 
         def _add_model_rows(feat, rows):
             for r in rows:
                 m = r.get('model') or '(unknown)'
                 e = model_fold.setdefault(m, {'model': m, 'runs': 0, 'tokens': 0, 'cost': 0.0,
-                                              'thinking_tokens': 0, 'thinking_cost': 0.0})
+                                              'thinking_tokens': 0, 'thinking_cost': 0.0,
+                                              'audio_tokens': 0, 'audio_premium': 0.0})
                 e['runs'] += int(r.get('runs') or 0)
                 e['tokens'] += _row_tokens(r)
                 e['cost'] += _row_cost(feat, r)
                 th = int(r.get('thinking_tokens') or 0)
                 e['thinking_tokens'] += th
                 e['thinking_cost'] += thinking_cost_usd(r.get('model'), th, pricing)
+                e['audio_tokens'] += int(r.get('audio_tokens') or 0)
+                e['audio_premium'] += _audio_premium_usd(r)
 
         if 'summaries' in wanted:
             _add_model_rows('summaries', hist['series'])
@@ -433,13 +446,17 @@ def get_ai_usage_history(request: Request, date_from: str = None, date_to: str =
         for m in by_model:
             m['cost'] = round(m['cost'], 4)
             m['thinking_cost'] = round(m['thinking_cost'], 4)
+            m['audio_premium'] = round(m['audio_premium'], 4)
             rates = resolve_rates(None if m['model'] == '(unknown)' else m['model'], pricing)
             m['rate_input'] = rates['input']
             m['rate_output'] = rates['output']
+            m['rate_audio'] = rates.get('audio', rates['input'])
 
         totals = {
             'thinking_tokens': sum(m['thinking_tokens'] for m in by_model),
             'thinking_cost': round(sum(m['thinking_cost'] for m in by_model), 4),
+            'audio_tokens': sum(m['audio_tokens'] for m in by_model),
+            'audio_premium': round(sum(m['audio_premium'] for m in by_model), 4),
             'cost': round(sum(m['cost'] for m in by_model), 4),
         }
 
@@ -496,7 +513,17 @@ def set_ai_pricing(request: Request, data: dict = Body(...)):
                 continue
             if inp < 0 or out < 0:
                 continue
-            models[str(m).strip()] = {"input": inp, "output": out}
+            entry = {"input": inp, "output": out}
+            # Optional audio rate — blank/absent means "bill audio at the input
+            # rate". Must be persisted or an edit would silently drop it.
+            if rates.get("audio") not in (None, ""):
+                try:
+                    aud = float(rates.get("audio"))
+                    if aud >= 0:
+                        entry["audio"] = aud
+                except (TypeError, ValueError):
+                    pass
+            models[str(m).strip()] = entry
         payload = {"models": models}
         try:
             ratio = float(data.get("input_ratio"))
